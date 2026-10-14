@@ -380,9 +380,11 @@ Basic navigation diagnostics are recorded locally by day. In `Storage and logs`,
 
 Enable `Save diagnostic screenshots and extended logs` only when needed. It can save screenshots and unique cropped map images sent to the HUD. Full source map frames and repeated identical crops are not saved by map capture; with detailed logging off, it saves no map images. Manual Logcat is separate and can consume substantial storage during long recordings.
 
-`Share logs` offers Android sharing through `Another app`, or an explicit upload through `Send to developer`, with an optional comment. Archives too large for developer upload can be shared through another app. Nothing is uploaded automatically.
+`Share logs` offers Android sharing through `Another app`, `Save as…` through the system file picker, or an explicit upload through `Send to developer`, with an optional comment. Archives too large for developer upload can be shared through another app. Nothing is uploaded automatically.
 
-**Selected days limit navigation logs, but the entire patcher-report history is always included.** Configuration exports also include that history and available vehicle software/configuration needed for diagnosis. Configuration archives can be large, are split when needed, and their temporary sharing files expire after 15 minutes; send all volumes promptly.
+**Selected days limit navigation logs, but the entire patcher-report history is always included.** Configuration exports also include that history and available vehicle software/configuration needed for diagnosis. Choose `Share` or `Save as…` before collection, or use either action from the completed export card. Only sharing splits large configuration archives into volumes up to 1 GB; `Save as…` writes one complete ZIP to the chosen location. USB storage is available when Android's file picker exposes it.
+
+Temporary configuration archives expire 15 minutes after creation. A save already copying may finish after that deadline; leaving the file picker open does not extend it. Files saved to your chosen location are not removed by automatic export cleanup.
 
 Archives may contain coordinates, destinations, street names, screenshots and device information. Review the sharing warning and use a trusted recipient. See [Privacy](PRIVACY.md) for details.
 

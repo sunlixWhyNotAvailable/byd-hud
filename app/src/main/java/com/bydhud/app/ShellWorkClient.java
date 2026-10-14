@@ -28,14 +28,18 @@ final class ShellWorkClient {
             if (!entry.getKey().startsWith("share_work_")) continue;
             try {
                 JSONObject saved = new JSONObject(String.valueOf(entry.getValue()));
-                if (pendingShare(saved.optString("phase")) && !saved.optString("file").isEmpty())
+                if (pendingShare(saved) && !saved.optString("file").isEmpty())
                     retained.add(new File(saved.getString("file")).getAbsolutePath());
             } catch (org.json.JSONException unreadableShare) { retained.add("*"); }
         }
         return retained;
     }
 
-    private static boolean pendingShare(String phase) {
+    private static boolean pendingShare(JSONObject saved) {
+        String phase = saved.optString("phase");
+        if ("WAITING_FOR_DESTINATION".equals(phase) || "SAVING_DOCUMENT".equals(phase))
+            return ArchiveDocumentSave.isPendingLogSave(saved.optString("id"));
+        if ("SAVE_RESULT".equals(phase)) return false;
         return !phase.isEmpty() && !"READY".equals(phase) && !"SENT".equals(phase)
                 && !"FAILED".equals(phase) && !"CANCELLED".equals(phase);
     }
@@ -57,7 +61,7 @@ final class ShellWorkClient {
                 if (!entry.getKey().startsWith("share_work_")) continue;
                 try {
                     JSONObject saved = new JSONObject(String.valueOf(entry.getValue()));
-                    if (pendingShare(saved.optString("phase")))
+                    if (pendingShare(saved))
                         pending.add(entry.getKey().substring("share_work_".length()));
                 } catch (org.json.JSONException unreadableShare) { /* retainedArchives protects unknown archives. */ }
             }

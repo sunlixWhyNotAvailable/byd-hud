@@ -1,6 +1,7 @@
 package com.bydhud.app
 
 import android.content.Context
+import android.net.Uri
 import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -11,8 +12,11 @@ import java.util.concurrent.Executors
 
 enum class StorageLogSharePhase {
     WAITING_FOR_WRITES, COPYING, ARCHIVING, OVERSIZED, WAITING_FOR_SHARE, READY,
-    UPLOADING, SENT, FAILED, CANCELLING, CANCELLED
+    UPLOADING, SENT, FAILED, CANCELLING, CANCELLED,
+    WAITING_FOR_DESTINATION, SAVING_DOCUMENT, SAVE_RESULT
 }
+
+enum class ArchiveExportDestination { SHARE, SAVE_AS, DEVELOPER }
 
 data class StorageLogShareSnapshot(
     val operationId: String,
@@ -33,7 +37,13 @@ data class StorageLogShareSnapshot(
     val reportTitle: String = "",
     val dismissed: Boolean = false,
     val collectionOutcome: String = "",
-    val patchReportsIncomplete: Boolean = false
+    val patchReportsIncomplete: Boolean = false,
+    val destination: ArchiveExportDestination = ArchiveExportDestination.SHARE,
+    val savedBytes: Long = 0L,
+    val saveTotalBytes: Long = 0L,
+    val saveStartedAtElapsedMs: Long = 0L,
+    val saveSucceeded: Boolean? = null,
+    val saveCancelled: Boolean = false
 )
 
 internal fun storageLogShareElapsedSeconds(
@@ -119,7 +129,24 @@ object StorageLogShareWorkflow {
         report: SentryLogReport? = null,
         selectionRevision: Int = 0,
         restoredId: String? = null
+    ): Boolean = startWithDestination(context, days,
+        if (toDeveloper) ArchiveExportDestination.DEVELOPER else ArchiveExportDestination.SHARE,
+        selectedFileCount, selectedBytes, report, selectionRevision, restoredId)
+
+    @JvmStatic
+    @Synchronized
+    @JvmOverloads
+    fun startWithDestination(
+        context: Context,
+        days: List<String>,
+        destination: ArchiveExportDestination,
+        selectedFileCount: Int,
+        selectedBytes: Long,
+        report: SentryLogReport? = null,
+        selectionRevision: Int = 0,
+        restoredId: String? = null
     ): Boolean {
+        val toDeveloper = destination == ArchiveExportDestination.DEVELOPER
         if (toDeveloper && report == null) return false
         if (activePreparation != null || !MainActivity.claimShareOperation()) return false
         val app = context.applicationContext
@@ -147,11 +174,14 @@ object StorageLogShareWorkflow {
             selectedDays = submittedDays,
             selectionRevision = selectionRevision,
             toDeveloper = toDeveloper,
+            destination = restored?.optString("destination")?.let {
+                runCatching { ArchiveExportDestination.valueOf(it) }.getOrNull()
+            } ?: destination,
             reportTitle = if (toDeveloper) report!!.title else "",
             collectionOutcome = restored?.optString("collectionOutcome").orEmpty(),
             patchReportsIncomplete = restored?.optBoolean("patchReportsIncomplete", false) ?: false
         ))
-        log(operationId, "started destination=${if (toDeveloper) "sentry" else "android"} " +
+        log(operationId, "started destination=${destination.name.lowercase()} " +
             "days=${submittedDays.joinToString(",")}")
         return try {
             preparationWorker.execute {
@@ -225,6 +255,17 @@ object StorageLogShareWorkflow {
                 return
             }
             val detail = "${archive.file.name} ${archive.detail}".trim()
+            if (restored?.destination == ArchiveExportDestination.SAVE_AS) {
+                if (!transition(control, StorageLogSharePhase.WAITING_FOR_DESTINATION, detail,
+                        archive.file.absolutePath, archive.file.length())) {
+                    LogShareZip.deleteArtifact(archive.file)
+                    return
+                }
+                if (!MainActivity.queueArchiveDocumentSave(control.operationId, false, archive.file.name)) {
+                    saveAsFailed(control.operationId, "Unable to open destination picker")
+                }
+                return
+            }
             if (!toDeveloper) {
                 if (!transition(control, StorageLogSharePhase.WAITING_FOR_SHARE, detail,
                         archive.file.absolutePath, archive.file.length())) {
@@ -313,6 +354,9 @@ object StorageLogShareWorkflow {
     @Synchronized
     fun cancel(operationId: String): Boolean {
         val current = find(operationId) ?: return false
+        if (current.phase == StorageLogSharePhase.SAVING_DOCUMENT) {
+            return eventContext?.let { ArchiveDocumentSave.cancel(it, operationId) } == true
+        }
         if (current.phase !in setOf(
                 StorageLogSharePhase.WAITING_FOR_WRITES,
                 StorageLogSharePhase.COPYING,
@@ -354,6 +398,147 @@ object StorageLogShareWorkflow {
 
     @JvmStatic
     @Synchronized
+    fun saveAsDestination(operationId: String, uri: Uri): Boolean {
+        val current = find(operationId) ?: return false
+        if (current.phase != StorageLogSharePhase.WAITING_FOR_DESTINATION ||
+            current.destination != ArchiveExportDestination.SAVE_AS) return false
+        val archive = current.currentFile.takeIf { it.isNotEmpty() }?.let(::File)
+            ?.takeIf { it.isFile } ?: run {
+                saveAsFailed(operationId, "Prepared archive is missing")
+                return false
+            }
+        val app = eventContext ?: run {
+            saveAsFailed(operationId, "Workflow context unavailable")
+            return false
+        }
+        update(operationId) { it.copy(
+            phase = StorageLogSharePhase.SAVING_DOCUMENT,
+            savedBytes = 0L,
+            saveTotalBytes = archive.length(),
+            saveStartedAtElapsedMs = 0L,
+            saveSucceeded = null,
+            saveCancelled = false,
+            detail = ""
+        ) }
+        val accepted = runCatching {
+            ArchiveDocumentSave.request(app, operationId, uri, false, listOf(archive), archive.name, 0L)
+        }.getOrDefault(false)
+        if (!accepted) saveAsFailed(operationId, "Unable to start document copy")
+        return accepted
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun saveAsCancelled(operationId: String) {
+        if (find(operationId)?.phase != StorageLogSharePhase.WAITING_FOR_DESTINATION) return
+        completeDocumentSave(operationId, success = false, cancelled = true, detail = "")
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun saveAsFailed(operationId: String, detail: String): Boolean {
+        if (find(operationId)?.phase !in setOf(
+                StorageLogSharePhase.WAITING_FOR_DESTINATION,
+                StorageLogSharePhase.SAVING_DOCUMENT
+            )) return false
+        return completeDocumentSave(operationId, success = false, cancelled = false, detail = detail)
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun saveAsFailed(operationId: String, attemptToken: String, detail: String): Boolean {
+        if (!ArchiveDocumentSave.isLatestAttempt(operationId, attemptToken)) return false
+        return saveAsFailed(operationId, detail)
+    }
+
+    @JvmStatic
+    @Synchronized
+    private fun saveAsCleanupWarning(operationId: String, detail: String): Boolean {
+        val current = find(operationId) ?: return false
+        if (current.destination != ArchiveExportDestination.SAVE_AS || detail.isBlank()) return false
+        if (current.phase in setOf(StorageLogSharePhase.WAITING_FOR_DESTINATION,
+                StorageLogSharePhase.SAVING_DOCUMENT)) {
+            return completeDocumentSave(operationId, success = false, cancelled = false, detail = detail)
+        }
+        if (current.phase == StorageLogSharePhase.SAVE_RESULT) {
+            if (current.detail != detail) {
+                update(operationId) { it.copy(detail = detail) }
+                log(operationId, "document_save_cleanup_warning detail=${safe(detail)}")
+            }
+            return !current.dismissed
+        }
+        return false
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun saveAsCleanupWarning(operationId: String, attemptToken: String, detail: String): Boolean {
+        if (!ArchiveDocumentSave.isLatestAttempt(operationId, attemptToken)) return false
+        return saveAsCleanupWarning(operationId, detail)
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun documentSaveStarted(operationId: String, totalBytes: Long) {
+        val current = find(operationId) ?: return
+        if (current.phase != StorageLogSharePhase.SAVING_DOCUMENT || current.saveStartedAtElapsedMs > 0L) return
+        val updated = update(operationId) { it.copy(
+            saveTotalBytes = totalBytes.coerceAtLeast(0L),
+            saveStartedAtElapsedMs = SystemClock.elapsedRealtime()
+        ) } ?: return
+        log(operationId, "document_save_started bytes=${updated.saveTotalBytes}")
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun documentSaveProgress(operationId: String, copiedBytes: Long, totalBytes: Long) {
+        if (find(operationId)?.phase != StorageLogSharePhase.SAVING_DOCUMENT) return
+        update(operationId, persistChange = false) { it.copy(
+            savedBytes = copiedBytes.coerceAtLeast(0L),
+            saveTotalBytes = totalBytes.coerceAtLeast(0L)
+        ) }
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun documentSaveFinished(operationId: String, success: Boolean, cancelled: Boolean, detail: String) {
+        completeDocumentSave(operationId, success, cancelled, detail)
+    }
+
+    @Synchronized
+    private fun completeDocumentSave(
+        operationId: String,
+        success: Boolean,
+        cancelled: Boolean,
+        detail: String
+    ): Boolean {
+        val current = find(operationId) ?: return false
+        if (current.phase !in setOf(
+                StorageLogSharePhase.WAITING_FOR_DESTINATION,
+                StorageLogSharePhase.SAVING_DOCUMENT
+            )) return false
+        LogShareZip.deleteArtifact(current.currentFile.takeIf { it.isNotEmpty() }?.let(::File))
+        val ended = SystemClock.elapsedRealtime()
+        val updated = update(operationId) { it.copy(
+            phase = StorageLogSharePhase.SAVE_RESULT,
+            detail = detail,
+            currentFile = "",
+            savedBytes = if (success) it.saveTotalBytes else it.savedBytes,
+            saveSucceeded = success,
+            saveCancelled = cancelled,
+            endedAtElapsedMs = ended
+        ) } ?: return false
+        log(operationId, "document_save_result success=$success cancelled=$cancelled " +
+            "bytes=${updated.savedBytes}/${updated.saveTotalBytes} " +
+            "duration_s=${if (updated.saveStartedAtElapsedMs > 0L)
+                ((updated.endedAtElapsedMs - updated.saveStartedAtElapsedMs).coerceAtLeast(0L) / 1000L) else 0L} " +
+            "detail=${safe(detail)}")
+        eventContext?.let { MainActivity.refreshAfterStorageShare(it, "document-save") }
+        return true
+    }
+
+    @JvmStatic
+    @Synchronized
     fun dismiss(operationId: String): Boolean {
         val current = find(operationId) ?: return false
         if (current.phase in setOf(
@@ -362,7 +547,9 @@ object StorageLogShareWorkflow {
                 StorageLogSharePhase.ARCHIVING,
                 StorageLogSharePhase.CANCELLING,
                 StorageLogSharePhase.OVERSIZED,
-                StorageLogSharePhase.WAITING_FOR_SHARE
+                StorageLogSharePhase.WAITING_FOR_SHARE,
+                StorageLogSharePhase.WAITING_FOR_DESTINATION,
+                StorageLogSharePhase.SAVING_DOCUMENT
             )) return false
         update(operationId) { it.copy(dismissed = true) }
         log(operationId, "dismissed phase=${current.phase}")
@@ -389,6 +576,9 @@ object StorageLogShareWorkflow {
     @Synchronized
     private fun shutdownLocked() {
         generation += 1L
+        val savingIds = state.value.filter { it.phase == StorageLogSharePhase.SAVING_DOCUMENT }
+            .map { it.operationId }
+        eventContext?.let { app -> savingIds.forEach { ArchiveDocumentSave.cancel(app, it) } }
         activePreparation?.let {
             it.cancelWorker()
             releasePreparation(it)
@@ -534,6 +724,7 @@ object StorageLogShareWorkflow {
     @Synchronized
     private fun update(
         operationId: String,
+        persistChange: Boolean = true,
         transform: (StorageLogShareSnapshot) -> StorageLogShareSnapshot
     ): StorageLogShareSnapshot? {
         val (updated, changed) = updateStorageLogShareOperation(
@@ -541,7 +732,7 @@ object StorageLogShareWorkflow {
         if (changed == null) return null
         state.value = updated
         if (latestState.value?.operationId == operationId) latestState.value = changed
-        persist(changed)
+        if (persistChange) persist(changed)
         return changed
     }
 
@@ -557,7 +748,9 @@ object StorageLogShareWorkflow {
                 StorageLogSharePhase.WAITING_FOR_WRITES,
                 StorageLogSharePhase.COPYING,
                 StorageLogSharePhase.ARCHIVING,
-                StorageLogSharePhase.WAITING_FOR_SHARE
+                StorageLogSharePhase.WAITING_FOR_SHARE,
+                StorageLogSharePhase.WAITING_FOR_DESTINATION,
+                StorageLogSharePhase.SAVING_DOCUMENT
             )
         }
         for (old in before) if (state.value.none { it.operationId == old.operationId })
@@ -575,6 +768,9 @@ object StorageLogShareWorkflow {
             val id = value.getString("id")
             val days = ShellWorkEntryPoint.strings(value.getJSONArray("days"))
             val developer = value.optBoolean("developer")
+            val destination = value.optString("destination").let {
+                runCatching { ArchiveExportDestination.valueOf(it) }.getOrNull()
+            } ?: if (developer) ArchiveExportDestination.DEVELOPER else ArchiveExportDestination.SHARE
             val report = if (developer) SentryLogReport(value.optString("comment"), value.optString("title")) else null
             if (phase in setOf(StorageLogSharePhase.WAITING_FOR_WRITES, StorageLogSharePhase.COPYING,
                     StorageLogSharePhase.ARCHIVING, StorageLogSharePhase.UPLOADING, StorageLogSharePhase.CANCELLING,
@@ -586,14 +782,50 @@ object StorageLogShareWorkflow {
                     foundFiles = value.optInt("count"), knownBytes = value.optLong("bytes"),
                     selectionRevision = value.optInt("revision"), inventoryComplete = true,
                     collectionOutcome = value.optString("collectionOutcome"),
-                    patchReportsIncomplete = value.optBoolean("patchReportsIncomplete", false)))
+                    patchReportsIncomplete = value.optBoolean("patchReportsIncomplete", false),
+                    destination = destination))
                 // A single preparation queue resumes the same retained jobs, never a new upload.
                 restorationWorker.execute {
                     while (!HudPrefs.isUserShutdownActive(context)) {
-                        if (start(context, days, developer, value.optInt("count"), value.optLong("bytes"),
+                        if (startWithDestination(context, days, destination,
+                                value.optInt("count"), value.optLong("bytes"),
                                 report, value.optInt("revision"), id)) break
                         Thread.sleep(100)
                     }
+                }
+            } else if (phase == StorageLogSharePhase.WAITING_FOR_DESTINATION ||
+                phase == StorageLogSharePhase.SAVING_DOCUMENT) {
+                val snapshot = StorageLogShareSnapshot(id, phase, value.getLong("started"), value.getLong("elapsed"),
+                    value.optLong("ended"), selectedDays = days, toDeveloper = developer,
+                    currentFile = value.optString("file"), archiveBytes = value.optLong("archiveBytes"),
+                    detail = value.optString("detail"), eventId = value.optString("event"),
+                    dismissed = value.optBoolean("dismissed"), reportTitle = value.optString("title"),
+                    selectionRevision = value.optInt("revision"), foundFiles = value.optInt("count"),
+                    knownBytes = value.optLong("bytes"), inventoryComplete = true,
+                    collectionOutcome = value.optString("collectionOutcome"),
+                    patchReportsIncomplete = value.optBoolean("patchReportsIncomplete", false),
+                    destination = destination, savedBytes = value.optLong("savedBytes"),
+                    saveTotalBytes = value.optLong("saveTotalBytes"),
+                    saveStartedAtElapsedMs = value.optLong("saveStartedAtElapsed"),
+                    saveSucceeded = if (value.has("saveSucceeded")) value.optBoolean("saveSucceeded") else null,
+                    saveCancelled = value.optBoolean("saveCancelled"))
+                addSnapshot(snapshot)
+                if (phase == StorageLogSharePhase.SAVING_DOCUMENT) {
+                    if (ArchiveDocumentSave.wasSaved(id)) {
+                        documentSaveFinished(id, success = true, cancelled = false, detail = "")
+                    } else if (ArchiveDocumentSave.wasInterrupted(id) ||
+                        (!ArchiveDocumentSave.isCopying(id) && !ArchiveDocumentSave.isRecovering(id))) {
+                        saveAsFailed(id, ArchiveDocumentSave.recoveryDetail(id))
+                    }
+                } else if (snapshot.destination == ArchiveExportDestination.SAVE_AS &&
+                    snapshot.currentFile.isNotEmpty() && File(snapshot.currentFile).isFile) {
+                    if (ArchiveDocumentSave.wasInterrupted(id)) {
+                        saveAsFailed(id, ArchiveDocumentSave.recoveryDetail(id))
+                    } else if (!MainActivity.queueArchiveDocumentSave(id, false, File(snapshot.currentFile).name)) {
+                        saveAsFailed(id, "Unable to restore destination picker")
+                    }
+                } else {
+                    saveAsFailed(id, "Prepared archive is missing")
                 }
             } else {
                 val snapshot = StorageLogShareSnapshot(id, phase, value.getLong("started"), value.getLong("elapsed"),
@@ -604,7 +836,12 @@ object StorageLogShareWorkflow {
                     selectionRevision = value.optInt("revision"), foundFiles = value.optInt("count"),
                     knownBytes = value.optLong("bytes"), inventoryComplete = true,
                     collectionOutcome = value.optString("collectionOutcome"),
-                    patchReportsIncomplete = value.optBoolean("patchReportsIncomplete", false))
+                    patchReportsIncomplete = value.optBoolean("patchReportsIncomplete", false),
+                    destination = destination, savedBytes = value.optLong("savedBytes"),
+                    saveTotalBytes = value.optLong("saveTotalBytes"),
+                    saveStartedAtElapsedMs = value.optLong("saveStartedAtElapsed"),
+                    saveSucceeded = if (value.has("saveSucceeded")) value.optBoolean("saveSucceeded") else null,
+                    saveCancelled = value.optBoolean("saveCancelled"))
                 if (report != null) reports[id] = report
                 addSnapshot(snapshot)
             }
@@ -622,6 +859,9 @@ object StorageLogShareWorkflow {
             .put("archiveBytes", current.archiveBytes).put("detail", current.detail).put("event", current.eventId)
             .put("dismissed", current.dismissed).put("collectionOutcome", current.collectionOutcome)
             .put("patchReportsIncomplete", current.patchReportsIncomplete)
+            .put("destination", current.destination.name).put("savedBytes", current.savedBytes)
+            .put("saveTotalBytes", current.saveTotalBytes).put("saveStartedAtElapsed", current.saveStartedAtElapsedMs)
+            .put("saveSucceeded", current.saveSucceeded).put("saveCancelled", current.saveCancelled)
         ShellRuntimeSession.prefs(app).edit().putString("share_work_" + current.operationId, value.toString()).commit()
     }
 

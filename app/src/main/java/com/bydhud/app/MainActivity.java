@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 //hosts the Compose UI so diagnostics, permissions, logs, and update controls share one app surface.
 
 import android.content.ClipData;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
@@ -34,6 +35,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
+import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.content.FileProvider;
@@ -239,6 +241,7 @@ public final class MainActivity extends ComponentActivity {
                 requestRuntimeStatusRefresh(this, true, "overlay-permission-return");
                 maybeStartPendingAdbAuthorization();
             });
+    private final Map<String, ActivityResultLauncher<Intent>> archiveDocumentLaunchers = new HashMap<>();
     private boolean exitRequested;
     private boolean arrowCuratedMode = true;
     private boolean pngVisible = true;
@@ -264,6 +267,7 @@ public final class MainActivity extends ComponentActivity {
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        restoreArchiveDocumentLaunchers();
         mainDisplayGuard.check(this, "create");
         overlayPermissionFlow = savedInstanceState != null
                 && savedInstanceState.getBoolean("overlay-permission-flow", false);
@@ -340,6 +344,7 @@ public final class MainActivity extends ComponentActivity {
         requestRuntimeUiStateRefresh(this, true, "activity-resume");
         NavAccessibilityService.resumeSteeringRuntime(this, "activity-resume");
         notifyPendingShare();
+        notifyArchiveDocumentPicker();
     }
 
     @Override
@@ -398,6 +403,8 @@ public final class MainActivity extends ComponentActivity {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     protected void onDestroy() {
         destroyed = true;
+        for (ActivityResultLauncher<Intent> launcher : archiveDocumentLaunchers.values()) launcher.unregister();
+        archiveDocumentLaunchers.clear();
         handler.removeCallbacks(overlayPermissionRetry);
         if (NavAccessibilityService.isKeyLearning()) {
             NavAccessibilityService.cancelKeyLearning();
@@ -2327,6 +2334,14 @@ public final class MainActivity extends ComponentActivity {
                 report, selectionRevision);
     }
 
+    public boolean composeBeginStorageShare(List<String> days, ArchiveExportDestination destination,
+            int selectedFileCount, long selectedBytes, SentryLogReport report,
+            int selectionRevision) {
+        return StorageLogShareWorkflow.startWithDestination(getApplicationContext(),
+                immutableStorageDays(days), destination, selectedFileCount, selectedBytes,
+                report, selectionRevision);
+    }
+
     public void composeCancelStorageShare(String operationId) {
         StorageLogShareWorkflow.cancel(operationId);
     }
@@ -2341,6 +2356,15 @@ public final class MainActivity extends ComponentActivity {
 
     public boolean composeBeginConfigurationExport() {
         return VehicleConfigurationExport.start(getApplicationContext());
+    }
+
+    public boolean composeBeginConfigurationExport(boolean saveAsAfterExport) {
+        return VehicleConfigurationExport.startWithDestination(getApplicationContext(),
+                saveAsAfterExport ? ArchiveExportDestination.SAVE_AS : ArchiveExportDestination.SHARE);
+    }
+
+    public boolean composeSaveConfigurationExport(String operationId) {
+        return VehicleConfigurationExport.saveAsReady(operationId);
     }
 
     public void composeCancelConfigurationExport() { VehicleConfigurationExport.cancel(); }
@@ -2360,6 +2384,13 @@ public final class MainActivity extends ComponentActivity {
     static void queueStorageShare(File file, List<String> storageDays, String operationId) {
         queuePendingShare(Collections.singletonList(file), immutableStorageDays(storageDays), ShareOwner.STORAGE_LOGS,
                 operationId);
+    }
+
+    static boolean queueArchiveDocumentSave(String operationId, boolean configuration,
+            String displayName) {
+        boolean accepted = ArchiveDocumentSave.queuePicker(operationId, configuration, displayName);
+        if (accepted) notifyArchiveDocumentPicker();
+        return accepted;
     }
 
 
@@ -2478,6 +2509,128 @@ public final class MainActivity extends ComponentActivity {
         if (current != null) {
             current.handler.post(current::deliverPendingShare);
         }
+    }
+
+    private static void notifyArchiveDocumentPicker() {
+        MainActivity current = RESUMED_ACTIVITY.get();
+        if (current != null) current.handler.post(current::launchPendingArchiveDocumentPicker);
+    }
+
+    private void restoreArchiveDocumentLaunchers() {
+        for (ArchiveDocumentSave.PickerRequest orphan : ArchiveDocumentSave.orphanedPickers(this))
+            registerArchiveDocumentLauncher(orphan);
+        ArchiveDocumentSave.PickerRequest pending = ArchiveDocumentSave.pendingPicker(this);
+        if (pending != null) {
+            registerArchiveDocumentLauncher(pending);
+            ArchiveDocumentSave.abandonPriorProcessPicker(this, pending);
+        }
+    }
+
+    private ActivityResultLauncher<Intent> registerArchiveDocumentLauncher(
+            ArchiveDocumentSave.PickerRequest request) {
+        String key = ArchiveDocumentSave.activityResultKey(request);
+        ActivityResultLauncher<Intent> existing = archiveDocumentLaunchers.get(key);
+        if (existing != null) return existing;
+        // The key belongs to this attempt, including results delivered after process recreation.
+        ActivityResultLauncher<Intent> launcher = getActivityResultRegistry().register(key,
+                new ActivityResultContracts.StartActivityForResult(), result -> {
+                    try { onArchiveDocumentResult(request, result); }
+                    finally {
+                        // register() can synchronously deliver a result before it returns its launcher.
+                        handler.post(() -> {
+                            ActivityResultLauncher<Intent> finished = archiveDocumentLaunchers.remove(key);
+                            if (finished != null) finished.unregister();
+                        });
+                    }
+                });
+        archiveDocumentLaunchers.put(key, launcher);
+        return launcher;
+    }
+
+    private void launchPendingArchiveDocumentPicker() {
+        if (!activityResumed || destroyed || exitRequested || RESUMED_ACTIVITY.get() != this) return;
+        ArchiveDocumentSave.PickerRequest pending = ArchiveDocumentSave.pendingPicker(this);
+        if (pending == null || !"QUEUED".equals(pending.phase)
+                || !ArchiveDocumentSave.processSession().equals(pending.processSession)) return;
+        ActivityResultLauncher<Intent> launcher = registerArchiveDocumentLauncher(pending);
+        if (!ArchiveDocumentSave.markPickerLaunched(this, pending)) return;
+        Intent create = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("application/zip")
+                .putExtra(Intent.EXTRA_TITLE, pending.displayName)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            launcher.launch(create);
+        } catch (RuntimeException failure) {
+            ArchiveDocumentSave.clearPicker(this, pending);
+            failArchiveDocumentSave(pending, "Unable to open destination picker");
+            archiveDocumentLaunchers.remove(ArchiveDocumentSave.activityResultKey(pending));
+            launcher.unregister();
+            AppEventLogger.event(this, "archive_document_picker_launch_failed id=" + pending.id);
+        }
+    }
+
+    private void onArchiveDocumentResult(ArchiveDocumentSave.PickerRequest pending, ActivityResult result) {
+        Intent data = result.getData();
+        Uri uri = data == null ? null : data.getData();
+        int flags = data == null ? 0 : data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        ArchiveDocumentSave.abandonPriorProcessPicker(this, pending);
+        if (!ArchiveDocumentSave.isCurrentPicker(this, pending)) {
+            if (result.getResultCode() == RESULT_OK && uri != null
+                    && ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
+                ArchiveDocumentSave.cleanupOrphanedCreatedDocument(this, pending, uri, flags);
+            } else ArchiveDocumentSave.clearOrphanedPicker(this, pending);
+            return;
+        }
+        if (result.getResultCode() != RESULT_OK || uri == null) {
+            ArchiveDocumentSave.clearPicker(this, pending);
+            cancelArchiveDocumentSave(pending);
+            return;
+        }
+        if (!ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
+            ArchiveDocumentSave.clearPicker(this, pending);
+            failArchiveDocumentSave(pending, "Destination provider returned an unsupported document");
+            return;
+        }
+        if (!ArchiveDocumentSave.recordPickerResult(this, pending, uri, flags)
+                || !ArchiveDocumentSave.persistPickerPermission(this, pending, uri, flags)) {
+            ArchiveDocumentSave.cleanupCreatedDocument(this, pending, uri, 0, true);
+            return;
+        }
+        boolean accepted = pending.configuration
+                ? VehicleConfigurationExport.saveAsDestination(pending.id, uri)
+                : StorageLogShareWorkflow.saveAsDestination(pending.id, uri);
+        if (!accepted) {
+            ArchiveDocumentSave.PickerRequest saved = ArchiveDocumentSave.pendingPicker(this);
+            ArchiveDocumentSave.cleanupCreatedDocument(this, pending, uri,
+                    saved == null ? 0 : saved.persistedFlags, true);
+        }
+    }
+
+    static void showArchiveDocumentCleanupWarning(Context context) {
+        Context app = context.getApplicationContext();
+        new Handler(Looper.getMainLooper()).post(() -> {
+            String language = HudPrefs.uiLanguage(app);
+            String message = "uk".equals(language)
+                    ? "Не вдалося видалити незавершений файл. Видаліть його вручну."
+                    : "ru".equals(language)
+                    ? "Не удалось удалить незавершённый файл. Удалите его вручную."
+                    : "The incomplete file could not be removed. Delete it manually.";
+            Toast.makeText(app, message, Toast.LENGTH_LONG).show();
+        });
+    }
+
+    private static void cancelArchiveDocumentSave(ArchiveDocumentSave.PickerRequest pending) {
+        if (pending.configuration) VehicleConfigurationExport.saveAsCancelled(pending.id);
+        else StorageLogShareWorkflow.saveAsCancelled(pending.id);
+    }
+
+    private static void failArchiveDocumentSave(ArchiveDocumentSave.PickerRequest pending, String detail) {
+        if (pending.configuration) VehicleConfigurationExport.saveAsFailed(pending.id, detail);
+        else StorageLogShareWorkflow.saveAsFailed(pending.id, detail);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

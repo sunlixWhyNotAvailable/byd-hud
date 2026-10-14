@@ -596,11 +596,15 @@ private data class OperationCardSpec(
     val closeEnabled: Boolean,
     val details: String = "",
     val primaryActionText: String = "",
+    val secondaryActionText: String = "",
+    val stopActionText: String = "",
     val configuration: ConfigurationExportSnapshot? = null,
+    val progressPercent: Int? = null,
     val failed: Boolean,
     val success: Boolean,
     val onStop: () -> Unit,
     val onPrimary: () -> Unit = {},
+    val onSecondary: () -> Unit = {},
     val onClose: () -> Unit
 )
 
@@ -870,6 +874,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var storageSelectionRevision by rememberSaveable { mutableIntStateOf(0) }
     var handledStorageShareLaunchId by rememberSaveable { mutableStateOf(0L) }
     var handledSentryOperationIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var handledStorageSaveOperationIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var pendingStorageDeleteDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteQueue by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteBusy by remember { mutableStateOf(false) }
@@ -1258,6 +1263,22 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         }
     }
 
+    fun startStorageExport(destination: ArchiveExportDestination, report: SentryLogReport? = null) {
+        if (activity.composeBeginStorageShare(
+                storageShareDays.toList(),
+                destination,
+                storageShareSummaryFileCount,
+                storageShareSummaryBytes,
+                report,
+                storageSelectionRevision
+            )) {
+            storageShareSummaryVisible = false
+            storageShareDays = emptyList()
+        } else {
+            activity.composeAppendStatus("Storage share already running")
+        }
+    }
+
     fun runLogcatAction(start: Boolean) {
         if (logcatBusy) return
         logcatBusy = true
@@ -1270,9 +1291,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         }
     }
 
-    fun beginConfigurationShare() {
+    fun beginConfigurationExport(saveAs: Boolean) {
         if (configurationShareBusy) return
-        if (activity.composeBeginConfigurationExport()) {
+        if (activity.composeBeginConfigurationExport(saveAs)) {
             configurationShareVisible = false
             configurationStartFailed = false
         } else {
@@ -1374,6 +1395,20 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
 
     LaunchedEffect(storageLogShares, storageSelectionRevision) {
         storageLogShares.forEach { operation ->
+            if (operation.destination == ArchiveExportDestination.SAVE_AS &&
+                operation.phase == StorageLogSharePhase.SAVE_RESULT &&
+                operation.saveSucceeded == true &&
+                operation.operationId !in handledStorageSaveOperationIds
+            ) {
+                handledStorageSaveOperationIds = handledStorageSaveOperationIds + operation.operationId
+                if (operation.selectionRevision == storageSelectionRevision) {
+                    val savedDays = operation.selectedDays.toSet()
+                    if (savedDays.isNotEmpty()) {
+                        selectedStorageDays = selectedStorageDays.filterNot { it in savedDays }
+                        storageSelectionRevision += 1
+                    }
+                }
+            }
             if (operation.operationId in handledSentryOperationIds) return@forEach
             if (!operation.toDeveloper) return@forEach
             if (operation.phase != StorageLogSharePhase.SENT && operation.phase != StorageLogSharePhase.READY) {
@@ -1717,6 +1752,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             onCancelConfiguration = { activity.composeCancelConfigurationExport() },
             onCloseConfiguration = { activity.composeDismissConfigurationExport() },
             onShareConfiguration = { activity.composeShareConfigurationExport() },
+            onSaveConfiguration = { id -> activity.composeSaveConfigurationExport(id) },
             onCancelPatch = { profileId ->
                 updateScope.launch {
                     withContext(Dispatchers.IO) {
@@ -1939,20 +1975,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 },
                 sentryButtonEnabled = sentryButtonRemaining == 0,
                 onAnotherApp = {
-                    if (activity.composeBeginStorageShare(
-                            storageShareDays,
-                            false,
-                            storageShareSummaryFileCount,
-                            storageShareSummaryBytes,
-                            null,
-                            storageSelectionRevision
-                        )) {
-                        storageShareSummaryVisible = false
-                        storageShareDays = emptyList()
-                    } else {
-                        activity.composeAppendStatus("Storage share already running")
-                    }
+                    startStorageExport(ArchiveExportDestination.SHARE)
                 },
+                onSaveAs = { startStorageExport(ArchiveExportDestination.SAVE_AS) },
                 onCancel = {
                     storageShareSummaryVisible = false
                     storageShareDays = emptyList()
@@ -1984,7 +2009,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                             )
                             if (activity.composeBeginStorageShare(
                                     storageShareDays.toList(),
-                                    true,
+                                    ArchiveExportDestination.DEVELOPER,
                                     storageShareSummaryFileCount,
                                     storageShareSummaryBytes,
                                     report,
@@ -2027,7 +2052,8 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                     "Another operation is still running. Wait and try again",
                     "Другая операция ещё выполняется. Подождите и повторите попытку"),
                 language = copy.language,
-                onCreate = { beginConfigurationShare() },
+                onShare = { beginConfigurationExport(saveAs = false) },
+                onSaveAs = { beginConfigurationExport(saveAs = true) },
                 onCancel = { configurationShareVisible = false }
             )
         }
@@ -4873,9 +4899,10 @@ private fun StorageShareDestinationOverlay(
     sentryButtonText: String,
     sentryButtonEnabled: Boolean,
     onAnotherApp: () -> Unit,
+    onSaveAs: () -> Unit,
     onCancel: () -> Unit
 ) {
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
@@ -4884,10 +4911,12 @@ private fun StorageShareDestinationOverlay(
         ModalInputBlocker()
         Column(
             modifier = Modifier
-                .width(560.dp)
+                .width(minOf(880.dp, (maxWidth - 72.dp).coerceAtLeast(0.dp)))
+                .heightIn(max = (maxHeight - 72.dp).coerceAtLeast(0.dp))
                 .clip(RoundedCornerShape(8.dp))
                 .background(palette.surface)
                 .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .verticalScroll(rememberScrollState())
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -4949,11 +4978,19 @@ private fun StorageShareDestinationOverlay(
                     width = 210.dp,
                     onClick = onSentry
                 )
-                HudButton(
+                ShareIconLabelButton(
                     shareCopy.shareToAnotherApp,
                     palette,
-                    width = 150.dp,
+                    enabled = true,
+                    width = 190.dp,
                     onClick = onAnotherApp
+                )
+                HudButton(
+                    copy.language.choose("Зберегти як…", "Save as…", "Сохранить как…"),
+                    palette,
+                    mainBackground = true,
+                    width = 190.dp,
+                    onClick = onSaveAs
                 )
                 HudButton(shareCopy.cancel, palette, width = 138.dp, onClick = onCancel)
             }
@@ -5080,6 +5117,7 @@ private fun OperationProgressStack(
     onCancelConfiguration: () -> Unit,
     onCloseConfiguration: () -> Unit,
     onShareConfiguration: () -> Unit,
+    onSaveConfiguration: (String) -> Unit,
     onCancelPatch: (String) -> Unit,
     onDismissPatch: (String) -> Unit
 ) {
@@ -5092,6 +5130,19 @@ private fun OperationProgressStack(
             val busy = storageLogShareBusy(state.phase)
             val sending = state.phase == StorageLogSharePhase.UPLOADING
             val terminal = !busy
+            val operationDetail = buildString {
+                if (state.collectionOutcome == "PARTIAL") append(language.choose(
+                    "Збирання журналів було частковим.", "Log collection was partial.", "Сбор журналов был частичным."))
+                if (state.patchReportsIncomplete) {
+                    if (isNotEmpty()) append("\n")
+                    append(language.choose(
+                        "Є незавершені звіти патчера.", "Some patch reports are incomplete.", "Есть незавершённые отчёты патчера."))
+                }
+                if (state.detail.isNotBlank()) {
+                    if (isNotEmpty()) append("\n")
+                    append(state.detail)
+                }
+            }
             val phase = when (state.phase) {
                 StorageLogSharePhase.WAITING_FOR_WRITES -> shareCopy.waitingForWrites
                 StorageLogSharePhase.COPYING -> shareCopy.copying
@@ -5104,8 +5155,23 @@ private fun OperationProgressStack(
                 StorageLogSharePhase.FAILED -> shareCopy.failure
                 StorageLogSharePhase.CANCELLING -> language.choose("Зупинення", "Stopping", "Остановка")
                 StorageLogSharePhase.CANCELLED -> language.choose("Скасовано", "Cancelled", "Отменено")
+                StorageLogSharePhase.WAITING_FOR_DESTINATION -> language.choose(
+                    "Очікування місця збереження", "Waiting for destination", "Ожидание места сохранения")
+                StorageLogSharePhase.SAVING_DOCUMENT -> language.choose(
+                    "Збереження ZIP", "Saving ZIP", "Сохранение ZIP")
+                StorageLogSharePhase.SAVE_RESULT -> when {
+                    state.saveSucceeded == true -> language.choose("Збережено", "Saved", "Сохранено")
+                    state.saveCancelled -> language.choose("Збереження скасовано", "Save cancelled", "Сохранение отменено")
+                    else -> language.choose("Не вдалося зберегти", "Save failed", "Не удалось сохранить")
+                }
             }
-            val summary = buildString {
+            val summary = if (state.destination == ArchiveExportDestination.SAVE_AS &&
+                state.phase in setOf(
+                    StorageLogSharePhase.WAITING_FOR_DESTINATION,
+                    StorageLogSharePhase.SAVING_DOCUMENT,
+                    StorageLogSharePhase.SAVE_RESULT
+                )
+            ) state.detail else buildString {
                 if (state.collectionOutcome == "PARTIAL") append(language.choose(
                     "Журнали зібрано частково · ", "Logs collected partially · ", "Журналы собраны частично · "))
                 if (state.patchReportsIncomplete) append(language.choose(
@@ -5122,27 +5188,41 @@ private fun OperationProgressStack(
             }
             add(OperationCardSpec(
                 key = "share-${state.operationId}",
-                title = shareCopy.uploadTitle,
+                title = if (state.destination == ArchiveExportDestination.SAVE_AS) {
+                    language.choose("Збереження журналів", "Saving logs", "Сохранение журналов")
+                } else shareCopy.uploadTitle,
                 phase = phase,
                 detail = summary,
                 startedAt = state.startedAtEpochMs,
                 startedAtElapsedMs = state.startedAtElapsedMs,
                 endedAtElapsedMs = state.endedAtElapsedMs,
                 busy = busy,
-                stopEnabled = busy && !sending && state.phase != StorageLogSharePhase.CANCELLING,
+                stopEnabled = busy && !sending && state.phase != StorageLogSharePhase.CANCELLING &&
+                    state.phase != StorageLogSharePhase.WAITING_FOR_DESTINATION,
                 closeEnabled = sending || terminal,
                 details = operationDetails(
                     operationId = state.operationId,
                     currentFile = state.currentFile,
-                    detail = state.detail,
+                    detail = operationDetail,
                     eventId = state.eventId,
                     unavailable = 0,
                     language = language,
                     reportTitle = state.reportTitle
                 ),
-                failed = state.phase == StorageLogSharePhase.FAILED,
-                success = state.collectionOutcome == "FULL" &&
+                failed = state.phase == StorageLogSharePhase.FAILED ||
+                    state.phase == StorageLogSharePhase.SAVE_RESULT &&
+                    state.saveSucceeded == false && !state.saveCancelled,
+                success = (state.destination == ArchiveExportDestination.SAVE_AS &&
+                    state.phase == StorageLogSharePhase.SAVE_RESULT && state.saveSucceeded == true &&
+                    state.collectionOutcome == "FULL" && !state.patchReportsIncomplete) ||
+                    state.collectionOutcome == "FULL" &&
                     (state.phase == StorageLogSharePhase.SENT || state.phase == StorageLogSharePhase.READY),
+                progressPercent = if (state.phase == StorageLogSharePhase.SAVING_DOCUMENT &&
+                    state.saveTotalBytes > 0L
+                ) (state.savedBytes * 100L / state.saveTotalBytes).toInt().coerceIn(0, 100) else null,
+                stopActionText = if (state.destination == ArchiveExportDestination.SAVE_AS) {
+                    language.choose("Скасувати", "Cancel", "Отмена")
+                } else "",
                 onStop = { onCancelShare(state.operationId) },
                 onClose = { onCloseShare(state.operationId) }
             ))
@@ -5153,23 +5233,24 @@ private fun OperationProgressStack(
                 ConfigurationExportPhase.INVENTORY -> language.choose("Пошук доступних файлів", "Finding available files", "Поиск доступных файлов")
                 ConfigurationExportPhase.DIAGNOSTICS -> language.choose("Збирання діагностики", "Collecting diagnostics", "Сбор диагностики")
                 ConfigurationExportPhase.COPYING -> language.choose("Копіювання файлів", "Copying files", "Копирование файлов")
-                ConfigurationExportPhase.ARCHIVING -> language.choose("Архівування · томи до 1 ГБ", "Archiving · volumes up to 1 GB", "Архивирование · тома до 1 ГБ")
+                ConfigurationExportPhase.ARCHIVING -> language.choose("Архівування", "Archiving", "Архивирование")
                 ConfigurationExportPhase.READY, ConfigurationExportPhase.WAITING_FOR_SHARE ->
-                    if (state.volumeSizes.size > 1) {
-                        language.choose(
-                            "Готово · томів: ${state.volumeSizes.size} · ${state.archiveBytes / 1_000_000} МБ",
-                            "Ready · ${state.volumeSizes.size} volumes · ${state.archiveBytes / 1_000_000} MB",
-                            "Готово · томов: ${state.volumeSizes.size} · ${state.archiveBytes / 1_000_000} МБ")
-                    } else language.choose(
-                        "Готово · 1 архів · ${state.archiveBytes / 1_000_000} МБ",
-                        "Ready · 1 archive · ${state.archiveBytes / 1_000_000} MB",
-                        "Готово · 1 архив · ${state.archiveBytes / 1_000_000} МБ")
+                    language.choose("Готово", "Ready", "Готово")
                 ConfigurationExportPhase.EXPIRED -> language.choose("Строк минув · архів недоступний", "Expired · archive unavailable", "Срок истёк · архив недоступен")
                 ConfigurationExportPhase.FAILED -> language.choose("Помилка експорту", "Export failed", "Ошибка экспорта")
                 ConfigurationExportPhase.CANCELLING -> language.choose("Скасування", "Cancelling", "Отмена")
                 ConfigurationExportPhase.CANCELLED -> language.choose("Експорт скасовано", "Export cancelled", "Экспорт отменён")
+                ConfigurationExportPhase.WAITING_FOR_DESTINATION -> language.choose(
+                    "Очікування місця збереження", "Waiting for destination", "Ожидание места сохранения")
+                ConfigurationExportPhase.SAVING_DOCUMENT -> language.choose(
+                    "Збереження ZIP", "Saving ZIP", "Сохранение ZIP")
+                ConfigurationExportPhase.SAVE_RESULT -> when {
+                    state.saveSucceeded == true -> language.choose("Збережено", "Saved", "Сохранено")
+                    state.saveCancelled -> language.choose("Збереження скасовано", "Save cancelled", "Сохранение отменено")
+                    else -> language.choose("Не вдалося зберегти", "Save failed", "Не удалось сохранить")
+                }
             }
-            val summary = if (busy) state.currentFile else if (state.expiresAtEpochMs > 0) {
+            val summary = if (busy) state.detail.ifBlank { state.currentFile } else if (state.expiresAtEpochMs > 0) {
                 val deadline = configurationExportDateTime(state.expiresAtEpochMs)
                 language.choose("Видалення: $deadline", "Deletion: $deadline", "Удаление: $deadline")
             } else language.choose("Щоб поділитися, сформуйте новий архів.", "Create a new archive to share it.", "Для отправки сформируйте новый архив.")
@@ -5182,17 +5263,25 @@ private fun OperationProgressStack(
                 startedAtElapsedMs = state.startedAtElapsedMs,
                 endedAtElapsedMs = state.endedAtElapsedMs,
                 busy = busy,
-                stopEnabled = busy && state.phase != ConfigurationExportPhase.CANCELLING,
+                stopEnabled = busy && state.phase != ConfigurationExportPhase.CANCELLING &&
+                    state.phase != ConfigurationExportPhase.WAITING_FOR_DESTINATION,
                 closeEnabled = !busy,
                 configuration = state,
                 details = "configuration",
                 primaryActionText = if (state.archiveAvailable && !busy &&
                     state.phase != ConfigurationExportPhase.WAITING_FOR_SHARE
                 ) language.choose("Поділитися", "Share", "Поделиться") else "",
-                failed = state.phase == ConfigurationExportPhase.FAILED || state.phase == ConfigurationExportPhase.EXPIRED,
-                success = state.phase == ConfigurationExportPhase.READY,
+                secondaryActionText = if (state.archiveAvailable && !busy &&
+                    state.phase != ConfigurationExportPhase.WAITING_FOR_SHARE
+                ) language.choose("Зберегти як…", "Save as…", "Сохранить как…") else "",
+                failed = state.phase == ConfigurationExportPhase.FAILED || state.phase == ConfigurationExportPhase.EXPIRED ||
+                    state.phase == ConfigurationExportPhase.SAVE_RESULT &&
+                    state.saveSucceeded != true && !state.saveCancelled,
+                success = state.phase == ConfigurationExportPhase.READY ||
+                    state.phase == ConfigurationExportPhase.SAVE_RESULT && state.saveSucceeded == true,
                 onStop = onCancelConfiguration,
                 onPrimary = onShareConfiguration,
+                onSecondary = { onSaveConfiguration(state.operationId) },
                 onClose = onCloseConfiguration
             ))
         }
@@ -5237,17 +5326,19 @@ private fun OperationProgressStack(
             Modifier.verticalScroll(rememberScrollState())
         } else Modifier
         Column(
-            modifier = Modifier.width(460.dp).then(scrollModifier),
+            modifier = Modifier.width(if (visibleConfigurationExport != null) 600.dp else 460.dp).then(scrollModifier),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             cards.forEach { card ->
-                OperationProgressCard(
-                    card = card,
-                    copy = shareCopy,
-                    palette = palette,
-                    language = copy.language,
-                    onDetails = { detailsKey = card.key }
-                )
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                    OperationProgressCard(
+                        card = card,
+                        copy = shareCopy,
+                        palette = palette,
+                        language = copy.language,
+                        onDetails = { detailsKey = card.key }
+                    )
+                }
             }
         }
     }
@@ -5330,14 +5421,17 @@ private fun OperationProgressCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 if (summary.isNotEmpty()) {
-                    Text(
-                        summary,
-                        color = palette.muted,
-                        fontSize = 12.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (card.progressPercent == null) {
+                        Text(
+                            summary,
+                            color = palette.muted,
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
+                card.progressPercent?.let { UpdateProgressBar("$it%", palette) }
             }
         }
         Row(
@@ -5363,7 +5457,9 @@ private fun OperationProgressCard(
             }
             if (card.busy && card.stopEnabled) {
                 HudButton(
-                    language.choose("Зупинити", "Stop", "Остановить"),
+                    card.stopActionText.ifEmpty {
+                        language.choose("Зупинити", "Stop", "Остановить")
+                    },
                     palette,
                     width = 105.dp,
                     onClick = card.onStop
@@ -5379,23 +5475,28 @@ private fun OperationProgressCard(
 private fun storageLogShareBusy(phase: StorageLogSharePhase): Boolean = when (phase) {
     StorageLogSharePhase.WAITING_FOR_WRITES, StorageLogSharePhase.COPYING,
     StorageLogSharePhase.ARCHIVING, StorageLogSharePhase.UPLOADING,
-    StorageLogSharePhase.CANCELLING -> true
+    StorageLogSharePhase.CANCELLING, StorageLogSharePhase.WAITING_FOR_DESTINATION,
+    StorageLogSharePhase.SAVING_DOCUMENT -> true
     StorageLogSharePhase.WAITING_FOR_SHARE, StorageLogSharePhase.READY, StorageLogSharePhase.OVERSIZED, StorageLogSharePhase.SENT,
-    StorageLogSharePhase.FAILED, StorageLogSharePhase.CANCELLED -> false
+    StorageLogSharePhase.FAILED, StorageLogSharePhase.CANCELLED,
+    StorageLogSharePhase.SAVE_RESULT -> false
 }
 
 private fun storageLogSharePreparationBusy(phase: StorageLogSharePhase): Boolean = when (phase) {
     StorageLogSharePhase.WAITING_FOR_WRITES, StorageLogSharePhase.COPYING,
     StorageLogSharePhase.ARCHIVING, StorageLogSharePhase.CANCELLING,
+    StorageLogSharePhase.WAITING_FOR_DESTINATION, StorageLogSharePhase.SAVING_DOCUMENT,
     StorageLogSharePhase.OVERSIZED -> true
     StorageLogSharePhase.WAITING_FOR_SHARE, StorageLogSharePhase.READY,
     StorageLogSharePhase.UPLOADING, StorageLogSharePhase.SENT,
-    StorageLogSharePhase.FAILED, StorageLogSharePhase.CANCELLED -> false
+    StorageLogSharePhase.FAILED, StorageLogSharePhase.CANCELLED,
+    StorageLogSharePhase.SAVE_RESULT -> false
 }
 
 private fun configurationExportBusy(phase: ConfigurationExportPhase): Boolean = when (phase) {
     ConfigurationExportPhase.INVENTORY, ConfigurationExportPhase.DIAGNOSTICS,
     ConfigurationExportPhase.COPYING, ConfigurationExportPhase.ARCHIVING,
+    ConfigurationExportPhase.WAITING_FOR_DESTINATION, ConfigurationExportPhase.SAVING_DOCUMENT,
     ConfigurationExportPhase.CANCELLING -> true
     else -> false
 }
@@ -5408,7 +5509,7 @@ private fun ConfigurationExportProgressCard(
     card: OperationCardSpec, palette: Palette, language: Language, elapsed: Long, onDetails: () -> Unit
 ) {
     val state = requireNotNull(card.configuration)
-    Column(Modifier.size(width = 460.dp, height = 170.dp).clip(RoundedCornerShape(8.dp))
+    Column(Modifier.size(width = 600.dp, height = 170.dp).clip(RoundedCornerShape(8.dp))
         .background(palette.surface.copy(alpha = 0.70f))
         .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp)).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -5424,18 +5525,37 @@ private fun ConfigurationExportProgressCard(
         Spacer(Modifier.weight(1f))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
             verticalAlignment = Alignment.CenterVertically) {
-            if (card.busy) {
+            if (card.busy && state.phase != ConfigurationExportPhase.WAITING_FOR_DESTINATION) {
                 Box(Modifier.weight(1f)) {
-                    val total = state.totalBytes ?: 0L
-                    UpdateProgressBar(if (total > 0) "${(state.copiedBytes * 100 / total).coerceIn(0, 100)}%" else "", palette)
+                    val copied = if (state.phase == ConfigurationExportPhase.SAVING_DOCUMENT) {
+                        state.savedBytes
+                    } else state.copiedBytes
+                    val total = if (state.phase == ConfigurationExportPhase.SAVING_DOCUMENT) {
+                        state.saveTotalBytes
+                    } else state.totalBytes ?: 0L
+                    UpdateProgressBar(
+                        if (total > 0) "${(copied * 100 / total).coerceIn(0, 100)}%" else "",
+                        palette
+                    )
                 }
             }
             HudButton(language.choose("Деталі", "Details", "Детали"), palette, width = 100.dp, onClick = onDetails)
             if (card.primaryActionText.isNotEmpty()) {
-                HudButton(card.primaryActionText, palette, primary = true, width = 138.dp, onClick = card.onPrimary)
+                ShareIconLabelButton(card.primaryActionText, palette, enabled = true, width = 150.dp,
+                    primary = true, onClick = card.onPrimary)
             }
-            HudButton(if (card.busy) { language.choose("Скасувати", "Cancel", "Отмена") } else language.choose("Закрити", "Close", "Закрыть"),
-                palette, width = 108.dp, enabled = if (card.busy) card.stopEnabled else card.closeEnabled,
+            if (card.secondaryActionText.isNotEmpty()) HudButton(
+                card.secondaryActionText, palette, mainBackground = true, width = 135.dp,
+                onClick = card.onSecondary
+            )
+            HudButton(
+                when {
+                    state.phase == ConfigurationExportPhase.WAITING_FOR_DESTINATION ->
+                        language.choose("Очікування…", "Waiting…", "Ожидание…")
+                    card.busy -> language.choose("Скасувати", "Cancel", "Отмена")
+                    else -> language.choose("Закрити", "Close", "Закрыть")
+                },
+                palette, width = 105.dp, enabled = if (card.busy) card.stopEnabled else card.closeEnabled,
                 onClick = if (card.busy) card.onStop else card.onClose)
         }
     }
@@ -5555,7 +5675,8 @@ private fun ConfigurationShareDestinationOverlay(
     palette: Palette,
     startError: String,
     language: Language,
-    onCreate: () -> Unit,
+    onShare: () -> Unit,
+    onSaveAs: () -> Unit,
     onCancel: () -> Unit
 ) {
     BackHandler(onBack = onCancel)
@@ -5568,8 +5689,8 @@ private fun ConfigurationShareDestinationOverlay(
         ModalInputBlocker()
         Column(
             modifier = Modifier
-                .width(minOf(760.dp, maxWidth - 36.dp))
-                .heightIn(max = maxHeight - 36.dp)
+                .width(minOf(820.dp, (maxWidth - 72.dp).coerceAtLeast(0.dp)))
+                .heightIn(max = (maxHeight - 72.dp).coerceAtLeast(0.dp))
                 .clip(RoundedCornerShape(8.dp))
                 .background(palette.surface)
                 .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
@@ -5599,17 +5720,25 @@ private fun ConfigurationShareDestinationOverlay(
                     lineHeight = 21.sp
                 )
                 Text(language.choose(
-                    "Великий архів буде поділено на томи до 1 ГБ. Архів автоматично видалиться через 15 хвилин після завершення формування. Поділіться ним одразу. Закриття картки та повторне надсилання не подовжують строк; після закриття доведеться сформувати новий архів.",
-                    "Large archives will be split into volumes of up to 1 GB. The archive is automatically deleted 15 minutes after creation finishes. Share it promptly. Closing the card or sharing again does not extend the deadline; after closing, you will need to create a new archive.",
-                    "Большой архив будет разделён на тома до 1 ГБ. Архив автоматически удалится через 15 минут после завершения создания. Отправьте его сразу. Закрытие карточки и повторная отправка не продлевают срок; после закрытия потребуется создать новый архив."),
+                    "Лише надсилання великого архіву розбиває його на томи до 1 ГБ. «Зберегти як» створює один повний ZIP, і збережена копія залишається. Тимчасовий архів автоматично видаляється через 15 хвилин після завершення створення. Закриття картки та повторне надсилання не продовжують строк; після закриття потрібно створити новий архів.",
+                    "Only sharing splits a large archive into volumes of up to 1 GB. Save as creates one complete ZIP, and the saved copy is retained. The temporary archive is automatically deleted 15 minutes after creation finishes. Closing the card or sharing again does not extend the deadline; after closing, create a new archive.",
+                    "Только при отправке большой архив делится на тома до 1 ГБ. «Сохранить как» создаёт один полный ZIP, и сохранённая копия остаётся. Временный архив автоматически удаляется через 15 минут после завершения создания. Закрытие карточки и повторная отправка не продлевают срок; после закрытия нужно создать новый архив."),
                     color = palette.yellow, fontSize = 15.sp, lineHeight = 21.sp)
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
             ) {
-                HudButton(language.choose("Сформувати архів", "Create archive", "Сформировать архив"),
-                    palette, primary = true, width = 220.dp, onClick = onCreate)
+                ShareIconLabelButton(
+                    language.choose("Поділитися", "Share", "Поделиться"),
+                    palette,
+                    enabled = true,
+                    width = 150.dp,
+                    primary = true,
+                    onClick = onShare
+                )
+                HudButton(language.choose("Зберегти як…", "Save as…", "Сохранить как…"),
+                    palette, mainBackground = true, width = 190.dp, onClick = onSaveAs)
                 HudButton(copy.cancel, palette, width = 138.dp, onClick = onCancel)
             }
             if (startError.isNotEmpty()) Text(startError, color = palette.yellow, fontSize = 14.sp)
@@ -10084,6 +10213,7 @@ private fun HudButton(
     width: Dp = 150.dp,
     modifier: Modifier = Modifier,
     highlightOnPress: Boolean = true,
+    mainBackground: Boolean = false,
     onClick: () -> Unit
 ) {
     val base = if (width == 0.dp) modifier.height(44.dp) else modifier.width(width).height(44.dp)
@@ -10092,6 +10222,7 @@ private fun HudButton(
         !enabled -> palette.disabled
         destructive -> palette.redSoft
         primary -> palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f)
+        mainBackground -> palette.background
         else -> palette.panelAlt
     }
     val renderedBackground = if (!highlightOnPress) baseBackground else if (destructive && press.pressed) {
