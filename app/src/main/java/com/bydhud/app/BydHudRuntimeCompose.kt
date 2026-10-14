@@ -106,6 +106,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -790,6 +791,7 @@ private data class HudHelpRequest(
     val value: Int = 0,
     val etaMask: Int = 0,
     val etaStreet: Boolean = true,
+    val etaOutputMode: Int = HudPrefs.ETA_OUTPUT_OFF,
     val presentation: HudPresentationPreview = HudPresentationPreview(),
     val colorSlot: HudTextColorSlot? = null,
     val warningFieldIndex: Int = 0,
@@ -2350,6 +2352,7 @@ private fun OptionsTab(
         topic, title, HudHelpControlKind.Switch, checked = checked,
         presentation = hudPresentation,
         etaMask = etaMask, etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
+        etaOutputMode = snapshot.etaOutputMode,
         warningFieldIndex = snapshot.wazeAlertField,
         compositeFieldIndex = snapshot.speedLimitCompositePlacement,
         freeFieldOverlapIndex = snapshot.speedLimitFreeFallback
@@ -2360,6 +2363,7 @@ private fun OptionsTab(
         options = options, disabledOptions = disabledOptions,
         presentation = hudPresentation, etaMask = etaMask,
         etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
+        etaOutputMode = snapshot.etaOutputMode,
         warningFieldIndex = snapshot.wazeAlertField,
         compositeFieldIndex = snapshot.speedLimitCompositePlacement,
         freeFieldOverlapIndex = snapshot.speedLimitFreeFallback
@@ -2368,6 +2372,7 @@ private fun OptionsTab(
         topic, title, HudHelpControlKind.Integer, value = value,
         presentation = hudPresentation, etaMask = etaMask,
         etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
+        etaOutputMode = snapshot.etaOutputMode,
         warningFieldIndex = snapshot.wazeAlertField,
         compositeFieldIndex = snapshot.speedLimitCompositePlacement,
         freeFieldOverlapIndex = snapshot.speedLimitFreeFallback
@@ -2375,7 +2380,7 @@ private fun OptionsTab(
     fun colorHelp(slot: HudTextColorSlot) = HudHelpRequest(
         HudHelpTopicId.TextColor, localizedColorTitle(slot, language), HudHelpControlKind.Color,
         presentation = hudPresentation, colorSlot = slot, etaMask = etaMask,
-        etaStreet = false
+        etaStreet = false, etaOutputMode = snapshot.etaOutputMode
     )
     LaunchedEffect(
         showSteeringButtonCapture,
@@ -2401,14 +2406,20 @@ private fun OptionsTab(
             }
         }
     }
-    val routeMetricModes = language.choose(listOf("Вимкнений", "До зупинки", "Весь маршрут"),
-        listOf("Off", "Next stop", "Entire route"), listOf("Выкл.", "До остановки", "Весь маршрут"))
+    val etaOutputModes = language.choose(
+        listOf("Вимкнено", "Штатний", "Альтернативний"),
+        listOf("Off", "Native", "Alternative"),
+        listOf("Выкл.", "Штатный", "Альтернативный"))
+    val routeMetricScopeModes = language.choose(
+        listOf("До зупинки", "Весь маршрут"),
+        listOf("Next stop", "Entire route"),
+        listOf("До остановки", "Весь маршрут"))
     val textTransliterationModes = language.choose(listOf("Вимкнено", "Українська", "Універсальна"),
         listOf("Off", "Ukrainian", "Universal"), listOf("Выкл.", "Украинская", "Универсальная"))
     val speedLimitModes = language.choose(
-        listOf("Вимкнено", "Штатний/ADAS", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний"),
-        listOf("Off", "Native/ADAS", "In maneuver field", "In lane field", "In a free field", "Composite"),
-        listOf("Выкл.", "Штатный/ADAS", "В поле манёвра", "В поле полос", "В свободном поле", "Композитный"))
+        listOf("Вимкнено", "Штатний/HUD", "Штатний/ADAS", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний"),
+        listOf("Off", "Native/HUD", "Native/ADAS", "In maneuver field", "In lane field", "In a free field", "Composite"),
+        listOf("Выкл.", "Штатный/HUD", "Штатный/ADAS", "В поле манёвра", "В поле полос", "В свободном поле", "Композитный"))
     val speedLimitModeIndex = HudPrefs.speedLimitModeUiIndex(snapshot.speedLimitMode)
     val speedLimitFallbackModes = language.choose(listOf("Вимкнено", "У полі з маневром", "У полі зі смугами"),
         listOf("Off", "In maneuver field", "In lane field"), listOf("Выкл.", "В поле манёвра", "В поле полос"))
@@ -2430,12 +2441,17 @@ private fun OptionsTab(
         listOf("Только манёвр", "Только полосы", "Свободное или манёвр", "Свободное или полосы"))
     val dashboardScreenModes = language.choose(listOf("Немає", "Частковий", "Повний"),
         listOf("None", "Partial", "Full"), listOf("Нет", "Частичный", "Полный"))
-    val routeMetricsTitle = language.choose("Режим виводу ЕТА (час/дистанція)",
-        "ETA output mode (time/distance)", "Режим вывода ETA (время/расстояние)")
+    val etaOutputModeTitle = language.choose("Режим виводу ЕТА", "ETA output mode", "Режим вывода ETA")
+    val etaOutputModeHint = language.choose(
+        "Оберіть штатні поля автомобіля або власне оформлення ЕТА.",
+        "Choose the vehicle's native fields or custom ETA presentation.",
+        "Выберите штатные поля автомобиля или собственное оформление ETA.")
+    val routeMetricsTitle = language.choose("Режим показу ЕТА (час/дистанція)",
+        "ETA display mode (time/distance)", "Режим показа ETA (время/расстояние)")
     val routeMetricsHint = language.choose(
-        "До зупинки показує значення до наступної проміжної або кінцевої точки; весь маршрут - до кінцевої точки. Waze підтримує весь маршрут і використовує доступне значення до зупинки, якщо окремий показник маршруту відсутній.",
-        "Next stop uses the next intermediate or final stop; entire route uses the final destination. Waze supports the whole route and uses an available next-stop value when an individual route metric is missing.",
-        "До остановки показывает значения до следующей промежуточной или конечной точки; весь маршрут — до конечной точки. Waze использует доступное значение до остановки, если отдельного показателя маршрута нет.")
+        "«До зупинки» показує значення до наступної проміжної або кінцевої точки; «Весь маршрут» — до кінцевої точки. Якщо окремий показник маршруту відсутній, використовується доступне значення до зупинки.",
+        "Next stop uses the next intermediate or final stop; entire route uses the final destination. A missing route metric falls back to the available next-stop value.",
+        "До остановки — следующая промежуточная или конечная точка; весь маршрут — конечная точка. Если отдельный показатель маршрута отсутствует, используется доступное значение до остановки.")
     val speedLimitModeHint = language.choose("Показувати поточне обмеження швидкості у вибраному полі HUD.",
         "Show the current speed limit in the selected HUD field.", "Показывать текущее ограничение скорости в выбранном поле HUD.")
     val freeFallbackHint = language.choose("Визначає, чи можна тимчасово перекрити зайняте поле, коли вільного поля немає.",
@@ -2449,6 +2465,9 @@ private fun OptionsTab(
     val compositeLaneSizeHint = language.choose("Розмір композитного знаку у пікселях для зображення смуг. Дозволено ціле число від 1 до 36.",
         "Composite sign size in pixels for the lane image. Whole numbers from 1 to 36 only.", "Размер композитного знака в пикселях для изображения полос. Целое число от 1 до 36.")
     val nativeSpeedLimitFallbackEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE
+    val etaOutputEnabled = snapshot.etaOutputMode != HudPrefs.ETA_OUTPUT_OFF
+    val alternativeEtaEnabled = snapshot.etaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE
+    val routeMetricsScopeIndex = if (snapshot.routeMetricsMode == HudPrefs.ROUTE_METRICS_WHOLE_ROUTE) 1 else 0
     val effectiveSpeedLimitBitmapMode = HudPrefs.effectiveSpeedLimitBitmapMode(
         snapshot.speedLimitMode, snapshot.nativeSpeedLimitFallbackMode)
     val freeFallbackEnabled = effectiveSpeedLimitBitmapMode == HudPrefs.SPEED_LIMIT_FREE
@@ -2622,15 +2641,33 @@ private fun OptionsTab(
             }
         }
         optionsSection("route-eta", language.choose("ЕТА маршруту", "Route ETA", "ETA маршрута"), R.drawable.ic_options_schedule) {
-            row("route-metrics-mode") {
-                SettingRow(routeMetricsTitle, routeMetricsHint, palette,
-                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.EtaMode, routeMetricsTitle, snapshot.routeMetricsMode, routeMetricModes) }) {
+            row("eta-output-mode") {
+                SettingRow(etaOutputModeTitle, etaOutputModeHint, palette,
+                    onHelp = { hudHelpRequest = dropdownHelp(
+                        HudHelpTopicId.EtaOutputMode, etaOutputModeTitle,
+                        snapshot.etaOutputMode, etaOutputModes) }) {
                     HudDropdown(
-                        selectedIndex = snapshot.routeMetricsMode,
-                        options = routeMetricModes,
+                        selectedIndex = snapshot.etaOutputMode,
+                        options = etaOutputModes,
                         palette = palette,
                         width = 190.dp,
-                        onSelected = { mode -> runAction { activity.composeSetRouteMetricsMode(mode) } }
+                        onSelected = { mode -> runAction { activity.composeSetEtaOutputMode(mode) } }
+                    )
+                }
+            }
+            row("route-metrics-mode") {
+                SettingRow(routeMetricsTitle, routeMetricsHint, palette,
+                    enabled = etaOutputEnabled,
+                    onHelp = { hudHelpRequest = dropdownHelp(
+                        HudHelpTopicId.EtaMode, routeMetricsTitle,
+                        routeMetricsScopeIndex, routeMetricScopeModes) }) {
+                    Segmented(
+                        routeMetricScopeModes[0], routeMetricScopeModes[1],
+                        routeMetricsScopeIndex == 0, palette,
+                        onLeft = { runAction { activity.composeSetRouteMetricsMode(HudPrefs.ROUTE_METRICS_NEXT_STOP) } },
+                        onRight = { runAction { activity.composeSetRouteMetricsMode(HudPrefs.ROUTE_METRICS_WHOLE_ROUTE) } },
+                        itemWidth = 120.dp,
+                        enabled = etaOutputEnabled
                     )
                 }
             }
@@ -2642,7 +2679,7 @@ private fun OptionsTab(
                         "In the street text or a separate block on the right.",
                         "В тексте улицы или в отдельном блоке справа."),
                     palette,
-                    enabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF,
+                    enabled = alternativeEtaEnabled,
                     onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.EtaOutputField, title, snapshot.etaOutputField, etaOutputFields) }
                 ) {
                     HudDropdown(
@@ -2650,14 +2687,14 @@ private fun OptionsTab(
                         options = etaOutputFields,
                         palette = palette,
                         width = 190.dp,
-                        enabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF,
+                        enabled = alternativeEtaEnabled,
                         onSelected = { field -> runAction { activity.composeSetEtaOutputField(field) } }
                     )
                 }
             }
-            val etaStreetEnabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF
+            val etaStreetEnabled = alternativeEtaEnabled
                     && snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET
-            val etaColorsEnabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF
+            val etaColorsEnabled = alternativeEtaEnabled
                     && snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_EXPERIMENTAL
             val etaStreetFormats = when (language) {
                 Language.Ua -> listOf("Приставити", "Замінити")
@@ -2716,7 +2753,7 @@ private fun OptionsTab(
             }
             row("eta-output") {
                 SwitchRow(copy.showEta, copy.showEtaHint, snapshot.etaOutputEnabled, palette,
-                    enabled = snapshot.routeMetricsMode != 0,
+                    enabled = etaOutputEnabled,
                     onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.EtaOutput, copy.showEta, snapshot.etaOutputEnabled) }) {
                     runAction { activity.composeSetEtaOutputEnabled(it) }
                 }
@@ -2732,7 +2769,7 @@ private fun OptionsTab(
             }
             row("remaining-time-output") {
                 SwitchRow(copy.showRemainingTime, copy.showRemainingTimeHint, snapshot.remainingTimeOutputEnabled, palette,
-                    enabled = snapshot.routeMetricsMode != 0,
+                    enabled = etaOutputEnabled,
                     onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.RemainingTime, copy.showRemainingTime, snapshot.remainingTimeOutputEnabled) }) {
                     runAction { activity.composeSetRemainingTimeOutputEnabled(it) }
                 }
@@ -2748,7 +2785,7 @@ private fun OptionsTab(
             }
             row("remaining-distance-output") {
                 SwitchRow(copy.showRemainingDistance, copy.showRemainingDistanceHint, snapshot.remainingDistanceOutputEnabled, palette,
-                    enabled = snapshot.routeMetricsMode != 0,
+                    enabled = etaOutputEnabled,
                     onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.RemainingDistance, copy.showRemainingDistance, snapshot.remainingDistanceOutputEnabled) }) {
                     runAction { activity.composeSetRemainingDistanceOutputEnabled(it) }
                 }
@@ -8489,6 +8526,34 @@ private fun Sl07MapOutputHelpImage(baseline: ImageBitmap) {
 }
 
 @Composable
+private fun NativeEtaHelpOverlay(mask: Int, language: Language) {
+    if (mask == 0) return
+    val arrival = "18:45"
+    val duration = when (language) {
+        Language.Ua -> "25 хв"
+        Language.En -> "25 min"
+        Language.Ru -> "25 мин"
+    }
+    val distance = when (language) {
+        Language.Ua, Language.Ru -> "12 км"
+        Language.En -> "12 km"
+    }
+    Canvas(Modifier.fillMaxSize()) {
+        val scaleX = size.width / 2172f
+        val scaleY = size.height / 724f
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color(0xFF00D8E7).toArgb()
+            textSize = 34f * scaleY
+            typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL)
+        }
+        val canvas = drawContext.canvas.nativeCanvas
+        if (mask and 1 != 0) canvas.drawText(arrival, 432f * scaleX, 524f * scaleY, paint)
+        if (mask and 2 != 0) canvas.drawText(duration, 548f * scaleX, 524f * scaleY, paint)
+        if (mask and 4 != 0) canvas.drawText(distance, 660f * scaleX, 524f * scaleY, paint)
+    }
+}
+
+@Composable
 private fun HudHelpOverlay(
     request: HudHelpRequest,
     language: Language,
@@ -8502,6 +8567,36 @@ private fun HudHelpOverlay(
     var localPresentation by remember(request) { mutableStateOf(request.presentation) }
     var showLocalColorPicker by remember(request) { mutableStateOf(false) }
     val previewEtaMask = if (request.etaMask == 0) 7 else request.etaMask
+    val etaMetricBit = when (request.topic) {
+        HudHelpTopicId.EtaOutput -> 1
+        HudHelpTopicId.RemainingTime -> 2
+        HudHelpTopicId.RemainingDistance -> 4
+        else -> 0
+    }
+    val helpEtaMask = if (etaMetricBit == 0) previewEtaMask else if (localChecked) {
+        request.etaMask or etaMetricBit
+    } else {
+        request.etaMask and etaMetricBit.inv()
+    }
+    val selectedEtaOutputMode = if (request.topic == HudHelpTopicId.EtaOutputMode) {
+        localIndex.coerceIn(HudPrefs.ETA_OUTPUT_OFF, HudPrefs.ETA_OUTPUT_ALTERNATIVE)
+    } else {
+        request.etaOutputMode
+    }
+    val etaImage = HudHelpCatalog.etaImage(
+        request.etaStreet, helpEtaMask, localPresentation.streetFormat)
+    val isEtaDisplayHelp = request.topic in setOf(
+        HudHelpTopicId.EtaOutputMode,
+        HudHelpTopicId.EtaMode,
+        HudHelpTopicId.EtaOutputField,
+        HudHelpTopicId.EtaStreetFormat,
+        HudHelpTopicId.EtaOutput,
+        HudHelpTopicId.RemainingTime,
+        HudHelpTopicId.RemainingDistance
+    ) || (request.topic == HudHelpTopicId.TextColor
+        && request.colorSlot != HudTextColorSlot.Warning)
+    val showNativeEta = isEtaDisplayHelp
+        && selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_NATIVE
     val imageRes = when (request.topic) {
         HudHelpTopicId.BasicPng,
         HudHelpTopicId.BasicNative,
@@ -8509,9 +8604,6 @@ private fun HudHelpOverlay(
         HudHelpTopicId.BasicStreet,
         HudHelpTopicId.BasicDistance,
         HudHelpTopicId.SmallDistanceClamp,
-        HudHelpTopicId.EtaOutput,
-        HudHelpTopicId.RemainingTime,
-        HudHelpTopicId.RemainingDistance,
         HudHelpTopicId.WazeAlerts -> topic.frames
             .getOrElse(if (localChecked) 1 else 0) { topic.frames.first() }.imageRes
         HudHelpTopicId.BasicTransliteration,
@@ -8521,28 +8613,56 @@ private fun HudHelpOverlay(
         HudHelpTopicId.SpeedLimitCompositeField,
         HudHelpTopicId.WazeAlertField -> topic.frames
             .getOrElse(localIndex) { topic.frames.first() }.imageRes
-        HudHelpTopicId.EtaStreetFormat -> HudHelpCatalog.etaImage(
-            true, 1, EtaStreetFormat.entries[localIndex.coerceIn(0, EtaStreetFormat.entries.lastIndex)])
+        HudHelpTopicId.EtaStreetFormat -> if (selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
+            HudHelpCatalog.etaImage(
+                true, helpEtaMask,
+                EtaStreetFormat.entries[localIndex.coerceIn(0, EtaStreetFormat.entries.lastIndex)])
+        } else {
+            R.drawable.hud_help_baseline
+        }
         HudHelpTopicId.TextColor -> if (request.colorSlot == HudTextColorSlot.Warning) {
             R.drawable.hud_help_warning_separate
+        } else if (selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
+            etaImage
         } else {
-            R.drawable.hud_help_eta_all
-        }
-        HudHelpTopicId.EtaOutputField -> HudHelpCatalog.etaImage(
-            localIndex == HudPrefs.ETA_OUTPUT_FIELD_STREET,
-            previewEtaMask,
-            localPresentation.streetFormat)
-        HudHelpTopicId.EtaMode -> if (localIndex == HudPrefs.ROUTE_METRICS_OFF) {
             R.drawable.hud_help_baseline
-        } else {
-            HudHelpCatalog.etaImage(request.etaStreet, previewEtaMask, localPresentation.streetFormat)
         }
-        HudHelpTopicId.SpeedLimitMode -> when (localIndex.coerceIn(0, 5)) {
+        HudHelpTopicId.EtaOutputField -> if (selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
+            HudHelpCatalog.etaImage(
+                localIndex == HudPrefs.ETA_OUTPUT_FIELD_STREET,
+                previewEtaMask,
+                localPresentation.streetFormat)
+        } else {
+            R.drawable.hud_help_baseline
+        }
+        HudHelpTopicId.EtaMode -> if (selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
+            etaImage
+        } else {
+            R.drawable.hud_help_baseline
+        }
+        HudHelpTopicId.EtaOutput,
+        HudHelpTopicId.RemainingTime,
+        HudHelpTopicId.RemainingDistance -> if (
+            selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE && helpEtaMask != 0
+        ) {
+            etaImage
+        } else {
+            R.drawable.hud_help_baseline
+        }
+        HudHelpTopicId.EtaOutputMode -> if (
+            selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE
+        ) {
+            HudHelpCatalog.etaImage(request.etaStreet, previewEtaMask, localPresentation.streetFormat)
+        } else {
+            R.drawable.hud_help_baseline
+        }
+        HudHelpTopicId.SpeedLimitMode -> when (localIndex.coerceIn(0, 6)) {
             0 -> R.drawable.hud_help_baseline
             1 -> R.drawable.hud_help_speed_native
-            2 -> R.drawable.hud_help_speed_maneuver
-            3 -> R.drawable.hud_help_speed_lanes
-            4 -> when (request.freeFieldOverlapIndex.coerceIn(0, 2)) {
+            2 -> R.drawable.hud_help_speed_native
+            3 -> R.drawable.hud_help_speed_maneuver
+            4 -> R.drawable.hud_help_speed_lanes
+            5 -> when (request.freeFieldOverlapIndex.coerceIn(0, 2)) {
                 1 -> R.drawable.hud_help_speed_maneuver
                 2 -> R.drawable.hud_help_speed_lanes
                 else -> R.drawable.hud_help_baseline
@@ -8619,6 +8739,7 @@ private fun HudHelpOverlay(
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
                 )
+                if (showNativeEta) NativeEtaHelpOverlay(helpEtaMask, language)
                 if (signBitmap != null) {
                     Canvas(Modifier.fillMaxSize()) {
                         val maneuver = request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize
@@ -8723,13 +8844,26 @@ private fun HudHelpOverlay(
                     }
                 }
             }
-            if (request.topic == HudHelpTopicId.SpeedLimitNativeFallbackMode
-                || request.topic == HudHelpTopicId.MapOutputMode) {
-                Text(
-                    topic.frames.getOrElse(localIndex) { topic.frames.first() }.caption(language),
-                    color = palette.muted,
-                    fontSize = 13.sp
-                )
+            val helpCaptionIndex = when (request.topic) {
+                HudHelpTopicId.EtaOutput,
+                HudHelpTopicId.RemainingTime,
+                HudHelpTopicId.RemainingDistance -> if (localChecked) 1 else 0
+                else -> localIndex
+            }
+            val showHelpCaption = request.topic == HudHelpTopicId.EtaOutputMode
+                || request.topic == HudHelpTopicId.EtaMode
+                || request.topic == HudHelpTopicId.EtaOutputField
+                || request.topic == HudHelpTopicId.EtaOutput
+                || request.topic == HudHelpTopicId.RemainingTime
+                || request.topic == HudHelpTopicId.RemainingDistance
+                || request.topic == HudHelpTopicId.SpeedLimitMode
+                || request.topic == HudHelpTopicId.SpeedLimitNativeFallbackMode
+                || request.topic == HudHelpTopicId.MapOutputMode
+            val helpCaption = topic.frames.getOrElse(helpCaptionIndex) {
+                topic.frames.first()
+            }.caption(language)
+            if (showHelpCaption && helpCaption.isNotBlank()) {
+                Text(helpCaption, color = palette.muted, fontSize = 13.sp)
             }
             HudButton(language.choose("Закрити", "Close", "Закрыть"), palette, width = 0.dp,
                 modifier = Modifier.fillMaxWidth(), onClick = onDismiss)

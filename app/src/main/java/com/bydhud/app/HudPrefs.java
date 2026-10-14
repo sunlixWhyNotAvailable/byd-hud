@@ -22,6 +22,7 @@ final class HudPrefs {
     private static final String KEY_WAZE_ALERT_FIELD = "waze_alert_field";
     private static final String KEY_WHOLE_ROUTE_METRICS = "whole_route_metrics";
     private static final String KEY_ROUTE_METRICS_MODE = "route_metrics_mode";
+    private static final String KEY_ETA_OUTPUT_MODE = "eta_output_mode";
     private static final String KEY_ETA_OUTPUT_FIELD = "eta_output_field";
     private static final String KEY_ETA_STREET_FORMAT = "eta_street_format";
     private static final String KEY_ETA_WAIT_FOR_FULL_TEXT = "eta_wait_for_full_text";
@@ -81,6 +82,9 @@ final class HudPrefs {
     static final int ROUTE_METRICS_OFF = 0;
     static final int ROUTE_METRICS_NEXT_STOP = 1;
     static final int ROUTE_METRICS_WHOLE_ROUTE = 2;
+    static final int ETA_OUTPUT_OFF = 0;
+    static final int ETA_OUTPUT_NATIVE = 1;
+    static final int ETA_OUTPUT_ALTERNATIVE = 2;
     static final int WAZE_ALERT_FIELD_MANEUVER = 0;
     static final int WAZE_ALERT_FIELD_EXPERIMENTAL = 1;
     static final int ETA_OUTPUT_FIELD_STREET = 0;
@@ -93,6 +97,7 @@ final class HudPrefs {
     static final int SPEED_LIMIT_FREE = 3;
     static final int SPEED_LIMIT_COMPOSITE = 4;
     static final int SPEED_LIMIT_NATIVE = 5;
+    static final int SPEED_LIMIT_NATIVE_HUD = 6;
     static final int SPEED_LIMIT_NATIVE_FALLBACK_OFF = 0;
     static final int SPEED_LIMIT_NATIVE_FALLBACK_MANEUVER = 1;
     static final int SPEED_LIMIT_NATIVE_FALLBACK_LANES = 2;
@@ -100,8 +105,9 @@ final class HudPrefs {
     static final int SPEED_LIMIT_NATIVE_FALLBACK_COMPOSITE = 4;
     // UI order differs from persisted IDs; existing selections must not shift.
     private static final int[] SPEED_LIMIT_MODE_UI_ORDER = {
-            SPEED_LIMIT_OFF, SPEED_LIMIT_NATIVE, SPEED_LIMIT_MANEUVER,
-            SPEED_LIMIT_LANES, SPEED_LIMIT_FREE, SPEED_LIMIT_COMPOSITE
+            SPEED_LIMIT_OFF, SPEED_LIMIT_NATIVE_HUD, SPEED_LIMIT_NATIVE,
+            SPEED_LIMIT_MANEUVER, SPEED_LIMIT_LANES, SPEED_LIMIT_FREE,
+            SPEED_LIMIT_COMPOSITE
     };
     static final int SPEED_LIMIT_FALLBACK_OFF = 0;
     static final int SPEED_LIMIT_FALLBACK_MANEUVER = 1;
@@ -258,32 +264,110 @@ final class HudPrefs {
     }
 
     static void setWholeRouteMetricsEnabled(Context context, boolean enabled) {
-        int current = routeMetricsMode(context);
         setRouteMetricsMode(context, enabled ? ROUTE_METRICS_WHOLE_ROUTE
-                : current == ROUTE_METRICS_OFF ? ROUTE_METRICS_OFF
                 : ROUTE_METRICS_NEXT_STOP);
     }
 
     static int routeMetricsMode(Context context) {
         SharedPreferences preferences = prefs(context);
-        if (!preferences.contains(KEY_ROUTE_METRICS_MODE)) {
-            boolean anyMetric = preferences.getBoolean(KEY_OUTPUT_ETA, false)
-                    || preferences.getBoolean(KEY_OUTPUT_REMAINING_TIME, false)
-                    || preferences.getBoolean(KEY_OUTPUT_REMAINING_DISTANCE, false);
-            int migrated = !anyMetric ? ROUTE_METRICS_OFF
-                    : preferences.getBoolean(KEY_WHOLE_ROUTE_METRICS, false)
-                    ? ROUTE_METRICS_WHOLE_ROUTE : ROUTE_METRICS_NEXT_STOP;
-            preferences.edit().putInt(KEY_ROUTE_METRICS_MODE, migrated).apply();
-            return migrated;
-        }
-        return clamp(preferences.getInt(KEY_ROUTE_METRICS_MODE, ROUTE_METRICS_OFF),
-                ROUTE_METRICS_OFF, ROUTE_METRICS_WHOLE_ROUTE);
+        ensureEtaPreferencesMigrated(preferences);
+        return normalizeRouteMetricsScope(
+                preferences.getInt(KEY_ROUTE_METRICS_MODE, ROUTE_METRICS_NEXT_STOP));
     }
 
     static void setRouteMetricsMode(Context context, int mode) {
-        prefs(context).edit().putInt(KEY_ROUTE_METRICS_MODE,
-                clamp(mode, ROUTE_METRICS_OFF, ROUTE_METRICS_WHOLE_ROUTE)).apply();
+        SharedPreferences preferences = prefs(context);
+        ensureEtaPreferencesMigrated(preferences);
+        preferences.edit().putInt(KEY_ROUTE_METRICS_MODE,
+                normalizeRouteMetricsScope(mode)).apply();
         markOutputOptionChanged(KEY_ROUTE_METRICS_MODE);
+    }
+
+    static int etaOutputMode(Context context) {
+        SharedPreferences preferences = prefs(context);
+        ensureEtaPreferencesMigrated(preferences);
+        return normalizeEtaOutputMode(
+                preferences.getInt(KEY_ETA_OUTPUT_MODE, ETA_OUTPUT_OFF));
+    }
+
+    static void setEtaOutputMode(Context context, int mode) {
+        SharedPreferences preferences = prefs(context);
+        ensureEtaPreferencesMigrated(preferences);
+        preferences.edit().putInt(KEY_ETA_OUTPUT_MODE, normalizeEtaOutputMode(mode)).apply();
+        markOutputOptionChanged(KEY_ETA_OUTPUT_MODE);
+    }
+
+    private static synchronized void ensureEtaPreferencesMigrated(SharedPreferences preferences) {
+        boolean hasOutputMode = preferences.contains(KEY_ETA_OUTPUT_MODE);
+        boolean hasScope = preferences.contains(KEY_ROUTE_METRICS_MODE);
+        int storedOutputMode = preferences.getInt(KEY_ETA_OUTPUT_MODE, ETA_OUTPUT_OFF);
+        int storedScope = preferences.getInt(KEY_ROUTE_METRICS_MODE, ROUTE_METRICS_NEXT_STOP);
+        EtaPreferenceMigration migration = etaPreferenceMigration(
+                hasOutputMode,
+                storedOutputMode,
+                hasScope,
+                storedScope,
+                preferences.getBoolean(KEY_OUTPUT_ETA, false),
+                preferences.getBoolean(KEY_OUTPUT_REMAINING_TIME, false),
+                preferences.getBoolean(KEY_OUTPUT_REMAINING_DISTANCE, false),
+                preferences.getBoolean(KEY_WHOLE_ROUTE_METRICS, false));
+        if (hasOutputMode && storedOutputMode == migration.outputMode
+                && hasScope && storedScope == migration.routeMetricsMode) {
+            return;
+        }
+
+        SharedPreferences.Editor editor = preferences.edit();
+        if (!hasOutputMode || storedOutputMode != migration.outputMode) {
+            editor.putInt(KEY_ETA_OUTPUT_MODE, migration.outputMode);
+        }
+        if (!hasScope || storedScope != migration.routeMetricsMode) {
+            editor.putInt(KEY_ROUTE_METRICS_MODE, migration.routeMetricsMode);
+        }
+        editor.apply();
+    }
+
+    static EtaPreferenceMigration etaPreferenceMigration(
+            boolean hasOutputMode,
+            int storedOutputMode,
+            boolean hasScope,
+            int storedScope,
+            boolean etaEnabled,
+            boolean remainingTimeEnabled,
+            boolean remainingDistanceEnabled,
+            boolean wholeRouteEnabled) {
+        boolean anyMetric = etaEnabled || remainingTimeEnabled || remainingDistanceEnabled;
+        int legacyScope = hasScope
+                ? clamp(storedScope, ROUTE_METRICS_OFF, ROUTE_METRICS_WHOLE_ROUTE)
+                : anyMetric && wholeRouteEnabled
+                        ? ROUTE_METRICS_WHOLE_ROUTE : ROUTE_METRICS_NEXT_STOP;
+        int migratedScope = legacyScope == ROUTE_METRICS_WHOLE_ROUTE
+                ? ROUTE_METRICS_WHOLE_ROUTE : ROUTE_METRICS_NEXT_STOP;
+        int migratedOutputMode = hasOutputMode
+                ? normalizeEtaOutputMode(storedOutputMode)
+                : hasScope
+                        ? legacyScope == ROUTE_METRICS_OFF
+                                ? ETA_OUTPUT_OFF : ETA_OUTPUT_ALTERNATIVE
+                        : anyMetric ? ETA_OUTPUT_ALTERNATIVE : ETA_OUTPUT_OFF;
+        return new EtaPreferenceMigration(migratedOutputMode, migratedScope);
+    }
+
+    static final class EtaPreferenceMigration {
+        final int outputMode;
+        final int routeMetricsMode;
+
+        EtaPreferenceMigration(int outputMode, int routeMetricsMode) {
+            this.outputMode = outputMode;
+            this.routeMetricsMode = routeMetricsMode;
+        }
+    }
+
+    static int normalizeEtaOutputMode(int mode) {
+        return clamp(mode, ETA_OUTPUT_OFF, ETA_OUTPUT_ALTERNATIVE);
+    }
+
+    private static int normalizeRouteMetricsScope(int mode) {
+        return mode == ROUTE_METRICS_WHOLE_ROUTE
+                ? ROUTE_METRICS_WHOLE_ROUTE : ROUTE_METRICS_NEXT_STOP;
     }
 
     static int etaOutputField(Context context) {
@@ -545,7 +629,7 @@ final class HudPrefs {
     }
 
     static int normalizeSpeedLimitMode(int mode) {
-        if (mode == SPEED_LIMIT_NATIVE) return SPEED_LIMIT_NATIVE;
+        if (mode == SPEED_LIMIT_NATIVE || mode == SPEED_LIMIT_NATIVE_HUD) return mode;
         return clamp(mode, SPEED_LIMIT_OFF, SPEED_LIMIT_COMPOSITE);
     }
 

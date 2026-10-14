@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.TimeZone;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
@@ -83,6 +84,12 @@ public final class DirectTbtPayload {
     static String etaCacheKey(DirectTbtFrame frame, Options options, long nowWallTimeMs) {
         DirectTbtFrame safeFrame = frame == null ? DirectTbtFrame.empty() : frame;
         Options safeOptions = options == null ? Options.ALL : options;
+        if (safeOptions.etaOutputMode == HudPrefs.ETA_OUTPUT_NATIVE) {
+            NativeEtaData data = NativeEtaData.from(safeFrame, safeOptions, nowWallTimeMs);
+            NativeEtaFormatter.Formatted formatted = nativeEta(data, safeOptions, nowWallTimeMs);
+            return data.remainingMeters + ":" + data.remainingSeconds + ":"
+                    + formatted.arrivalClock + ":" + formatted.arrivalQualifier;
+        }
         HudEtaText metrics = HudEtaText.from(safeFrame, safeOptions, nowWallTimeMs);
         return etaVisible(safeFrame, safeOptions) ? metrics.cacheKey() : "";
     }
@@ -135,7 +142,7 @@ public final class DirectTbtPayload {
                 && !sharedAlert(safeFrame, safeOptions)
                 && !safeOptions.presentation.separateEta();
         if (!alert.isActive() && !safeOptions.presentation.separateEta()
-                && safeOptions.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF) {
+                && safeOptions.etaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
             displayText = metrics.street(displayText, safeOptions.presentation.streetFormat == 1);
         }
 
@@ -211,10 +218,12 @@ public final class DirectTbtPayload {
                 && lanePng.length > 0;
         boolean liveMap = safeOptions.mapSettings.mode == HudMapSettings.EXPERIMENTAL
                 && !safeOptions.mapCalibration && safeOptions.mapPng.length > 0;
-        boolean compositePrimary = safeOptions.presentation.separateEta()
+        boolean separateEtaEnabled = safeOptions.etaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE
+                && safeOptions.presentation.separateEta();
+        boolean compositePrimary = separateEtaEnabled
                 || safeOptions.presentation.separateWarning() || calibrationMap || liveMap;
         if (compositePrimary || compositeLaneGeometry) {
-            HudEtaText separateEta = safeOptions.presentation.separateEta() ? metrics : HudEtaText.EMPTY;
+            HudEtaText separateEta = separateEtaEnabled ? metrics : HudEtaText.EMPTY;
             Presentation style = safeOptions.presentation;
             HudExperimentalCompositor.Result composed = compositor.compose(new HudExperimentalCompositor.Inputs(
                     separateEta.arrival, separateEta.compactDuration, separateEta.remainingDistance,
@@ -231,7 +240,15 @@ public final class DirectTbtPayload {
             lanePng = lower == null ? lanePng : lower;
         }
 
+        NativeEtaData nativeMetrics = NativeEtaData.from(safeFrame, safeOptions, nowWallTimeMs);
+        NativeEtaFormatter.Formatted nativeFormatted = nativeEta(nativeMetrics, safeOptions, nowWallTimeMs);
         ByteArrayOutputStream fields = new ByteArrayOutputStream();
+        if (nativeMetrics.remainingMeters >= 0L && nativeMetrics.remainingMeters <= Integer.MAX_VALUE) {
+            writeVarintField(fields, 3, nativeMetrics.remainingMeters);
+        }
+        if (nativeMetrics.remainingSeconds >= 0L && nativeMetrics.remainingSeconds <= Integer.MAX_VALUE) {
+            writeVarintField(fields, 4, nativeMetrics.remainingSeconds);
+        }
         if (!lanes.isEmpty()) writeVarintField(fields, 5, lanes.size());
         writeVarintField(fields, 6, lanePng.length > 0 || !lanes.isEmpty() ? 6 : 1);
         writeBytesField(fields, 7, lanePng);
@@ -240,19 +257,34 @@ public final class DirectTbtPayload {
         int displayTextStart = fields.size();
         writeStringField(fields, 10, displayText);
         int displayTextEnd = fields.size();
+        int nativeLimit = safeFrame.getSpeedLimit().getKph();
+        if (safeOptions.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE_HUD && nativeLimit > 0) {
+            writeVarintField(fields, 11, nativeLimit);
+            writeVarintField(fields, 15, nativeLimit);
+        }
         writeVarintField(fields, 16, 2);
-        writeStringField(fields, 26, "");
+        writeStringField(fields, 26, nativeFormatted.arrivalClock);
+        if (safeOptions.etaOutputMode == HudPrefs.ETA_OUTPUT_NATIVE) {
+            writeStringField(fields, 27, nativeFormatted.arrivalQualifier);
+        }
         writeVarintField(fields, 28, Math.max(0, nativeManeuver));
         if (!lanes.isEmpty()) writeStringField(fields, 29, laneText(lanes));
         writeStringField(fields, 30, HudCheckPayload.DIAGNOSTIC_GUIDE_LINE);
         return new Prepared(fields.toByteArray(), maneuverMode, nativeManeuver,
                 distanceMeters, displayText, lanes.size(), lanePng.length,
                 maneuverPng, displayTextStart, displayTextEnd, hasStreetEta,
-                metrics.diagnostics);
+                safeOptions.etaOutputMode == HudPrefs.ETA_OUTPUT_NATIVE
+                        ? nativeMetrics.diagnostics : metrics.diagnostics);
+    }
+
+    private static NativeEtaFormatter.Formatted nativeEta(
+            NativeEtaData data, Options options, long nowWallTimeMs) {
+        return NativeEtaFormatter.format(data, nowWallTimeMs, TimeZone.getDefault(),
+                options.nativeEta24Hour, Locale.getDefault());
     }
 
     private static boolean etaVisible(DirectTbtFrame frame, Options options) {
-        return options.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF
+        return options.etaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE
                 && (options.presentation.separateEta() || !sharedAlert(frame, options));
     }
 
@@ -304,10 +336,10 @@ public final class DirectTbtPayload {
     }
 
     static int speedPlacement(DirectTbtFrame frame, Options options) {
-        // Native is a UI-only stub until its separate vehicle output is implemented.
         if (frame == null || options == null || !frame.getSpeedLimit().isActive()
                 || options.speedLimitMode == HudPrefs.SPEED_LIMIT_OFF
-                || options.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE) {
+                || options.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE
+                || options.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE_HUD) {
             return SPEED_PLACEMENT_NONE;
         }
         if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_MANEUVER) {
@@ -657,6 +689,8 @@ public final class DirectTbtPayload {
         public final boolean street;
         public final boolean textDirection;
         public final boolean clampSmallDistance;
+        public final int etaOutputMode;
+        public final boolean nativeEta24Hour;
         public final int routeMetricsMode;
         public final boolean wholeRouteMetrics;
         public final boolean showEta;
@@ -787,6 +821,28 @@ public final class DirectTbtPayload {
                 int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
                 int speedLimitLaneOverlaySize, byte[] blankS72Png, Presentation presentation,
                 HudMapSettings mapSettings, boolean mapCalibration, byte[] mapPng) {
+            this(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
+                    presentation, mapSettings, mapCalibration, mapPng,
+                    routeMetricsMode == HudPrefs.ROUTE_METRICS_OFF
+                            ? HudPrefs.ETA_OUTPUT_OFF : HudPrefs.ETA_OUTPUT_ALTERNATIVE, true);
+        }
+
+        private Options(boolean png, boolean nativeManeuver, boolean lanes,
+                boolean distance, boolean street, boolean textDirection,
+                boolean clampSmallDistance, int routeMetricsMode,
+                boolean showEta, boolean showRemainingTime,
+                boolean showRemainingDistance, int speedLimitMode,
+                int speedLimitFreeFallback, int speedLimitOverlaySeconds,
+                int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
+                int speedLimitLaneOverlaySize, byte[] blankS72Png, Presentation presentation,
+                HudMapSettings mapSettings, boolean mapCalibration, byte[] mapPng,
+                int etaOutputMode, boolean nativeEta24Hour) {
+            this.etaOutputMode = etaOutputMode;
+            this.nativeEta24Hour = nativeEta24Hour;
             this.png = png;
             this.nativeManeuver = nativeManeuver;
             this.lanes = lanes;
@@ -818,7 +874,7 @@ public final class DirectTbtPayload {
                     showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png, value,
-                    mapSettings, mapCalibration, mapPng);
+                    mapSettings, mapCalibration, mapPng, etaOutputMode, nativeEta24Hour);
         }
 
         Options withSpeedLimitMode(int mode) {
@@ -828,7 +884,7 @@ public final class DirectTbtPayload {
                     showRemainingDistance, mode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
-                    presentation, mapSettings, mapCalibration, mapPng);
+                    presentation, mapSettings, mapCalibration, mapPng, etaOutputMode, nativeEta24Hour);
         }
 
         public Options withMapSettings(HudMapSettings value) {
@@ -839,7 +895,7 @@ public final class DirectTbtPayload {
                     showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
-                    presentation, settings, mapCalibration, mapPng);
+                    presentation, settings, mapCalibration, mapPng, etaOutputMode, nativeEta24Hour);
         }
 
         public Options withMapCalibration(boolean enabled) {
@@ -849,7 +905,7 @@ public final class DirectTbtPayload {
                     showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
-                    presentation, mapSettings, enabled, mapPng);
+                    presentation, mapSettings, enabled, mapPng, etaOutputMode, nativeEta24Hour);
         }
 
         /** Returns a new option snapshot with independent live map image content. */
@@ -859,15 +915,31 @@ public final class DirectTbtPayload {
                     showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
-                    presentation, mapSettings, mapCalibration, value);
+                    presentation, mapSettings, mapCalibration, value, etaOutputMode, nativeEta24Hour);
+        }
+
+        Options withEtaOutputMode(int mode) {
+            return withEtaConfiguration(mode, nativeEta24Hour);
+        }
+
+        Options withEtaConfiguration(int mode, boolean use24Hour) {
+            if (etaOutputMode == mode && nativeEta24Hour == use24Hour) return this;
+            return new Options(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
+                    presentation, mapSettings, mapCalibration, mapPng, mode, use24Hour);
         }
 
         public static Options from(Context context) {
             Context safeContext = Objects.requireNonNull(context, "context");
+            boolean use24Hour = android.text.format.DateFormat.is24HourFormat(safeContext);
             byte[] blankS72Png;
             synchronized (OPTIONS_LOCK) {
                 int revision = HudPrefs.outputOptionsRevision();
                 if (cachedOptions != null && cachedOptionsRevision == revision
+                        && cachedOptions.nativeEta24Hour == use24Hour
                         && revision == HudPrefs.outputOptionsRevision()) {
                     return cachedOptions;
                 }
@@ -905,11 +977,13 @@ public final class DirectTbtPayload {
                                 HudPrefs.getEtaRemainingDistanceColor(safeContext),
                                 HudPrefs.getWazeWarningDistanceColor(safeContext),
                                 HudPrefs.isEtaWaitForFullTextEnabled(safeContext)))
-                                .withMapSettings(HudPrefs.mapSettings(safeContext)));
+                                .withMapSettings(HudPrefs.mapSettings(safeContext))
+                                .withEtaConfiguration(HudPrefs.etaOutputMode(safeContext), use24Hour));
                 synchronized (OPTIONS_LOCK) {
                     if (snapshot.revision != HudPrefs.outputOptionsRevision()) continue;
                     if (cachedOptions != null
-                            && cachedOptionsRevision == snapshot.revision) {
+                            && cachedOptionsRevision == snapshot.revision
+                            && cachedOptions.nativeEta24Hour == use24Hour) {
                         return cachedOptions;
                     }
                     cachedOptions = snapshot.values;

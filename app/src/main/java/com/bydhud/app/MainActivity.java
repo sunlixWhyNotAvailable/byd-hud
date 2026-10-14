@@ -683,6 +683,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isTbtWithoutHudOutputEnabled(this),
                 HudPrefs.isSwitchToTbtOnHudStartEnabled(this),
                 HudPrefs.isWholeRouteMetricsEnabled(this),
+                HudPrefs.etaOutputMode(this),
                 HudPrefs.routeMetricsMode(this),
                 HudPrefs.etaOutputField(this),
                 HudPrefs.getEtaStreetFormat(this),
@@ -1386,6 +1387,10 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetRouteMetricsMode(int mode) {
         setRouteMetricsMode(mode);
+    }
+
+    public void composeSetEtaOutputMode(int mode) {
+        setEtaOutputMode(mode);
     }
 
     public void composeSetEtaOutputField(int field) {
@@ -2616,6 +2621,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean tbtWithoutHudOutputEnabled;
         public final boolean switchToTbtOnHudStartEnabled;
         public final boolean wholeRouteMetricsEnabled;
+        public final int etaOutputMode;
         public final int routeMetricsMode;
         public final int etaOutputField;
         public final int etaStreetFormat;
@@ -2706,7 +2712,8 @@ public final class MainActivity extends ComponentActivity {
                 int wazeAlertField,
                 boolean tbtWithoutHudOutputEnabled,
                 boolean switchToTbtOnHudStartEnabled,
-                boolean wholeRouteMetricsEnabled, int routeMetricsMode, int etaOutputField,
+                boolean wholeRouteMetricsEnabled, int etaOutputMode,
+                int routeMetricsMode, int etaOutputField,
                 int etaStreetFormat, boolean etaWaitForFullTextEnabled,
                 int etaArrivalColor, int etaDurationColor, int etaRemainingDistanceColor,
                 int wazeWarningDistanceColor,
@@ -2770,6 +2777,7 @@ public final class MainActivity extends ComponentActivity {
             this.tbtWithoutHudOutputEnabled = tbtWithoutHudOutputEnabled;
             this.switchToTbtOnHudStartEnabled = switchToTbtOnHudStartEnabled;
             this.wholeRouteMetricsEnabled = wholeRouteMetricsEnabled;
+            this.etaOutputMode = etaOutputMode;
             this.routeMetricsMode = routeMetricsMode;
             this.etaOutputField = Math.max(HudPrefs.ETA_OUTPUT_FIELD_STREET,
                     Math.min(HudPrefs.ETA_OUTPUT_FIELD_EXPERIMENTAL, etaOutputField));
@@ -2897,6 +2905,7 @@ public final class MainActivity extends ComponentActivity {
                     && tbtWithoutHudOutputEnabled == other.tbtWithoutHudOutputEnabled
                     && switchToTbtOnHudStartEnabled == other.switchToTbtOnHudStartEnabled
                     && wholeRouteMetricsEnabled == other.wholeRouteMetricsEnabled
+                    && etaOutputMode == other.etaOutputMode
                     && routeMetricsMode == other.routeMetricsMode
                     && etaOutputField == other.etaOutputField
                     && etaStreetFormat == other.etaStreetFormat
@@ -2985,7 +2994,8 @@ public final class MainActivity extends ComponentActivity {
                     distanceOutputEnabled, streetOutputEnabled, transliterationMode,
                     textDirectionOutputEnabled,
                     wazeAlertsEnabled, wazeAlertField, tbtWithoutHudOutputEnabled,
-                    switchToTbtOnHudStartEnabled, wholeRouteMetricsEnabled, routeMetricsMode,
+                    switchToTbtOnHudStartEnabled, wholeRouteMetricsEnabled, etaOutputMode,
+                    routeMetricsMode,
                     etaOutputField, etaStreetFormat, etaWaitForFullTextEnabled,
                     etaArrivalColor, etaDurationColor, etaRemainingDistanceColor,
                     wazeWarningDistanceColor,
@@ -4194,6 +4204,15 @@ public final class MainActivity extends ComponentActivity {
         int persisted = HudPrefs.routeMetricsMode(this);
         appendStatus("Route metrics mode " + persisted);
         AppEventLogger.event(this, "ui route_metrics_mode=" + persisted);
+        refreshControls();
+    }
+
+    private void setEtaOutputMode(int mode) {
+        HudPrefs.setEtaOutputMode(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.etaOutputMode(this);
+        appendStatus("ETA output mode " + persisted);
+        AppEventLogger.event(this, "ui eta_output_mode=" + persisted);
         refreshControls();
     }
 

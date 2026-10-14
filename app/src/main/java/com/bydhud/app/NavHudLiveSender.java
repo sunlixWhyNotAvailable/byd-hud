@@ -305,7 +305,21 @@ final class NavHudLiveSender {
             current = instance;
         }
         if (current != null) {
-            current.handler.post(() -> current.onOutputPreferenceChangedOnMain(key));
+            int speedLimitMode = "speed_limit_mode".equals(key)
+                    ? HudPrefs.speedLimitMode(current.context) : -1;
+            current.handler.post(() -> current.onOutputPreferenceChangedOnMain(
+                    key, speedLimitMode));
+        }
+    }
+
+    static void onNavigatorPackageChanged(String packageName) {
+        if (!NativeEtaTransportPolicy.AMAP_PACKAGE_NAME.equals(packageName)) return;
+        NavHudLiveSender current;
+        synchronized (NavHudLiveSender.class) {
+            current = instance;
+        }
+        if (current != null) {
+            current.handler.post(() -> current.tbtPublisher.onPackageChanged(packageName));
         }
     }
 
@@ -3769,6 +3783,14 @@ final class NavHudLiveSender {
         String owner = normalizeString(ownerPackage);
         DirectTbtFrame.SpeedLimit speed = DirectSpeedLimitStore.snapshot(owner);
         DirectTbtPayload.Options options = NativeSpeedLimitController.outputOptions(context, owner);
+        if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE_HUD) {
+            resetSpeedOverlayState();
+            speedOverlayOwner = owner;
+            speedOverlayDisplayValue = speed.getDisplayValue();
+            speedOverlayKph = speed.getKph();
+            speedOverlayUnit = speed.getUnit();
+            return frame.withSpeedLimit(speed);
+        }
         if (!owner.equals(speedOverlayOwner)) {
             resetSpeedOverlayState();
             speedOverlayOwner = owner;
@@ -4518,7 +4540,20 @@ final class NavHudLiveSender {
                 "preferences", 0L, "changed:" + safeReason(key), snapshot);
     }
 
-    private void onOutputPreferenceChangedOnMain(String key) {
+    private void onOutputPreferenceChangedOnMain(String key, int speedLimitMode) {
+        if ("speed_limit_mode".equals(key)) {
+            hudOutput.onSpeedLimitModeChanged(speedLimitMode);
+            if (isRuntimeEnabled() && !mapLiveState.running
+                    && tbtPublisher.isRouteActive()) {
+                String owner = normalizePackage(tbtPublisher.ownerPackage());
+                if (hasLatestDirectFrame(owner)) {
+                    republishLatestDirectFrame(owner, "speed-limit-mode-changed");
+                }
+            }
+        }
+        if (NativeEtaTransportPolicy.isEtaPreferenceKey(key)) {
+            tbtPublisher.refreshNativeEta();
+        }
         logChangedOutputPreferences(key);
         if (mapLiveState.running) {
             refreshMapLiveSettingsOnWorker(mapLiveState.session, key);

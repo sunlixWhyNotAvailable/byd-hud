@@ -15,6 +15,8 @@ final class HudOutputPreferenceSnapshot {
     final int textTransliterationMode;
     final boolean clampSmallDistance;
     final boolean wazeAlerts;
+    final int etaOutputMode;
+    final boolean nativeEta24Hour;
     final int routeMetricsMode;
     final boolean eta;
     final boolean remainingTime;
@@ -47,6 +49,8 @@ final class HudOutputPreferenceSnapshot {
         this.textTransliterationMode = textTransliterationMode;
         clampSmallDistance = options.clampSmallDistance;
         this.wazeAlerts = wazeAlerts;
+        etaOutputMode = options.etaOutputMode;
+        nativeEta24Hour = options.nativeEta24Hour;
         routeMetricsMode = options.routeMetricsMode;
         eta = options.showEta;
         remainingTime = options.showRemainingTime;
@@ -97,6 +101,8 @@ final class HudOutputPreferenceSnapshot {
                 + " textTransliteration=" + textTransliterationMode
                 + " clampSmallDistance=" + bit(clampSmallDistance)
                 + " wazeAlerts=" + bit(wazeAlerts)
+                + " etaOutputMode=" + etaOutputMode
+                + " nativeEta24Hour=" + bit(nativeEta24Hour)
                 + " routeMetrics=" + routeMetricsMode
                 + " eta=" + bit(eta)
                 + " remainingTime=" + bit(remainingTime)
@@ -126,6 +132,8 @@ final class HudOutputPreferenceSnapshot {
                 && textTransliterationMode == other.textTransliterationMode
                 && clampSmallDistance == other.clampSmallDistance
                 && wazeAlerts == other.wazeAlerts
+                && etaOutputMode == other.etaOutputMode
+                && nativeEta24Hour == other.nativeEta24Hour
                 && routeMetricsMode == other.routeMetricsMode
                 && eta == other.eta
                 && remainingTime == other.remainingTime
@@ -145,7 +153,7 @@ final class HudOutputPreferenceSnapshot {
     public int hashCode() {
         return Objects.hash(
                 png, nativeManeuver, lanes, distance, street, textDirection,
-                textTransliterationMode, clampSmallDistance, wazeAlerts, routeMetricsMode, eta,
+                textTransliterationMode, clampSmallDistance, wazeAlerts, etaOutputMode, nativeEta24Hour, routeMetricsMode, eta,
                 remainingTime, remainingDistance, speedLimitMode, nativeSpeedFallback,
                 speedLimitFreeFallback, speedLimitOverlaySeconds,
                 speedLimitCompositePlacement, speedLimitManeuverOverlaySize,

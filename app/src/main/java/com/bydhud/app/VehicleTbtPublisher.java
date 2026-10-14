@@ -3,6 +3,12 @@ package com.bydhud.app;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
+import android.content.ComponentName;
+import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.os.Handler;
 import android.os.SystemClock;
 import android.util.Log;
@@ -11,7 +17,10 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.TimeZone;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /** Publishes the normalized route frame to the dashboard TBT compatibility planes. */
@@ -22,18 +31,41 @@ final class VehicleTbtPublisher {
     static final String MANUAL_OWNER = "bydhud.manual";
 
     private static final String TAG = "BydHudVehicleTbt";
-    private static final String AMAP_ACTION = "AUTONAVI_STANDARD_BROADCAST_SEND";
-    private static final String AMAP_PACKAGE = "com.byd.amapservice";
+    private static final String AMAP_ACTION = NativeEtaTransportPolicy.AMAP_ACTION;
+    private static final String AMAP_PACKAGE = NativeEtaTransportPolicy.AMAP_PACKAGE_NAME;
     private static final int FLAG_RECEIVER_INCLUDE_BACKGROUND = 0x01000000;
     private static final int FID_NAV_STATUS = 1_138_753_594;
     private static final int FID_SIMPLE_ICON = 1_139_806_224;
     private static final int FID_DUAL_ICON = 1_139_806_256;
     private static final int FID_DISTANCE = 1_139_806_232;
     private static final int FID_ROAD = 1_140_461_576;
+    private static final int FID_NATIVE_ETA_DAYS = 1_139_810_340;
+    private static final int FID_NATIVE_ETA_HOURS = 1_139_810_320;
+    private static final int FID_NATIVE_ETA_MINUTES = 1_139_810_328;
+    private static final int FID_NATIVE_ETA_UNDER_30 = 1_139_810_334;
+    private static final int FID_NATIVE_ETA_DISTANCE = 1_139_810_344;
+    private static final int FID_NATIVE_ETA_ARRIVAL_DAY = 1_139_838_992;
+    private static final int FID_NATIVE_ETA_ARRIVAL_HOUR = 1_139_839_000;
+    private static final int FID_NATIVE_ETA_ARRIVAL_MINUTE = 1_139_839_008;
+    private static final int FID_NATIVE_ETA_ARRIVAL_SECOND = 1_139_839_016;
+    private static final int CACHE_KEY_STATISTIC_DAY_PERIOD = Integer.MIN_VALUE;
+    private static final int[] NATIVE_ETA_INSTRUMENT_FIDS = {
+            FID_NATIVE_ETA_DAYS, FID_NATIVE_ETA_HOURS, FID_NATIVE_ETA_MINUTES,
+            FID_NATIVE_ETA_UNDER_30, FID_NATIVE_ETA_DISTANCE,
+            FID_NATIVE_ETA_ARRIVAL_DAY, FID_NATIVE_ETA_ARRIVAL_HOUR,
+            FID_NATIVE_ETA_ARRIVAL_MINUTE, FID_NATIVE_ETA_ARRIVAL_SECOND,
+            CACHE_KEY_STATISTIC_DAY_PERIOD
+    };
+    private static final long NATIVE_ETA_PERIOD_MS =
+            NativeEtaTransportPolicy.PERIODIC_DISPATCH_INTERVAL_MS;
+    private static final long DIRECT_ETA_RETRY_AFTER_FAILED_STATISTIC_MS = 3_500L;
     private final Context context;
     private final Handler ownerHandler;
     private final InstrumentProxyManager instrument;
     private final AtomicLong transactionSequence = new AtomicLong();
+    private final AtomicLong nativeEtaAdmissionRevision = new AtomicLong();
+    private final Map<Integer, NativeEtaFieldCache> nativeEtaFieldCache = new HashMap<>();
+    private final Runnable nativeEtaTick = this::handleNativeEtaTick;
     private volatile String ownerPackage = "";
     private volatile long ownerGeneration = Long.MIN_VALUE;
     private volatile boolean routeActive;
@@ -62,6 +94,24 @@ final class VehicleTbtPublisher {
     private volatile int hudCheckLightIndex = -1;
     private boolean hudCheckLightOwned;
     private long hudCheckLightLastAttemptMs;
+    private NativeEtaTransportPolicy.ReceiverState amapReceiverState =
+            NativeEtaTransportPolicy.ReceiverState.UNKNOWN;
+    private String amapReceiverReason = "not-resolved";
+    private DirectTbtFrame latestNativeEtaFrame;
+    private Trace latestNativeEtaTrace;
+    private NativeEtaSnapshot latestNativeEta;
+    private String lastNativeEtaSemanticKey = "";
+    private boolean nativeEtaTickScheduled;
+    private boolean nativeEtaInFlight;
+    private boolean nativeEtaDispatchPending;
+    private boolean nativeEtaPendingPeriodic;
+    private long nativeEtaDispatchSequence;
+    private long activeNativeEtaDispatchSequence;
+    private String activeNativeEtaSemanticKey = "";
+    private long lastNativeEtaFailureLogAtMs = Long.MIN_VALUE;
+    private int nativeEtaOutputMode = HudPrefs.ETA_OUTPUT_OFF;
+    private int failedStatisticDayPeriod = -1;
+    private long failedStatisticDayPeriodAtMs = Long.MIN_VALUE;
     private final HudCheckDiagnostics hudCheckDiagnostics = new HudCheckDiagnostics();
     private HudCheckState latestHudCheck;
     private String hudCheckInstrumentReason = "pending";
@@ -149,6 +199,8 @@ final class VehicleTbtPublisher {
                 sendAmapTerminal(replaced);
                 ownerGeneration = generation;
                 ++routeToken;
+                resetNativeEtaState("route-generation-replaced");
+                resolveAmapReceiver("route-generation-replaced");
                 Trace started = trace(owner, generation, reason, null, null);
                 sendStatus(STATUS_ACTIVE, started);
                 record(started, "lifecycle", "begin", "navigation",
@@ -181,6 +233,8 @@ final class VehicleTbtPublisher {
             endRoute(ownerPackage, ownerGeneration, "source-replaced",
                     !replacingDirectWithManual);
         }
+        resetNativeEtaState("route-start");
+        resolveAmapReceiver("route-start");
         ownerPackage = owner;
         ownerGeneration = generation;
         routeActive = true;
@@ -228,6 +282,8 @@ final class VehicleTbtPublisher {
         ownerHasHudPriority = successorHasHudPriority;
         instrument.setOutputDemand(true, "handoff:" + sourceForOwner(successor));
         ++routeToken;
+        resetNativeEtaState("direct-owner-replaced");
+        resolveAmapReceiver("direct-owner-replaced");
         teardownEligible = false;
         teardownOwner = "";
         teardownGeneration = Long.MIN_VALUE;
@@ -243,7 +299,10 @@ final class VehicleTbtPublisher {
         if (successorFrame != null) {
             lastGuidanceHasAmapFallback = true;
             sendInstrumentFrame(successorFrame, successorTrace);
-            sendAmapFrame(successorFrame, successorTrace);
+            NativeEtaSnapshot etaSnapshot = updateNativeEta(
+                    successorFrame, successorTrace, reason);
+            dispatchNativeEtaSnapshot(etaSnapshot, successorFrame,
+                    successorTrace, reason, false, true);
         }
         if (switchDashboard) {
             dispatchDashboard(successor, successorGeneration,
@@ -280,7 +339,8 @@ final class VehicleTbtPublisher {
         Trace trace = trace(packageName, generation, reason, frame, null);
         lastGuidanceHasAmapFallback = true;
         sendInstrumentFrame(frame, trace);
-        sendAmapFrame(frame, trace);
+        NativeEtaSnapshot etaSnapshot = updateNativeEta(frame, trace, reason);
+        dispatchNativeEtaSnapshot(etaSnapshot, frame, trace, reason, false, true);
     }
 
     void publishManualFrame(String packageName, long generation,
@@ -348,6 +408,7 @@ final class VehicleTbtPublisher {
         long endedGeneration = ownerGeneration;
         Trace trace = trace(endedOwner, endedGeneration, reason, null, null);
         ++routeToken;
+        resetNativeEtaState("route-end:" + safe(reason));
         handoffPendingInstrumentRecovery = false;
         lastGuidanceHasAmapFallback = false;
         sendTerminalGuidanceClear(trace);
@@ -648,9 +709,493 @@ final class VehicleTbtPublisher {
         hasLastInstrumentSemantic = true;
     }
 
-    private void sendAmapFrame(DirectTbtFrame frame, Trace trace) {
+    void refreshNativeEta() {
+        DirectTbtFrame frame = latestNativeEtaFrame;
+        resetNativeEtaCaches("preference-change");
+        lastNativeEtaSemanticKey = "";
+        hasLastAmapSemantic = false;
+        if (!routeActive || frame == null) {
+            lastNativeEtaSemanticKey = "";
+            return;
+        }
+        Trace trace = trace(ownerPackage, ownerGeneration,
+                "native-eta-preference-change", frame, null);
+        NativeEtaSnapshot snapshot = updateNativeEta(
+                frame, trace, "preference-change");
+        dispatchNativeEtaSnapshot(snapshot, frame, trace,
+                "preference-change", false, true);
+    }
+
+    void onPackageChanged(String packageName) {
+        if (!AMAP_PACKAGE.equals(packageName)) return;
+        resolveAmapReceiver("package-change");
+        if (!routeActive || latestNativeEtaFrame == null) return;
+        DirectTbtFrame frame = latestNativeEtaFrame;
+        resetNativeEtaCaches("package-change");
+        lastNativeEtaSemanticKey = "";
+        hasLastAmapSemantic = false;
+        Trace trace = trace(ownerPackage, ownerGeneration,
+                "native-eta-package-change", frame, null);
+        NativeEtaSnapshot snapshot = updateNativeEta(
+                frame, trace, "package-change");
+        dispatchNativeEtaSnapshot(snapshot, frame, trace,
+                "package-change", false, true);
+    }
+
+    private NativeEtaSnapshot updateNativeEta(
+            DirectTbtFrame frame, Trace trace, String reason) {
+        if (frame == null) return null;
+        DirectTbtPayload.Options options = DirectTbtPayload.Options.from(context);
+        nativeEtaOutputMode = options.etaOutputMode;
+        latestNativeEtaFrame = frame;
+        latestNativeEtaTrace = trace;
+        if (options.etaOutputMode != HudPrefs.ETA_OUTPUT_NATIVE) {
+            if (latestNativeEta != null || nativeEtaTickScheduled
+                    || !lastNativeEtaSemanticKey.isEmpty()) {
+                resetNativeEtaState("mode-disabled");
+                latestNativeEtaFrame = frame;
+                latestNativeEtaTrace = trace;
+            }
+            return null;
+        }
+        long nowWallMs = System.currentTimeMillis();
+        NativeEtaData data = NativeEtaData.from(frame, options, nowWallMs);
+        NativeEtaFormatter.Formatted formatted = NativeEtaFormatter.format(data,
+                nowWallMs, TimeZone.getDefault(), options.nativeEta24Hour,
+                java.util.Locale.getDefault());
+        NativeEtaTransportPolicy.Writer writer = NativeEtaTransportPolicy.writerFor(
+                options.etaOutputMode, amapReceiverState);
+        String semanticKey = nativeEtaSemanticKey(
+                options, data, formatted, writer);
+        boolean semanticChanged = !semanticKey.equals(lastNativeEtaSemanticKey);
+        if (semanticChanged) nativeEtaAdmissionRevision.incrementAndGet();
+        NativeEtaSnapshot snapshot = new NativeEtaSnapshot(
+                frame, trace, options, data, formatted, writer, semanticKey,
+                nowWallMs, semanticChanged);
+        latestNativeEtaFrame = frame;
+        latestNativeEtaTrace = trace;
+        latestNativeEta = snapshot;
+        lastNativeEtaSemanticKey = semanticKey;
+        ensureNativeEtaTick();
+        if (semanticChanged) logNativeEtaSelection(snapshot, reason);
+        return snapshot;
+    }
+
+    private void dispatchNativeEtaSnapshot(NativeEtaSnapshot snapshot,
+            DirectTbtFrame frame, Trace trace, String reason,
+            boolean periodic, boolean publishAmapGuidance) {
+        if (!routeActive || frame == null || trace == null) return;
+        NativeEtaTransportPolicy.Writer writer = snapshot == null
+                ? NativeEtaTransportPolicy.Writer.NONE : snapshot.writer;
+        if (publishAmapGuidance
+                || (periodic && writer == NativeEtaTransportPolicy.Writer.AMAP)) {
+            sendAmapFrame(frame, trace, snapshot, !periodic);
+        }
+        if (snapshot == null) return;
+        if (snapshot.writer == NativeEtaTransportPolicy.Writer.INSTRUMENT) {
+            sendNativeEtaInstrument(snapshot, reason, periodic);
+        } else if (snapshot.writer == NativeEtaTransportPolicy.Writer.UNRESOLVED
+                && snapshot.semanticChanged) {
+            log("native_eta mode=" + snapshot.options.etaOutputMode
+                    + " writer=unresolved reason=" + safe(reason)
+                    + " receiver=" + amapReceiverReason);
+        }
+    }
+
+    private void sendNativeEtaInstrument(
+            NativeEtaSnapshot snapshot, String reason, boolean periodic) {
+        if (snapshot == null || snapshot.writer
+                != NativeEtaTransportPolicy.Writer.INSTRUMENT) return;
+        long nowElapsedMs = SystemClock.elapsedRealtime();
+        int[] values = nativeEtaInstrumentValues(snapshot.formatted);
+        int[] dispatchValues = new int[values.length];
+        Arrays.fill(dispatchValues, -1);
+        for (int index = 0; index < values.length; index++) {
+            int value = values[index];
+            if (value < 0) continue;
+            int cacheKey = NATIVE_ETA_INSTRUMENT_FIDS[index];
+            NativeEtaFieldCache cached = nativeEtaFieldCache.get(cacheKey);
+            boolean eligible = NativeEtaTransportPolicy.shouldDispatchDirectValue(
+                    cached != null, cached == null ? -1 : cached.value,
+                    cached == null ? -1L : cached.lastSuccessElapsedMs,
+                    value, nowElapsedMs);
+            if (index == 9 && failedStatisticDayPeriod == value
+                    && nowElapsedMs >= failedStatisticDayPeriodAtMs
+                    && nowElapsedMs - failedStatisticDayPeriodAtMs
+                    < DIRECT_ETA_RETRY_AFTER_FAILED_STATISTIC_MS) {
+                continue;
+            }
+            if (eligible) dispatchValues[index] = value;
+        }
+        boolean hasValue = false;
+        for (int value : dispatchValues) hasValue |= value >= 0;
+        if (nativeEtaInFlight) {
+            if (!snapshot.semanticKey.equals(activeNativeEtaSemanticKey)) {
+                nativeEtaDispatchPending = true;
+                nativeEtaPendingPeriodic |= periodic;
+            }
+            return;
+        }
+        if (!hasValue) return;
+
+        nativeEtaInFlight = true;
+        nativeEtaDispatchPending = false;
+        nativeEtaPendingPeriodic = false;
+        activeNativeEtaSemanticKey = snapshot.semanticKey;
+        long routeRequestToken = routeToken;
+        long dispatchId = ++nativeEtaDispatchSequence;
+        activeNativeEtaDispatchSequence = dispatchId;
+        long admissionRevision = nativeEtaAdmissionRevision.get();
+        int[] sentValues = dispatchValues.clone();
+        long startedAtMs = SystemClock.elapsedRealtime();
+        instrument.sendNativeEta(sentValues, nativeEtaAdmissionRevision,
+                admissionRevision, result -> ownerHandler.post(() -> {
+            long finishedAtMs = SystemClock.elapsedRealtime();
+            recordNativeEtaInstrumentResult(result, snapshot.trace,
+                    sentValues, elapsedBetween(startedAtMs, finishedAtMs));
+            if (dispatchId != activeNativeEtaDispatchSequence
+                    || routeRequestToken != routeToken) return;
+            nativeEtaInFlight = false;
+            cacheSuccessfulNativeEtaFields(result, sentValues, finishedAtMs);
+            rememberFailedStatisticDayPeriod(result, sentValues, finishedAtMs);
+            if (!nativeEtaResultSucceeded(result)) {
+                if (lastNativeEtaFailureLogAtMs == Long.MIN_VALUE
+                        || finishedAtMs - lastNativeEtaFailureLogAtMs >= 3_500L) {
+                    lastNativeEtaFailureLogAtMs = finishedAtMs;
+                    log("native_eta mode=" + snapshot.options.etaOutputMode
+                            + " writer=instrument reason=" + safe(reason)
+                            + " result=" + nativeEtaResultReason(result)
+                            + " values=" + nativeEtaValuesText(sentValues));
+                }
+            }
+            if (nativeEtaDispatchPending && latestNativeEta != null) {
+                boolean nextPeriodic = nativeEtaPendingPeriodic;
+                nativeEtaDispatchPending = false;
+                nativeEtaPendingPeriodic = false;
+                sendNativeEtaInstrument(latestNativeEta,
+                        nextPeriodic ? "periodic" : "semantic-change", nextPeriodic);
+            }
+        }));
+        if (snapshot.semanticChanged || periodic) {
+            record(snapshot.trace, "instrument_proxy", "dispatch", "native_eta",
+                    nativeEtaInstrumentBytes(sentValues), 0, 0L,
+                    "writer=instrument reason=" + safe(reason));
+        }
+    }
+
+    private void recordNativeEtaInstrumentResult(
+            InstrumentProxyManager.Result result, Trace trace,
+            int[] values, long durationMs) {
+        if (result == null || !result.available || result.operations.isEmpty()) {
+            String error = result == null ? "no result"
+                    : result.error.isEmpty() ? "proxy unavailable" : result.error;
+            record(trace, "instrument_proxy", "invoke", "native_eta",
+                    nativeEtaInstrumentBytes(values), -1, durationMs, error);
+            return;
+        }
+        for (InstrumentProxyContract.Operation operation : result.operations) {
+            String name = operation.name;
+            int separator = name.indexOf(':');
+            String plane = separator > 0 ? name.substring(0, separator) : "instrument_proxy";
+            String target = separator > 0 ? name.substring(separator + 1) : name;
+            int featureId = parseTargetInt(target, -1);
+            int value = nativeEtaValueForOperation(name, values);
+            byte[] arguments = featureId >= 0 && value >= 0
+                    ? ints(featureId, value) : nativeEtaInstrumentBytes(values);
+            record(trace, plane, plane.endsWith("fid") ? "set" : "invoke",
+                    target, arguments, operation.result, operation.durationMs,
+                    operation.error.isEmpty() ? result.error : operation.error);
+        }
+    }
+
+    private void cacheSuccessfulNativeEtaFields(
+            InstrumentProxyManager.Result result, int[] sentValues, long nowElapsedMs) {
+        if (result == null || !result.available) return;
+        for (InstrumentProxyContract.Operation operation : result.operations) {
+            if (operation.result != 0 || !operation.error.isEmpty()) continue;
+            int separator = operation.name.indexOf(':');
+            if (separator <= 0) continue;
+            String prefix = operation.name.substring(0, separator);
+            String target = operation.name.substring(separator + 1);
+            if ("instrument_fid".equals(prefix)) {
+                int featureId = parseTargetInt(target, -1);
+                int value = nativeEtaValueForFid(featureId, sentValues);
+                if (value >= 0) nativeEtaFieldCache.put(featureId,
+                        new NativeEtaFieldCache(value, nowElapsedMs));
+            } else if ("statistic_eta_period".equals(prefix)) {
+                int value = sentValues[9];
+                if (value >= 0 && parseTargetInt(target, -1) >= 0) {
+                    nativeEtaFieldCache.put(CACHE_KEY_STATISTIC_DAY_PERIOD,
+                            new NativeEtaFieldCache(value, nowElapsedMs));
+                    failedStatisticDayPeriod = -1;
+                    failedStatisticDayPeriodAtMs = Long.MIN_VALUE;
+                }
+            }
+        }
+    }
+
+    private void rememberFailedStatisticDayPeriod(
+            InstrumentProxyManager.Result result, int[] sentValues, long nowElapsedMs) {
+        if (sentValues.length <= 9 || sentValues[9] < 0
+                || result == null || !result.available) return;
+        for (InstrumentProxyContract.Operation operation : result.operations) {
+            if (operation.name.startsWith("statistic_eta_period:")
+                    && (operation.result != 0 || !operation.error.isEmpty())) {
+                failedStatisticDayPeriod = sentValues[9];
+                failedStatisticDayPeriodAtMs = nowElapsedMs;
+                return;
+            }
+        }
+    }
+
+    private boolean nativeEtaResultSucceeded(InstrumentProxyManager.Result result) {
+        if (result == null || !result.available || result.operations.isEmpty()) return false;
+        boolean hasWrite = false;
+        for (InstrumentProxyContract.Operation operation : result.operations) {
+            if (operation.name.startsWith("instrument_fid:")
+                    || operation.name.startsWith("statistic_eta_period:")) {
+                hasWrite = true;
+                if (operation.result != 0 || !operation.error.isEmpty()) return false;
+            }
+        }
+        return hasWrite;
+    }
+
+    private String nativeEtaResultReason(InstrumentProxyManager.Result result) {
+        if (result == null || !result.available) {
+            return result == null ? "no-result" : safe(result.error);
+        }
+        for (InstrumentProxyContract.Operation operation : result.operations) {
+            if (operation.result != 0 || !operation.error.isEmpty()) {
+                return operation.name + ":" + (operation.error.isEmpty()
+                        ? operation.result : operation.error);
+            }
+        }
+        return safe(result.error);
+    }
+
+    private static int nativeEtaValueForOperation(String name, int[] values) {
+        if (name != null && name.startsWith("statistic_eta_period:")) {
+            return values != null && values.length > 9 ? values[9] : -1;
+        }
+        int separator = name == null ? -1 : name.indexOf(':');
+        if (separator <= 0 || !"instrument_fid".equals(name.substring(0, separator))) {
+            return -1;
+        }
+        return nativeEtaValueForFid(parseTargetInt(name.substring(separator + 1), -1), values);
+    }
+
+    private static int nativeEtaValueForFid(int featureId, int[] values) {
+        if (values == null || values.length != NATIVE_ETA_INSTRUMENT_FIDS.length) return -1;
+        for (int index = 0; index < NATIVE_ETA_INSTRUMENT_FIDS.length - 1; index++) {
+            if (NATIVE_ETA_INSTRUMENT_FIDS[index] == featureId) return values[index];
+        }
+        return -1;
+    }
+
+    private static int[] nativeEtaInstrumentValues(NativeEtaFormatter.Formatted value) {
+        return NativeEtaTransportPolicy.instrumentValues(value);
+    }
+
+    private static byte[] nativeEtaInstrumentBytes(int[] values) {
+        int[] safeValues = values == null ? new int[0] : values;
+        ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES * safeValues.length)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        for (int value : safeValues) buffer.putInt(value);
+        return buffer.array();
+    }
+
+    private static byte[] nativeEtaAmapBytes(
+            int distance, int seconds, String durationText, String arrivalText) {
+        byte[] duration = preserveText(durationText).getBytes(StandardCharsets.UTF_8);
+        byte[] arrival = preserveText(arrivalText).getBytes(StandardCharsets.UTF_8);
+        ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES * 4
+                        + duration.length + arrival.length)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        return buffer.putInt(distance).putInt(seconds)
+                .putInt(duration.length).put(duration)
+                .putInt(arrival.length).put(arrival).array();
+    }
+
+    private static byte[] appendBytes(byte[] left, byte[] right) {
+        byte[] first = left == null ? new byte[0] : left;
+        byte[] second = right == null ? new byte[0] : right;
+        ByteBuffer buffer = ByteBuffer.allocate(first.length + second.length)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        return buffer.put(first).put(second).array();
+    }
+
+    private static String amapString(String value) {
+        return value == null ? "-1" : value;
+    }
+
+    private static long elapsedBetween(long startMs, long finishMs) {
+        return finishMs >= startMs ? finishMs - startMs : 0L;
+    }
+
+    private static int parseTargetInt(String value, int fallback) {
+        try { return Integer.parseInt(value); }
+        catch (RuntimeException ignored) { return fallback; }
+    }
+
+    private static String nativeEtaValuesText(int[] values) {
+        if (values == null) return "";
+        return "days=" + values[0] + " hours=" + values[1]
+                + " minutes=" + values[2] + " under30=" + values[3]
+                + " distanceM=" + values[4] + " arrivalDay=" + values[5]
+                + " arrivalHour=" + values[6] + " arrivalMinute=" + values[7]
+                + " arrivalSecond=" + values[8] + " dayPeriod=" + values[9];
+    }
+
+    private static String nativeEtaSemanticKey(
+            DirectTbtPayload.Options options, NativeEtaData data,
+            NativeEtaFormatter.Formatted formatted,
+            NativeEtaTransportPolicy.Writer writer) {
+        return options.etaOutputMode + "|" + options.routeMetricsMode + "|"
+                + options.wholeRouteMetrics + "|" + options.showEta + "|"
+                + options.showRemainingTime + "|" + options.showRemainingDistance + "|"
+                + options.nativeEta24Hour + "|" + java.util.Locale.getDefault() + "|"
+                + writer + "|" + data.remainingSeconds + "|" + data.remainingMeters + "|"
+                + formatted.arrivalClock + "|" + formatted.arrivalQualifier + "|"
+                + formatted.routeRemainTimeAuto + "|" + formatted.etaText + "|"
+                + formatted.durationDays + "|" + formatted.durationHours + "|"
+                + formatted.durationMinutes + "|" + formatted.remainingUnder30 + "|"
+                + formatted.distanceMeters + "|" + formatted.arrivalDay + "|"
+                + formatted.arrivalHour + "|" + formatted.arrivalMinute + "|"
+                + formatted.arrivalSecond + "|" + formatted.dayPeriod;
+    }
+
+    private void logNativeEtaSelection(NativeEtaSnapshot snapshot, String reason) {
+        log("native_eta mode=" + snapshot.options.etaOutputMode
+                + " writer=" + snapshot.writer
+                + " scope=" + snapshot.options.routeMetricsMode
+                + " preferWhole=" + snapshot.options.wholeRouteMetrics
+                + " showEta=" + snapshot.options.showEta
+                + " showTime=" + snapshot.options.showRemainingTime
+                + " showDistance=" + snapshot.options.showRemainingDistance
+                + " reason=" + safe(reason)
+                + " receiver=" + amapReceiverReason
+                + " metrics=" + snapshot.data.diagnostics
+                + " arrival=" + snapshot.formatted.arrivalClock
+                + " qualifier=" + snapshot.formatted.arrivalQualifier
+                + " duration=" + snapshot.formatted.routeRemainTimeAuto
+                + " etaText=" + snapshot.formatted.etaText
+                + " remainingSeconds=" + snapshot.data.remainingSeconds
+                + " distanceMeters=" + snapshot.formatted.distanceMeters
+                + " dayPeriod=" + snapshot.formatted.dayPeriod);
+    }
+
+    private void ensureNativeEtaTick() {
+        if (nativeEtaTickScheduled || !routeActive) return;
+        nativeEtaTickScheduled = true;
+        ownerHandler.postDelayed(nativeEtaTick, NATIVE_ETA_PERIOD_MS);
+    }
+
+    private void handleNativeEtaTick() {
+        nativeEtaTickScheduled = false;
+        if (!routeActive || latestNativeEtaFrame == null) return;
+        DirectTbtFrame frame = latestNativeEtaFrame;
+        Trace trace = trace(ownerPackage, ownerGeneration,
+                "native-eta-periodic", frame, null);
+        NativeEtaSnapshot snapshot = updateNativeEta(
+                frame, trace, "periodic");
+        dispatchNativeEtaSnapshot(snapshot, frame, trace,
+                "periodic", true, false);
+    }
+
+    private void resetNativeEtaCaches(String reason) {
+        nativeEtaAdmissionRevision.incrementAndGet();
+        nativeEtaFieldCache.clear();
+        failedStatisticDayPeriod = -1;
+        failedStatisticDayPeriodAtMs = Long.MIN_VALUE;
+        nativeEtaDispatchSequence++;
+        activeNativeEtaDispatchSequence = nativeEtaDispatchSequence;
+        nativeEtaInFlight = false;
+        nativeEtaDispatchPending = false;
+        nativeEtaPendingPeriodic = false;
+        activeNativeEtaSemanticKey = "";
+        if (!safe(reason).isEmpty()) {
+            log("native_eta cache_reset reason=" + safe(reason));
+        }
+    }
+
+    private void resetNativeEtaState(String reason) {
+        ownerHandler.removeCallbacks(nativeEtaTick);
+        nativeEtaTickScheduled = false;
+        resetNativeEtaCaches(reason);
+        latestNativeEtaFrame = null;
+        latestNativeEtaTrace = null;
+        latestNativeEta = null;
+        lastNativeEtaSemanticKey = "";
+    }
+
+    private void resolveAmapReceiver(String reason) {
+        AmapReceiverResolution resolution = resolveAmapReceiver(context);
+        amapReceiverState = resolution.state;
+        amapReceiverReason = resolution.reason;
+        log("native_eta receiver=" + amapReceiverState + " reason="
+                + amapReceiverReason + " trigger=" + safe(reason));
+    }
+
+    private static AmapReceiverResolution resolveAmapReceiver(Context context) {
+        PackageManager packageManager = context.getPackageManager();
+        try {
+            PackageInfo packageInfo = packageManager.getPackageInfo(AMAP_PACKAGE, 0);
+            ApplicationInfo applicationInfo = packageInfo.applicationInfo;
+            if (applicationInfo == null || !applicationInfo.enabled) {
+                return new AmapReceiverResolution(
+                        NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
+                        "package-disabled");
+            }
+            List<ResolveInfo> receivers = packageManager.queryBroadcastReceivers(
+                    new Intent(AMAP_ACTION).setPackage(AMAP_PACKAGE),
+                    PackageManager.MATCH_DISABLED_COMPONENTS);
+            if (receivers == null) {
+                return new AmapReceiverResolution(
+                        NativeEtaTransportPolicy.ReceiverState.UNKNOWN,
+                        "receiver-query-null");
+            }
+            for (ResolveInfo resolved : receivers) {
+                ActivityInfo receiver = resolved == null ? null : resolved.activityInfo;
+                if (receiver == null || !AMAP_PACKAGE.equals(receiver.packageName)) continue;
+                if (!receiver.exported) continue;
+                ComponentName component = new ComponentName(
+                        receiver.packageName, receiver.name);
+                int componentState = packageManager.getComponentEnabledSetting(component);
+                boolean enabled = componentState == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                        || (componentState == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                                && receiver.enabled);
+                if (!enabled) {
+                    continue;
+                }
+                if (receiver.permission != null
+                        && context.checkSelfPermission(receiver.permission)
+                        != PackageManager.PERMISSION_GRANTED) {
+                    continue;
+                }
+                return new AmapReceiverResolution(
+                        NativeEtaTransportPolicy.ReceiverState.AVAILABLE,
+                        "enabled-accessible-receiver");
+            }
+            return new AmapReceiverResolution(
+                    NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
+                    "no-enabled-accessible-receiver");
+        } catch (PackageManager.NameNotFoundException absent) {
+            return new AmapReceiverResolution(
+                    NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
+                    "package-absent");
+        } catch (RuntimeException uncertain) {
+            return new AmapReceiverResolution(
+                    NativeEtaTransportPolicy.ReceiverState.UNKNOWN,
+                    uncertain.getClass().getSimpleName());
+        }
+    }
+
+    private void sendAmapFrame(DirectTbtFrame frame, Trace trace,
+            NativeEtaSnapshot etaSnapshot, boolean deduplicate) {
         sendAmapFrame(frame.getAmapBroadcastManeuver(), frame.getRoundaboutExitNumber(),
-                frame.getDistanceMeters(), roadTextForTest(frame), selectMetrics(frame), trace, true);
+                frame.getDistanceMeters(), roadTextForTest(frame),
+                selectMetrics(frame), trace, deduplicate, etaSnapshot);
     }
 
     private void sendAmapFrame(int amapIcon, int roundaboutExit, int distance,
@@ -661,11 +1206,32 @@ final class VehicleTbtPublisher {
     private void sendAmapFrame(int amapIcon, int roundaboutExit, int distance,
             String road, DirectTbtFrame.TravelMetrics metrics, Trace trace,
             boolean deduplicate) {
-        DirectTbtFrame.TravelMetrics selected = metrics == null
-                ? DirectTbtFrame.TravelMetrics.unavailable() : metrics;
+        sendAmapFrame(amapIcon, roundaboutExit, distance, road,
+                metrics, trace, deduplicate, null);
+    }
+
+    private void sendAmapFrame(int amapIcon, int roundaboutExit, int distance,
+            String road, DirectTbtFrame.TravelMetrics metrics, Trace trace,
+            boolean deduplicate, NativeEtaSnapshot etaSnapshot) {
+        boolean amapOwnsNativeEta = etaSnapshot != null
+                && etaSnapshot.writer == NativeEtaTransportPolicy.Writer.AMAP;
+        int routeDistance = amapOwnsNativeEta
+                ? etaSnapshot.formatted.distanceMeters : -1;
+        int routeTime = amapOwnsNativeEta
+                ? toInt(etaSnapshot.data.remainingSeconds, -1) : -1;
+        String durationText = amapOwnsNativeEta
+                ? amapString(etaSnapshot.formatted.routeRemainTimeAuto) : "-1";
+        String arrivalText = amapOwnsNativeEta
+                ? amapString(etaSnapshot.formatted.etaText) : "-1";
         String nextRoad = preserveText(road);
         String semanticKey = amapSemanticKey(amapIcon, roundaboutExit, distance,
-                nextRoad, selected);
+                nextRoad, new DirectTbtFrame.TravelMetrics(
+                        -1L, DirectTbtFrame.TravelMetrics.UNKNOWN_ZONE_OFFSET_SECONDS,
+                        routeTime, routeDistance))
+                + "|etaMode:" + nativeEtaOutputMode
+                + "|etaStrings:" + durationText + "|" + arrivalText
+                + (etaSnapshot == null ? "" : "|native:" + etaSnapshot.semanticKey
+                        + "|writer:" + etaSnapshot.writer);
         if (deduplicate && hasLastAmapSemantic && semanticKey.equals(lastAmapSemanticKey)) {
             record(trace, "amap_broadcast", "dedup", "guidance", new byte[0], 0, 0L, "");
             recordHudCheck(trace, "AMap", hudCheckAmapResult, hudCheckAmapReason);
@@ -684,12 +1250,15 @@ final class VehicleTbtPublisher {
         intent.putExtra("ROUNG_ABOUT_NUM", roundaboutExit);
         intent.putExtra("SEG_REMAIN_DIS", distance);
         intent.putExtra("NEXT_ROAD_NAME", nextRoad);
-        intent.putExtra("ROUTE_REMAIN_DIS", toInt(selected.getRemainingDistanceMeters(), -1));
-        intent.putExtra("ROUTE_REMAIN_TIME", toInt(selected.getRemainingTimeSeconds(), -1));
-        if (sendAmap(intent, "frame", trace, amapBytes(
-                10001, amapIcon, roundaboutExit, distance, nextRoad,
-                toInt(selected.getRemainingDistanceMeters(), -1),
-                toInt(selected.getRemainingTimeSeconds(), -1)))) {
+        intent.putExtra("ROUTE_REMAIN_DIS", routeDistance);
+        intent.putExtra("ROUTE_REMAIN_TIME", routeTime);
+        intent.putExtra("ROUTE_REMAIN_TIME_AUTO", durationText);
+        intent.putExtra("ETA_TEXT", arrivalText);
+        byte[] arguments = amapBytes(10001, amapIcon, roundaboutExit, distance,
+                nextRoad, routeDistance, routeTime);
+        arguments = appendBytes(arguments, nativeEtaAmapBytes(
+                routeDistance, routeTime, durationText, arrivalText));
+        if (sendAmap(intent, "frame", trace, arguments)) {
             hasLastAmapSemantic = true;
             lastAmapSemanticKey = semanticKey;
         }
@@ -803,12 +1372,23 @@ final class VehicleTbtPublisher {
         replayInstrumentState();
     }
 
+    private void replayNativeEtaInstrument(String reason) {
+        NativeEtaSnapshot snapshot = latestNativeEta;
+        if (!routeActive || snapshot == null
+                || snapshot.writer != NativeEtaTransportPolicy.Writer.INSTRUMENT) return;
+        resetNativeEtaCaches(reason);
+        sendNativeEtaInstrument(snapshot, reason, false);
+    }
+
     private void replayInstrumentState() {
         if (hudCheckLightOwned && hudCheckLightIndex < 0) {
             publishHudCheckLight(-1, "hud-check-ready-clear", true);
         }
         if (!routeActive) return;
-        if (!hasInstrumentStatus && !hasInstrumentGuidance) return;
+        if (!hasInstrumentStatus && !hasInstrumentGuidance) {
+            replayNativeEtaInstrument("proxy-ready");
+            return;
+        }
         String owner = ownerPackage.isEmpty() ? teardownOwner : ownerPackage;
         long generation = ownerGeneration == Long.MIN_VALUE
                 ? teardownGeneration : ownerGeneration;
@@ -847,9 +1427,11 @@ final class VehicleTbtPublisher {
         log("tbt_proxy_replay status="
                 + (hasInstrumentStatus ? lastInstrumentStatus : -1)
                 + " icon=" + (hasInstrumentGuidance ? lastInstrumentIcon : -1));
+        replayNativeEtaInstrument("proxy-ready");
     }
 
     private void handleInstrumentUnavailable(String reason) {
+        resetNativeEtaCaches("proxy-unavailable:" + safe(reason));
         if (routeActive && MANUAL_OWNER.equals(ownerPackage)) {
             boolean changed = hudCheckInstrumentResult != -1
                     || (hudCheckLightIndex >= 0 && hudCheckLightResult != -1);
@@ -1239,6 +1821,55 @@ final class VehicleTbtPublisher {
         }
         return lanes.length == 0
                 ? LanePayload.EMPTY : new LanePayload(directions, recommendations);
+    }
+
+    private static final class NativeEtaSnapshot {
+        final DirectTbtFrame frame;
+        final Trace trace;
+        final DirectTbtPayload.Options options;
+        final NativeEtaData data;
+        final NativeEtaFormatter.Formatted formatted;
+        final NativeEtaTransportPolicy.Writer writer;
+        final String semanticKey;
+        final long createdAtWallMs;
+        final boolean semanticChanged;
+
+        NativeEtaSnapshot(DirectTbtFrame frame, Trace trace,
+                DirectTbtPayload.Options options, NativeEtaData data,
+                NativeEtaFormatter.Formatted formatted,
+                NativeEtaTransportPolicy.Writer writer, String semanticKey,
+                long createdAtWallMs, boolean semanticChanged) {
+            this.frame = frame;
+            this.trace = trace;
+            this.options = options;
+            this.data = data;
+            this.formatted = formatted;
+            this.writer = writer;
+            this.semanticKey = semanticKey;
+            this.createdAtWallMs = createdAtWallMs;
+            this.semanticChanged = semanticChanged;
+        }
+    }
+
+    private static final class NativeEtaFieldCache {
+        final int value;
+        final long lastSuccessElapsedMs;
+
+        NativeEtaFieldCache(int value, long lastSuccessElapsedMs) {
+            this.value = value;
+            this.lastSuccessElapsedMs = lastSuccessElapsedMs;
+        }
+    }
+
+    private static final class AmapReceiverResolution {
+        final NativeEtaTransportPolicy.ReceiverState state;
+        final String reason;
+
+        AmapReceiverResolution(NativeEtaTransportPolicy.ReceiverState state,
+                String reason) {
+            this.state = state;
+            this.reason = safe(reason);
+        }
     }
 
     static final class LanePayload {

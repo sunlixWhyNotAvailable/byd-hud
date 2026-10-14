@@ -37,6 +37,9 @@ final class HudEtaText {
 
     static HudEtaText from(DirectTbtFrame frame, DirectTbtPayload.Options options,
             long nowWallTimeMs) {
+        if (options.etaOutputMode != HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
+            return EMPTY;
+        }
         HudEtaResolver.Result resolved = HudEtaResolver.resolve(
                 frame.getTripMetrics(), nowWallTimeMs);
         if (options.routeMetricsMode == HudPrefs.ROUTE_METRICS_OFF) {
@@ -69,7 +72,7 @@ final class HudEtaText {
                 options.showRemainingTime ? compactDuration(seconds, ua) : "");
     }
 
-    private static DirectTbtFrame.TravelMetrics select(boolean wholePreferred,
+    static DirectTbtFrame.TravelMetrics select(boolean wholePreferred,
             boolean wholeAvailable, boolean nextAvailable,
             DirectTbtFrame.TravelMetrics whole, DirectTbtFrame.TravelMetrics next) {
         return wholePreferred ? (wholeAvailable || !nextAvailable ? whole : next)

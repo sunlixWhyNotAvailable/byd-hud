@@ -178,10 +178,7 @@ final class VehicleConfigurationDiagnostics {
         int mode = prefs.contains("dashboard_screen_mode") ? HudPrefs.normalizeDashboardScreenMode(
                 prefs.getInt("dashboard_screen_mode", HudPrefs.DASHBOARD_MODE_FULL))
                 : prefs.getBoolean("fullscreen_dashboard", true) ? HudPrefs.DASHBOARD_MODE_FULL : HudPrefs.DASHBOARD_MODE_NONE;
-        boolean anyMetric = HudPrefs.isEtaOutputEnabled(context) || HudPrefs.isRemainingTimeOutputEnabled(context)
-                || HudPrefs.isRemainingDistanceOutputEnabled(context);
-        int metrics = prefs.contains("route_metrics_mode") ? Math.max(0, Math.min(2, prefs.getInt("route_metrics_mode", 0)))
-                : !anyMetric ? 0 : prefs.getBoolean("whole_route_metrics", false) ? 2 : 1;
+        int metrics = HudPrefs.routeMetricsMode(context);
         JSONArray steeringTransfers = new JSONArray();
         for (SteeringTransferProfile transfer : SteeringTransferPreferences.diagnosticProfiles(context)) {
             steeringTransfers.put(new JSONObject()
@@ -203,6 +200,7 @@ final class VehicleConfigurationDiagnostics {
                 .put("wazeAlerts", HudPrefs.isWazeAlertsEnabled(context))
                 .put("wazeAlertField", HudPrefs.wazeAlertField(context))
                 .put("wazeSurface", HudPrefs.isWazeCustomSurfaceEnabled(context))
+                .put("etaOutputMode", HudPrefs.etaOutputMode(context))
                 .put("routeMetricsMode", metrics)
                 .put("etaOutputField", HudPrefs.etaOutputField(context))
                 .put("etaStreetFormat", HudPrefs.getEtaStreetFormat(context))

@@ -24,4 +24,8 @@ interface IInstrumentNavigationProxy {
     void completeWorkSign(long generation, String id, String requestId, boolean ok, String detail);
     void launchWork(long generation, String id);
     boolean cancelWork(long generation, String id, boolean resetAnyMockGps);
+    Bundle sendNativeEta(long generation, int durationDays, int durationHours,
+            int durationMinutes, int remainingUnder30, int distanceMeters,
+            int arrivalDay, int arrivalHour, int arrivalMinute, int arrivalSecond,
+            int dayPeriod);
 }

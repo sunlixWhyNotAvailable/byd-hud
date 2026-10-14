@@ -28,6 +28,7 @@ public final class BydHudApplication extends Application {
         packages.addAction(Intent.ACTION_PACKAGE_ADDED);
         packages.addAction(Intent.ACTION_PACKAGE_REMOVED);
         packages.addAction(Intent.ACTION_PACKAGE_REPLACED);
+        packages.addAction(Intent.ACTION_PACKAGE_CHANGED);
         packages.addDataScheme("package");
         ContextCompat.registerReceiver(
                 this,

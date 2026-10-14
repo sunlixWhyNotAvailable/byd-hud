@@ -39,6 +39,15 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private static final int FID_DUAL_ICON = 1_139_806_256;
     private static final int FID_DISTANCE = 1_139_806_232;
     private static final int FID_ROAD = 1_140_461_576;
+    private static final int FID_NATIVE_ETA_DAYS = 1_139_810_340;
+    private static final int FID_NATIVE_ETA_HOURS = 1_139_810_320;
+    private static final int FID_NATIVE_ETA_MINUTES = 1_139_810_328;
+    private static final int FID_NATIVE_ETA_UNDER_30 = 1_139_810_334;
+    private static final int FID_NATIVE_ETA_DISTANCE = 1_139_810_344;
+    private static final int FID_NATIVE_ETA_ARRIVAL_DAY = 1_139_838_992;
+    private static final int FID_NATIVE_ETA_ARRIVAL_HOUR = 1_139_839_000;
+    private static final int FID_NATIVE_ETA_ARRIVAL_MINUTE = 1_139_839_008;
+    private static final int FID_NATIVE_ETA_ARRIVAL_SECOND = 1_139_839_016;
     private static final int FID_LANE_COUNT = 427_827_416;
     private static final int FID_LANE_GUIDE_BASE = 427_827_288;
     private static final int FID_LANE_STATE_BASE = 427_827_296;
@@ -77,6 +86,16 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             "android.permission.BYDAUTO_BODYWORK_GET";
     private static final String BODYWORK_SET_PERMISSION =
             "android.permission.BYDAUTO_BODYWORK_SET";
+    private static final String STATISTIC_COMMON_PERMISSION =
+            "android.permission.BYDAUTO_STATISTIC_COMMON";
+    private static final String STATISTIC_GET_PERMISSION =
+            "android.permission.BYDAUTO_STATISTIC_GET";
+    private static final String STATISTIC_SET_PERMISSION =
+            "android.permission.BYDAUTO_STATISTIC_SET";
+    private static final String STATISTIC_CLASS =
+            "android.hardware.bydauto.statistic.BYDAutoStatisticDevice";
+    private static final String STATISTIC_FEATURE_IDS_CLASS =
+            "android.hardware.bydauto.BYDAutoFeatureIds$Statistic";
     private static final int VENDOR_READ_ERROR = -2_147_482_648;
     private static final int EVENT_VALUE_UNSET = -999_999_999;
     private final long generation;
@@ -88,6 +107,9 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private final Object operationLock = new Object();
     private volatile InstrumentApi instrument;
     private volatile BodyworkApi bodywork;
+    private StatisticEtaApi statisticEta;
+    private boolean statisticEtaResolved;
+    private boolean statisticEtaUnavailableLogged;
     private NativeSpeedApi nativeSpeed;
     private volatile IInstrumentNavigationClient client;
     private volatile boolean connected;
@@ -345,6 +367,92 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 Binder.restoreCallingIdentity(identity);
             }
         }
+    }
+
+    @Override
+    public Bundle sendNativeEta(long requestGeneration, int durationDays,
+            int durationHours, int durationMinutes, int remainingUnder30,
+            int distanceMeters, int arrivalDay, int arrivalHour,
+            int arrivalMinute, int arrivalSecond, int dayPeriod) {
+        enforceSession(requestGeneration);
+        int[] values = {durationDays, durationHours, durationMinutes,
+                remainingUnder30, distanceMeters, arrivalDay, arrivalHour,
+                arrivalMinute, arrivalSecond, dayPeriod};
+        if (!NativeEtaTransportPolicy.validInstrumentValues(values)) {
+            throw new IllegalArgumentException("invalid native ETA values");
+        }
+        synchronized (operationLock) {
+            if (!connected || requestGeneration != generation) {
+                throw new SecurityException("inactive Instrument proxy session");
+            }
+            long identity = Binder.clearCallingIdentity();
+            try {
+                if (outputSuspended) return outputSuspendedResult();
+                if (!hasCapability(InstrumentProxyContract.CAP_DIRECT_FID)) {
+                    return InstrumentProxyContract.operationResult(new ArrayList<>(),
+                            "direct FID capability unavailable");
+                }
+                List<InstrumentProxyContract.Operation> operations = new ArrayList<>(10);
+                addNativeEtaFid(operations, FID_NATIVE_ETA_DAYS, durationDays);
+                addNativeEtaFid(operations, FID_NATIVE_ETA_HOURS, durationHours);
+                addNativeEtaFid(operations, FID_NATIVE_ETA_MINUTES, durationMinutes);
+                addNativeEtaFid(operations, FID_NATIVE_ETA_UNDER_30, remainingUnder30);
+                addNativeEtaFid(operations, FID_NATIVE_ETA_DISTANCE, distanceMeters);
+                addNativeEtaFid(operations, FID_NATIVE_ETA_ARRIVAL_DAY, arrivalDay);
+                addNativeEtaFid(operations, FID_NATIVE_ETA_ARRIVAL_HOUR, arrivalHour);
+                addNativeEtaFid(operations, FID_NATIVE_ETA_ARRIVAL_MINUTE, arrivalMinute);
+                addNativeEtaFid(operations, FID_NATIVE_ETA_ARRIVAL_SECOND, arrivalSecond);
+                if (dayPeriod >= 0) operations.add(setStatisticEtaPeriod(dayPeriod));
+                boolean anyFailure = false;
+                boolean anySuccess = false;
+                for (InstrumentProxyContract.Operation operation : operations) {
+                    if (succeeded(operation)) anySuccess = true;
+                    else anyFailure = true;
+                }
+                String error = operations.isEmpty() ? "no native ETA fields available"
+                        : anyFailure && !anySuccess ? "all native ETA writes failed" : "";
+                return InstrumentProxyContract.operationResult(operations, error);
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        }
+    }
+
+    private void addNativeEtaFid(List<InstrumentProxyContract.Operation> operations,
+            int featureId, int value) {
+        if (value >= 0) operations.add(setInt(featureId, value));
+    }
+
+    private InstrumentProxyContract.Operation setStatisticEtaPeriod(int value) {
+        long startedAt = SystemClock.elapsedRealtime();
+        StatisticEtaApi current = statisticEta();
+        if (current == null) {
+            if (!statisticEtaUnavailableLogged) {
+                statisticEtaUnavailableLogged = true;
+                Log.i(TAG, "native ETA Statistic day-period unavailable: OEM feature id/API missing");
+            }
+            return operation("statistic_eta_period:unavailable", -1, startedAt,
+                    "OEM Statistic day-period feature unavailable");
+        }
+        try {
+            Object eventValue = current.constructor.newInstance();
+            current.intField.setInt(eventValue, value);
+            Object result = current.set.invoke(current.device,
+                    new int[] {current.featureId}, eventValue);
+            return operation("statistic_eta_period:" + current.featureId,
+                    resultCode(result), startedAt,
+                    success(result) ? "" : "call returned failure");
+        } catch (Throwable error) {
+            return operation("statistic_eta_period:" + current.featureId,
+                    -1, startedAt, describe(error));
+        }
+    }
+
+    private StatisticEtaApi statisticEta() {
+        if (statisticEtaResolved) return statisticEta;
+        statisticEtaResolved = true;
+        statisticEta = StatisticEtaApi.open(systemContext);
+        return statisticEta;
     }
 
     @Override
@@ -1549,6 +1657,45 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         }
     }
 
+    /** Optional OEM Statistic path used only for its typed map day-period event. */
+    private static final class StatisticEtaApi {
+        final Object device;
+        final Method set;
+        final Constructor<?> constructor;
+        final Field intField;
+        final int featureId;
+
+        StatisticEtaApi(Object device, Method set, Constructor<?> constructor,
+                Field intField, int featureId) {
+            this.device = device;
+            this.set = set;
+            this.constructor = constructor;
+            this.intField = intField;
+            this.featureId = featureId;
+        }
+
+        static StatisticEtaApi open(Context context) {
+            try {
+                Class<?> featureIds = Class.forName(STATISTIC_FEATURE_IDS_CLASS);
+                int featureId = featureIds.getField("STATISTICS_MAP_PERIOD_INFOR")
+                        .getInt(null);
+                if (featureId < 0) return null;
+                Class<?> statisticClass = Class.forName(STATISTIC_CLASS);
+                Object device = statisticClass.getMethod("getInstance", Context.class)
+                        .invoke(null, new BydPermissionContext(context));
+                Class<?> eventClass = Class.forName(EVENT_VALUE_CLASS);
+                Method set = statisticClass.getMethod("set", int[].class, eventClass);
+                Constructor<?> constructor = eventClass.getConstructor();
+                Field intField = eventClass.getField("intValue");
+                return new StatisticEtaApi(device, set, constructor, intField, featureId);
+            } catch (Throwable unavailable) {
+                Log.i(TAG, "native ETA Statistic day-period API unavailable: "
+                        + describe(unavailable));
+                return null;
+            }
+        }
+    }
+
     /** Setting and ADAS are independent of Instrument's guidance/lane capabilities. */
     private static final class NativeSpeedApi {
         final Object setting, adas;
@@ -1657,6 +1804,9 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     || BODYWORK_COMMON_PERMISSION.equals(permission)
                     || BODYWORK_GET_PERMISSION.equals(permission)
                     || BODYWORK_SET_PERMISSION.equals(permission)
+                    || STATISTIC_COMMON_PERMISSION.equals(permission)
+                    || STATISTIC_GET_PERMISSION.equals(permission)
+                    || STATISTIC_SET_PERMISSION.equals(permission)
                     || "android.permission.BYDAUTO_ADAS_COMMON".equals(permission)
                     || "android.permission.BYDAUTO_ADAS_GET".equals(permission);
         }

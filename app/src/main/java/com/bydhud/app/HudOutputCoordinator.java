@@ -29,7 +29,7 @@ final class HudOutputCoordinator {
     }
 
     private static final String TAG = "BydHudOutput";
-    private static final long DIRECT_INTERVAL_MS = 50L;
+    private static final long DIRECT_INTERVAL_MS = 100L;
     private static final long DEFAULT_INTERVAL_MS = 1000L;
     private static final long MAP_LIVE_COALESCE_MS = 32L;
     private static final long SOURCE_CLEAR_DELAY_MS = 120L;
@@ -187,6 +187,9 @@ final class HudOutputCoordinator {
     private long sendDurationMs;
     private long lastStatsLogMs;
     private DirectTbtFrame preparedDirectFrame;
+    private DirectTbtFrame preparedOutputFrame;
+    private final NativeHudSpeedLimit nativeHudSpeed = new NativeHudSpeedLimit();
+    private String nativeHudSpeedDiagnostic = "";
     private DirectTbtPayload.Prepared preparedDirectPayload;
     private DirectTbtPayload.Prepared candidateDirectPayload;
     private DirectTbtPayload.Options preparedDirectOptions;
@@ -1421,6 +1424,40 @@ final class HudOutputCoordinator {
         }
     }
 
+    void onSpeedLimitModeChanged(int mode) {
+        worker.post(() -> {
+            if (mode != HudPrefs.SPEED_LIMIT_NATIVE_HUD) resetNativeHudSpeed("mode-exit");
+            if (mode != HudPrefs.SPEED_LIMIT_NATIVE) nativeSpeed.stop("mode-changed");
+            preparedDirectFrame = null;
+        });
+    }
+
+    private DirectTbtFrame nativeHudFrame(DirectTbtFrame frame, DirectTbtPayload.Options options) {
+        if (frame == null) return null;
+        int incoming = frame.getSpeedLimit().getKph();
+        int limit = nativeHudSpeed.update(options.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE_HUD,
+                directOwnerPackage, directOwnerSessionGeneration, incoming);
+        if (options.speedLimitMode != HudPrefs.SPEED_LIMIT_NATIVE_HUD) return frame;
+        String diagnostic = "owner=" + directOwnerPackage + " session=" + directOwnerSessionGeneration
+                + " inputKph=" + incoming + " outputKph=" + limit
+                + " source=" + (incoming > 0 ? "navigator" : limit > 0 ? "retained" : "unavailable");
+        if (!diagnostic.equals(nativeHudSpeedDiagnostic)) {
+            nativeHudSpeedDiagnostic = diagnostic;
+            log("native_hud_speed " + diagnostic);
+        }
+        return incoming == limit ? frame : frame.withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(limit, limit, "km/h", 0L));
+    }
+
+    private void resetNativeHudSpeed(String reason) {
+        nativeHudSpeed.reset();
+        preparedOutputFrame = null;
+        if (!nativeHudSpeedDiagnostic.isEmpty()) {
+            log("native_hud_speed reset reason=" + reason);
+            nativeHudSpeedDiagnostic = "";
+        }
+    }
+
     private byte[] buildPayload(Source source) {
         if (source == Source.DIRECT) {
             int optionsRevision = HudPrefs.outputOptionsRevision();
@@ -1429,21 +1466,26 @@ final class HudOutputCoordinator {
             boolean sourceChanged = candidateDirectPayload == null
                     || preparedDirectFrame != directFrame
                     || preparedDirectOptionsRevision != optionsRevision;
+            if (!sourceChanged && preparedEtaWallMinute != wallMinute) {
+                DirectTbtPayload.Options current = DirectTbtPayload.Options.from(context);
+                sourceChanged = current.nativeEta24Hour != preparedDirectOptions.nativeEta24Hour;
+            }
             if (sourceChanged) {
                 preparedDirectFrame = directFrame;
                 preparedDirectOptionsRevision = optionsRevision;
                 preparedDirectOptions = NativeSpeedLimitController.outputOptions(context, directOwnerPackage)
                         .withMapPng(navigatorMapMode == HudMapSettings.EXPERIMENTAL
                                 ? navigatorMapPng : null);
+                preparedOutputFrame = nativeHudFrame(directFrame, preparedDirectOptions);
                 preparedEtaContext = etaStreetContext(preparedDirectOptions,
                         HudPrefs.transliterationMode(context));
             }
             if (sourceChanged || preparedEtaWallMinute != wallMinute) {
                 String etaCacheKey = DirectTbtPayload.etaCacheKey(
-                        directFrame, preparedDirectOptions, nowWallTimeMs);
+                        preparedOutputFrame, preparedDirectOptions, nowWallTimeMs);
                 if (sourceChanged || !etaCacheKey.equals(preparedEtaCacheKey)) {
                     candidateDirectPayload = DirectTbtPayload.prepare(
-                            directFrame, preparedDirectOptions, nowWallTimeMs);
+                            preparedOutputFrame, preparedDirectOptions, nowWallTimeMs);
                     preparedDirectPayload = null;
                     preparedDirectBitmapSelection = directBitmapSelection;
                     preparedDirectBitmapTxLogger = directBitmapTxLogger;
@@ -1901,7 +1943,8 @@ final class HudOutputCoordinator {
     // restart a street's first pass when their independent output changes.
     static String etaStreetContext(DirectTbtPayload.Options options, int transliterationMode) {
         return options.presentation.etaField + ":" + options.presentation.streetFormat
-                + ":" + options.presentation.ukrainian + ":" + options.routeMetricsMode
+                + ":" + options.presentation.ukrainian + ":" + options.etaOutputMode
+                + ":" + options.routeMetricsMode
                 + ":" + options.showEta + ":" + options.showRemainingTime
                 + ":" + options.showRemainingDistance + ":" + options.street
                 + ":" + options.textDirection + ":" + transliterationMode;
@@ -2413,6 +2456,7 @@ final class HudOutputCoordinator {
     }
 
     private void resetDirectTransportTiming() {
+        resetNativeHudSpeed("owner-session");
         resetEtaStreetText("owner-session");
         directFirstFrameAtMs = 0L;
         directServiceReadyAtMs = 0L;

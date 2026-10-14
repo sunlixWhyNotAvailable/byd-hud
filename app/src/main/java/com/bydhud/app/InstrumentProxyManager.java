@@ -139,6 +139,7 @@ final class InstrumentProxyManager {
             InstrumentProxyStore.Identity.none();
     private boolean helperIdentityLoaded;
     private CapabilityMode capabilityMode = CapabilityMode.NONE;
+    private boolean directFidCapable;
     private boolean trafficLightCapable;
     private boolean nativeSpeedCapable;
     private boolean navigationOutputReady;
@@ -302,6 +303,7 @@ final class InstrumentProxyManager {
                     .put("capabilityMode", current.capabilityMode.name())
                     .put("shellRuntimeReady", current.state == State.READY && current.proxy != null)
                     .put("navigationOutputReady", current.navigationOutputReady)
+                    .put("directFidCapable", current.directFidCapable)
                     .put("trafficLightCapable", current.trafficLightCapable)
                     .put("nativeSpeedCapable", current.nativeSpeedCapable)
                     .put("lastResult", new JSONObject().put("status", "unsupported")
@@ -573,6 +575,41 @@ final class InstrumentProxyManager {
         submitCall("navigation_status", callback,
                 (current, currentGeneration) ->
                         current.sendNavigationStatus(currentGeneration, status));
+    }
+
+    void sendNativeEta(int[] values, AtomicLong admissionRevision,
+            long expectedAdmissionRevision, ResultCallback callback) {
+        if (!NativeEtaTransportPolicy.validInstrumentValues(values)) {
+            deliver(callback, Result.unavailable("invalid native ETA values"));
+            return;
+        }
+        boolean ready;
+        long expectedSessionGeneration;
+        synchronized (lock) {
+            ready = state == State.READY && proxy != null && proxyBinder != null
+                    && proxyBinder.isBinderAlive() && navigationOutputReady
+                    && directFidCapable;
+            expectedSessionGeneration = generation;
+        }
+        if (!ready) {
+            deliver(callback, Result.unavailable("direct FID capability unavailable"));
+            return;
+        }
+        int[] copy = values.clone();
+        submitCall("native_eta", callback, (remote, activeGeneration) -> {
+            if (admissionRevision == null
+                    || admissionRevision.get() != expectedAdmissionRevision) {
+                return InstrumentProxyContract.operationResult(
+                        Collections.emptyList(), "native ETA request superseded before dispatch");
+            }
+            if (activeGeneration != expectedSessionGeneration) {
+                return InstrumentProxyContract.operationResult(
+                        Collections.emptyList(), "native ETA Instrument session changed before dispatch");
+            }
+            return remote.sendNativeEta(activeGeneration,
+                        copy[0], copy[1], copy[2], copy[3], copy[4],
+                        copy[5], copy[6], copy[7], copy[8], copy[9]);
+        });
     }
 
     void sendGuidance(int icon, int distanceMeters, String road,
@@ -1459,6 +1496,8 @@ final class InstrumentProxyManager {
             trafficLightCapable = connectedTrafficLight;
             nativeSpeedCapable = InstrumentProxyContract.hasCapability(result,
                     InstrumentProxyContract.CAP_NATIVE_SPEED);
+            directFidCapable = InstrumentProxyContract.hasCapability(result,
+                    InstrumentProxyContract.CAP_DIRECT_FID);
             connectedAtMs = SystemClock.elapsedRealtime();
             nextRetryAtMs = 0L;
             // Preserve the failure streak: a handshaken helper may still die before stability.
@@ -1813,6 +1852,7 @@ final class InstrumentProxyManager {
         capabilityMode = CapabilityMode.NONE;
         navigationOutputReady = false;
         trafficLightCapable = false;
+        directFidCapable = false;
         nativeSpeedCapable = false;
     }
 
