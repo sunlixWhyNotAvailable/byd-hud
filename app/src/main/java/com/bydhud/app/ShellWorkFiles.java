@@ -28,7 +28,7 @@ final class ShellWorkFiles {
         return new File(external, "shell-work").getCanonicalFile();
     }
 
-    /** Private app-side operation expectations; never shared with shell or another app. */
+    /** Private expectations; the authenticated shell receives only a read-only descriptor. */
     static File expectationRoot(Context context) throws IOException {
         return directory(new File(context.getNoBackupFilesDir(), "shell-work-expectations"))
                 .getCanonicalFile();
@@ -148,7 +148,25 @@ final class ShellWorkFiles {
     static JSONObject read(File file) throws IOException {
         if (!file.exists()) return new JSONObject();
         if (file.length() > 8 * 1024 * 1024) throw new IOException("Oversized runtime message");
-        try { return new JSONObject(new String(java.nio.file.Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8)); }
+        return readManifest(file);
+    }
+
+    // Export manifests scale with selected files; they never travel in a Binder string.
+    static JSONObject readManifest(File file) throws IOException {
+        if (!file.exists()) return new JSONObject();
+        try (java.io.InputStream input = new java.io.FileInputStream(file)) { return readManifest(input); }
+    }
+
+    static JSONObject readManifest(java.io.InputStream input) throws IOException {
+        java.io.Reader reader = new java.io.InputStreamReader(input, StandardCharsets.UTF_8);
+        StringBuilder json = new StringBuilder();
+        char[] buffer = new char[8192];
+        int count;
+        while ((count = reader.read(buffer)) >= 0) {
+            if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Manifest read cancelled");
+            json.append(buffer, 0, count);
+        }
+        try { return new JSONObject(json.toString()); }
         catch (org.json.JSONException error) { throw new IOException("Invalid runtime message", error); }
     }
 

@@ -56,6 +56,7 @@ final class VehicleConfigurationFiles {
     private static final Pattern FILE_KEY = Pattern.compile(".*dev=([0-9a-fA-F]+).*ino=([0-9]+).*");
     private static final Pattern PROCESS_COMMAND = Pattern.compile("^ps -A -o pid,args$");
     private static final Pattern PROCESS_PACKAGE = Pattern.compile("\\b(com\\.[a-z0-9_.]+)");
+    private static final String PETAL_PACKAGE = "com.huawei.maps.car.app";
     private static final Pattern FIND_COMMAND = Pattern.compile(
             "^find (/(?:system|vendor|product|odm|system_ext)(?:/(?:etc|lib|lib64|framework|bin|app|priv-app))?"
                     + "|/cluster)(?: (/(?:system|vendor|product|odm|system_ext)(?:/(?:etc|lib|lib64|framework|bin|app|priv-app))?"
@@ -81,7 +82,7 @@ final class VehicleConfigurationFiles {
             new LinkedHashSet<>(Arrays.asList(
                     "com.byd.naviauto", "com.ts.car.someip.service", "com.byd.someipsystemservice",
                     "com.example.amapservice", "com.byd.amapservice", "com.byd.containerservice",
-                    "com.byd.launchermap", "com.byd.carsettings.plugins")));
+                    "com.byd.launchermap", "com.byd.carsettings.plugins", "com.huawei.maps.car.app")));
     private static final Set<String> METADATA_PACKAGES = Collections.unmodifiableSet(
             new LinkedHashSet<>(Arrays.asList(
                     "com.byd.carsetting", "com.byd.car.settings", "com.byd.carsettings",
@@ -182,6 +183,8 @@ final class VehicleConfigurationFiles {
     static final class Entry {
         final String sourcePath;
         final String archivePath;
+        /** Exact PackageManager declaration that authorizes an otherwise-unindexed shared path. */
+        final String packageDeclaredPath;
         final long size;
         final long modifiedEpochMs;
         final FileTime modifiedTime;
@@ -193,13 +196,15 @@ final class VehicleConfigurationFiles {
 
         Entry(String sourcePath, String archivePath, long size, long modifiedEpochMs,
                 long device, long inode, String type, String category) {
-            this(sourcePath, archivePath, size, FileTime.fromMillis(modifiedEpochMs), device, inode, type, category);
+            this(sourcePath, archivePath, size, FileTime.fromMillis(modifiedEpochMs), device, inode,
+                    type, category, null);
         }
 
         private Entry(String sourcePath, String archivePath, long size, FileTime modifiedTime,
-                long device, long inode, String type, String category) {
+                long device, long inode, String type, String category, String packageDeclaredPath) {
             this.sourcePath = sourcePath;
             this.archivePath = archivePath;
+            this.packageDeclaredPath = packageDeclaredPath;
             this.size = size;
             this.modifiedTime = modifiedTime;
             this.modifiedEpochMs = modifiedTime.toMillis();
@@ -210,8 +215,28 @@ final class VehicleConfigurationFiles {
         }
 
         Entry(FileStat stat, String sourcePath, String category) {
-            this(sourcePath, archivePath(sourcePath), stat.size, stat.modifiedTime,
-                    stat.device, stat.inode, "regular", category);
+            this(stat, sourcePath, category, null);
+        }
+
+        Entry(FileStat stat, String sourcePath, String category, String packageDeclaredPath) {
+            this(sourcePath, archivePath(sourcePath, packageDeclaredPath), stat.size, stat.modifiedTime,
+                    stat.device, stat.inode, "regular", category, packageDeclaredPath);
+        }
+    }
+
+    private static final class ProcessRecord {
+        final String pid;
+        final boolean petal;
+        final Set<String> clusterPackages = new LinkedHashSet<>();
+
+        ProcessRecord(String pid, String command) {
+            this.pid = pid;
+            this.petal = isPetalProcess(command);
+            Matcher packages = PROCESS_PACKAGE.matcher(command.toLowerCase(Locale.ROOT));
+            while (packages.find()) {
+                String packageName = packages.group(1);
+                if (packageName.contains("cluster")) clusterPackages.add(packageName);
+            }
         }
     }
 
@@ -230,6 +255,7 @@ final class VehicleConfigurationFiles {
         final List<Unavailable> unavailable = new ArrayList<>();
         final Map<String, Set<String>> metadata = new LinkedHashMap<>();
         final Set<String> mappedLibraries = new LinkedHashSet<>();
+        final Set<String> packageDeclaredDependencyPaths = new LinkedHashSet<>();
         private final ProgressListener progress;
         long totalBytes;
         boolean partial;
@@ -316,15 +342,28 @@ final class VehicleConfigurationFiles {
         Inventory inventory = new Inventory(progress);
         BooleanSupplier stop = cancelled == null ? () -> false : cancelled;
         Set<String> packagePaths = new LinkedHashSet<>();
+        Set<String> packageSharedLibraryPaths = new LinkedHashSet<>();
         Map<String, Set<String>> pathAliases = new LinkedHashMap<>();
         inventory.inspect("package-manager");
-        discoverPackages(context, session, stop, packagePaths, pathAliases, inventory);
+        discoverPackages(context, session, stop, packagePaths, packageSharedLibraryPaths,
+                pathAliases, inventory);
         for (String path : packagePaths) {
             inventory.inspect(path);
             String canonical = canonicalPath(path, session, stop, inventory);
             if (canonical != null) {
                 addCandidate(canonical, "apk", pathAliases.get(path), session, stop, inventory);
             }
+        }
+        for (String path : packageSharedLibraryPaths) {
+            checkCancelled(stop);
+            inventory.inspect(path);
+            String canonical = canonicalPath(path, session, stop, inventory);
+            if (canonical == null) continue;
+            String category = sharedLibraryCategory(canonical);
+            inventory.metadata("packageSharedLibraryOutcomes",
+                    PETAL_PACKAGE + " -> " + path + ": selected as " + category);
+            addCandidate(canonical, category, Collections.singleton(PETAL_PACKAGE + " sharedLibraryFiles"),
+                    session, stop, inventory);
         }
 
         if (session == null) {
@@ -342,25 +381,35 @@ final class VehicleConfigurationFiles {
             return inventory;
         }
         Map<String, List<String>> libraryIndex = new LinkedHashMap<>();
+        for (Entry entry : inventory.entries) {
+            if (entry.category.startsWith("native")) {
+                libraryIndex.computeIfAbsent(baseName(entry.sourcePath), ignored -> new ArrayList<>())
+                        .add(entry.sourcePath);
+            }
+        }
         for (String command : FIND_COMMANDS) {
             checkCancelled(stop);
             inventory.inspect(command);
-            LocalAdbBridge.ShellResult result = run(session, command);
+            List<String> relevantPaths = new ArrayList<>();
+            LocalAdbBridge.ShellResult result = runLines(session, command, line -> {
+                checkCancelled(stop);
+                String rawPath = line.trim();
+                if (!isAllowedPath(rawPath)) return;
+                if (rawPath.toLowerCase(Locale.ROOT).endsWith(".so")) {
+                    libraryIndex.computeIfAbsent(baseName(rawPath), ignored -> new ArrayList<>())
+                            .add(rawPath);
+                }
+                if (isInventoryPath(rawPath)) inventory.metadata("firmwarePaths", rawPath);
+                if (isRelevantCandidate(rawPath)) relevantPaths.add(rawPath);
+            });
             if (result == null) {
                 inventory.unavailable(command, "inventory command unavailable");
                 continue;
             }
             if (result.truncated) inventory.unavailable(command,
-                    "partial inventory: command output truncated; droppedBytes=" + result.droppedBytes);
-            for (String line : lines(result.output)) {
+                    "partial inventory: streamed line exceeded supported size; droppedBytes=" + result.droppedBytes);
+            for (String rawPath : relevantPaths) {
                 checkCancelled(stop);
-                String rawPath = line.trim();
-                if (!isAllowedPath(rawPath)) continue;
-                if (rawPath.toLowerCase(Locale.ROOT).endsWith(".so")) {
-                    libraryIndex.computeIfAbsent(baseName(rawPath), ignored -> new ArrayList<>()).add(rawPath);
-                }
-                if (isInventoryPath(rawPath)) inventory.metadata("firmwarePaths", rawPath);
-                if (!isRelevantCandidate(rawPath)) continue;
                 inventory.inspect(rawPath);
                 String path = canonicalPath(rawPath, session, stop, inventory);
                 if (path == null || !isRelevantCandidate(path)) continue;
@@ -390,8 +439,8 @@ final class VehicleConfigurationFiles {
     }
 
     private static void discoverPackages(Context context, LocalAdbBridge.ConfigurationExportSession session,
-            BooleanSupplier cancelled, Set<String> paths, Map<String, Set<String>> aliases,
-            Inventory inventory) throws IOException {
+            BooleanSupplier cancelled, Set<String> paths, Set<String> sharedLibraryPaths,
+            Map<String, Set<String>> aliases, Inventory inventory) throws IOException {
         Set<String> packages = new TreeSet<>(KNOWN_PACKAGES);
         if (context != null) {
             try {
@@ -405,6 +454,7 @@ final class VehicleConfigurationFiles {
                     if (info == null || !relevantPackageInfo(info)) continue;
                     addPackagePaths(info, paths, aliases);
                 }
+                discoverPetalSharedLibraries(manager, sharedLibraryPaths, inventory);
             } catch (RuntimeException error) {
                 inventory.unavailable("package-manager", error.getClass().getSimpleName());
             }
@@ -451,6 +501,50 @@ final class VehicleConfigurationFiles {
         }
     }
 
+    private static void discoverPetalSharedLibraries(PackageManager manager,
+            Set<String> sharedLibraryPaths, Inventory inventory) {
+        final PackageInfo petal;
+        try {
+            petal = manager.getPackageInfo(PETAL_PACKAGE, PackageManager.GET_SHARED_LIBRARY_FILES);
+        } catch (PackageManager.NameNotFoundException absent) {
+            inventory.metadata("packageSharedLibraryOutcomes", PETAL_PACKAGE + ": package not installed");
+            return;
+        } catch (RuntimeException unavailable) {
+            inventory.unavailable("package:" + PETAL_PACKAGE,
+                    "shared library declarations unavailable: " + unavailable.getClass().getSimpleName());
+            return;
+        }
+        if (petal == null || petal.applicationInfo == null) {
+            inventory.unavailable("package:" + PETAL_PACKAGE,
+                    "shared library declarations unavailable: application info missing");
+            return;
+        }
+        String[] declared = petal.applicationInfo.sharedLibraryFiles;
+        if (declared == null || declared.length == 0) {
+            inventory.metadata("packageSharedLibraryOutcomes", PETAL_PACKAGE + ": no shared libraries declared");
+            return;
+        }
+        for (String path : declared) {
+            if (!isAllowedPath(path) && !isPackageDeclaredDependencyPath(path)) {
+                // Do not echo a rejected private path into export metadata.
+                inventory.unavailable("package:" + PETAL_PACKAGE,
+                        "shared library declaration rejected by export path policy");
+                continue;
+            }
+            inventory.packageDeclaredDependencyPaths.add(path);
+            sharedLibraryPaths.add(path);
+            inventory.metadata("packageSharedLibraryFiles", PETAL_PACKAGE + " -> " + path);
+        }
+    }
+
+    private static String sharedLibraryCategory(String path) {
+        String lower = path == null ? "" : path.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".so")) return "native-petal-declared";
+        if (lower.endsWith(".apk")) return "apk";
+        if (lower.endsWith(".jar")) return "framework";
+        return category(path);
+    }
+
     private static void addPackagePaths(PackageInfo info, Set<String> paths,
             Map<String, Set<String>> aliases) {
         List<String> values = new ArrayList<>();
@@ -473,7 +567,13 @@ final class VehicleConfigurationFiles {
             BooleanSupplier cancelled, Inventory inventory, Map<String, List<String>> libraryIndex)
             throws IOException {
         inventory.inspect("processes");
-        LocalAdbBridge.ShellResult processes = run(session, "ps -A -o pid,args");
+        List<ProcessRecord> selectedProcesses = new ArrayList<>();
+        LocalAdbBridge.ShellResult processes = runLines(session, "ps -A -o pid,args", line -> {
+            checkCancelled(cancelled);
+            Matcher matcher = Pattern.compile("^([0-9]{1,10})\\s+(.+)$").matcher(line.trim());
+            if (!matcher.matches() || !relevantProcess(matcher.group(2))) return;
+            selectedProcesses.add(new ProcessRecord(matcher.group(1), matcher.group(2)));
+        });
         if (processes == null) {
             inventory.unavailable("processes", "process identity unavailable");
             return;
@@ -482,16 +582,11 @@ final class VehicleConfigurationFiles {
         if (!processes.success() && !processes.truncated) {
             inventory.unavailable("processes", "process identity command failed: " + safe(processes.error));
         }
-        for (String line : lines(processes.output)) {
+        for (ProcessRecord selected : selectedProcesses) {
             checkCancelled(cancelled);
-            String trimmed = line.trim();
-            Matcher matcher = Pattern.compile("^([0-9]{1,10})\\s+(.+)$").matcher(trimmed);
-            if (!matcher.matches() || !relevantProcess(matcher.group(2))) continue;
-            String pid = matcher.group(1);
-            Matcher provider = PROCESS_PACKAGE.matcher(matcher.group(2).toLowerCase(Locale.ROOT));
-            while (provider.find()) {
-                String packageName = provider.group(1);
-                if (!packageName.contains("cluster")) continue;
+            String pid = selected.pid;
+            boolean petalProcess = selected.petal;
+            for (String packageName : selected.clusterPackages) {
                 LocalAdbBridge.ShellResult paths = run(session, "pm path " + packageName);
                 if (paths == null || !paths.success()) continue;
                 for (String value : lines(paths.output)) {
@@ -510,27 +605,39 @@ final class VehicleConfigurationFiles {
                                 ? "executable path output truncated" : "executable path denied");
             }
             addProcessPath(exe, "cluster", session, cancelled, inventory, libraryIndex);
-            LocalAdbBridge.ShellResult maps = run(session, "cat /proc/" + pid + "/maps");
-            if (maps == null || !maps.success() || maps.truncated) {
-                inventory.unavailable("/proc/" + pid + "/maps",
-                        maps == null ? "maps unavailable" : maps.truncated
-                                ? "path-only maps output truncated" : "maps denied");
-                continue;
-            }
-            for (String mapLine : lines(maps.output)) {
+            List<String> mappedPaths = new ArrayList<>();
+            LocalAdbBridge.ShellResult maps = runLines(session, "cat /proc/" + pid + "/maps", mapLine -> {
+                checkCancelled(cancelled);
                 int slash = mapLine.indexOf('/');
-                if (slash < 0) continue;
+                if (slash < 0) return;
                 String path = mapLine.substring(slash).trim();
                 int space = path.indexOf(' ');
                 if (space >= 0) path = path.substring(0, space);
-                if (!isAllowedPath(path) || !path.toLowerCase(Locale.ROOT).endsWith(".so")
-                        || isSensitiveName(path)) continue;
+                if (!isAllowedExportPath(path, inventory.packageDeclaredDependencyPaths)
+                        || !path.toLowerCase(Locale.ROOT).endsWith(".so")
+                        || isSensitiveName(path)) return;
                 inventory.metadata("mappedLibraries", path);
                 inventory.mappedLibraries.add(path);
                 libraryIndex.computeIfAbsent(baseName(path), ignored -> new ArrayList<>()).add(path);
-                if (!isRelevantLibraryPath(path)) continue;
+                if (petalProcess) {
+                    inventory.metadata("petalMappedLibraries", PETAL_PACKAGE + " -> " + path);
+                }
+                if (isRelevantMappedLibraryPath(path, petalProcess,
+                        inventory.packageDeclaredDependencyPaths)) mappedPaths.add(path);
+            });
+            if (maps == null) {
+                inventory.unavailable("/proc/" + pid + "/maps",
+                        "maps unavailable");
+            } else if (!maps.success() || maps.truncated) {
+                inventory.unavailable("/proc/" + pid + "/maps", maps.truncated
+                        ? "path-only maps stream incomplete; droppedBytes=" + maps.droppedBytes
+                        : "maps denied: " + safe(maps.error));
+            }
+            for (String path : mappedPaths) {
+                checkCancelled(cancelled);
                 String canonical = canonicalPath(path, session, cancelled, inventory);
-                if (canonical != null) addCandidate(canonical, "native", null,
+                if (canonical != null) addCandidate(canonical,
+                        petalProcess ? "native-petal" : "native", null,
                         session, cancelled, inventory);
             }
         }
@@ -554,11 +661,12 @@ final class VehicleConfigurationFiles {
     private static void addCandidate(String path, String category, Set<String> aliases,
             LocalAdbBridge.ConfigurationExportSession session, BooleanSupplier cancelled,
             Inventory inventory) throws IOException {
-        if (!isAllowedPath(path)) return;
+        if (!isAllowedExportPath(path, inventory.packageDeclaredDependencyPaths)) return;
         checkCancelled(cancelled);
+        String declaredPath = inventory.packageDeclaredDependencyPaths.contains(path) ? path : null;
         FileStat stat;
         try {
-            stat = stat(path, session, cancelled);
+            stat = stat(path, session, cancelled, declaredPath);
         } catch (IOException error) {
             if (Thread.currentThread().isInterrupted() || (cancelled != null && cancelled.getAsBoolean())) {
                 throw error;
@@ -566,7 +674,7 @@ final class VehicleConfigurationFiles {
             inventory.unavailable(path, error.getMessage());
             return;
         }
-        Entry entry = new Entry(stat, path, category);
+        Entry entry = new Entry(stat, path, category, declaredPath);
         if (aliases != null) entry.aliases.addAll(aliases);
         inventory.add(entry, null);
     }
@@ -681,7 +789,8 @@ final class VehicleConfigurationFiles {
             LocalAdbBridge.ShellResult result = null;
             if (!readelfUnavailable) {
                 try {
-                    result = run(session, "readelf -d " + quotePath(entry.sourcePath));
+                    result = run(session, "readelf -d " + quotePath(entry.sourcePath,
+                            entry.packageDeclaredPath), entry.packageDeclaredPath);
                 } catch (RuntimeException error) {
                     if (context != null) {
                         List<String> fallback = streamedElfNeeded(context, entry, session, cancelled, inventory);
@@ -697,7 +806,8 @@ final class VehicleConfigurationFiles {
                 if (result == null || result.exitCode == 127 || result.exitCode == 126) {
                     try {
                         LocalAdbBridge.ShellResult fallback = run(session,
-                                "llvm-readelf -d " + quotePath(entry.sourcePath));
+                                "llvm-readelf -d " + quotePath(entry.sourcePath,
+                                        entry.packageDeclaredPath), entry.packageDeclaredPath);
                         if (fallback != null && (result == null
                                 || (fallback.exitCode != 127 && fallback.exitCode != 126))) result = fallback;
                     } catch (RuntimeException ignored) {
@@ -751,7 +861,10 @@ final class VehicleConfigurationFiles {
         for (String dependency : new LinkedHashSet<>(dependencies)) {
             checkCancelled(cancelled);
             inventory.metadata("dependencies", entry.sourcePath + " -> " + dependency);
-            if (PLATFORM_LIBRARIES.contains(dependency.toLowerCase(Locale.ROOT))) continue;
+            String lowerDependency = dependency.toLowerCase(Locale.ROOT);
+            if (PLATFORM_LIBRARIES.contains(lowerDependency)
+                    && !("libc++_shared.so".equals(lowerDependency)
+                    && entry.category.startsWith("native-petal"))) continue;
             List<String> candidates = libraryIndex.get(dependency);
             if (candidates == null || candidates.isEmpty()) {
                 inventory.metadata("dependencyOutcomes", entry.sourcePath + " -> " + dependency + ": not found");
@@ -802,7 +915,7 @@ final class VehicleConfigurationFiles {
         try {
             checkCancelled(cancelled);
             inventory.inspect(entry.sourcePath);
-            FileStat before = stat(entry.sourcePath, session, cancelled);
+            FileStat before = stat(entry.sourcePath, session, cancelled, entry.packageDeclaredPath);
             long copied;
             try (FileOutputStream output = new FileOutputStream(temporary)) {
                 copied = session.readFile(entry.sourcePath, output, entry.size,
@@ -811,14 +924,14 @@ final class VehicleConfigurationFiles {
                                     || (cancelled != null && cancelled.getAsBoolean())) {
                                 throw new IllegalStateException("export cancelled");
                             }
-                        });
+                        }, entry.packageDeclaredPath);
             }
             checkCancelled(cancelled);
             if (copied != entry.size || temporary.length() != entry.size) {
                 inventory.unavailable(entry.sourcePath, "ELF fallback stream size changed");
                 return null;
             }
-            FileStat after = stat(entry.sourcePath, session, cancelled);
+            FileStat after = stat(entry.sourcePath, session, cancelled, entry.packageDeclaredPath);
             if (before.size != after.size || !before.modifiedTime.equals(after.modifiedTime)
                     || (before.device > 0L && after.device > 0L && before.device != after.device)
                     || (before.inode > 0L && after.inode > 0L && before.inode != after.inode)) {
@@ -854,13 +967,24 @@ final class VehicleConfigurationFiles {
     /** Re-stat a selected path immediately before and after streamed copying. */
     static FileStat stat(String path, LocalAdbBridge.ConfigurationExportSession session,
             BooleanSupplier cancelled) throws IOException {
-        if (!isAllowedPath(path)) throw new SecurityException("path outside diagnostic roots");
+        return stat(path, session, cancelled, null);
+    }
+
+    static FileStat stat(String path, LocalAdbBridge.ConfigurationExportSession session,
+            BooleanSupplier cancelled, String packageDeclaredPath) throws IOException {
+        if (!isAllowedExportPath(path, packageDeclaredPath)) {
+            throw new SecurityException("path outside diagnostic roots");
+        }
         checkCancelled(cancelled);
         File local = new File(path);
         if (local.isFile()) {
             try {
                 Path localPath = local.toPath().toRealPath();
-                if (!isAllowedPath(localPath.toString())) throw new IOException("symlink escaped roots");
+                if (!isAllowedExportPath(localPath.toString(), packageDeclaredPath)
+                        || (packageDeclaredPath != null && !isAllowedPath(localPath.toString())
+                        && !packageDeclaredPath.equals(localPath.toString()))) {
+                    throw new IOException("symlink escaped roots");
+                }
                 BasicFileAttributes attributes = Files.readAttributes(localPath,
                         BasicFileAttributes.class);
                 if (!attributes.isRegularFile()) throw new IOException("not a regular file");
@@ -886,7 +1010,8 @@ final class VehicleConfigurationFiles {
             }
         }
         if (session == null) throw new IOException("remote stat unavailable");
-        LocalAdbBridge.ShellResult result = run(session, "stat -Lc '" + STAT_FORMAT + "' " + quotePath(path));
+        String command = "stat -Lc '" + STAT_FORMAT + "' " + quotePath(path, packageDeclaredPath);
+        LocalAdbBridge.ShellResult result = run(session, command, packageDeclaredPath);
         if (result == null || !result.success() || result.truncated) {
             throw new IOException(result == null ? "stat unavailable"
                     : "stat failed: " + safe(result.error));
@@ -895,14 +1020,8 @@ final class VehicleConfigurationFiles {
     }
 
     static boolean isAllowedPath(String path) {
-        if (path == null || path.length() < 2 || path.length() > 1024
-                || path.indexOf('\0') >= 0 || path.indexOf('\\') >= 0
-                || path.contains("..") || path.contains("//") || path.indexOf('\n') >= 0
-                || path.indexOf('\r') >= 0 || path.indexOf('\'') >= 0
-                || !path.startsWith("/")) return false;
+        if (!hasSafePathSyntax(path)) return false;
         String lower = path.toLowerCase(Locale.ROOT);
-        for (String privateSegment : PRIVATE_SEGMENTS) if (lower.startsWith(privateSegment)) return false;
-        if (isSensitiveName(path)) return false;
         if (APEX_LIBRARY_PATH.matcher(path).matches()) return true;
         boolean approved = false;
         for (String root : APPROVED_ROOTS) {
@@ -914,6 +1033,38 @@ final class VehicleConfigurationFiles {
         if (relative.isEmpty() || relative.contains("/../") || relative.endsWith("/..")) return false;
         return (isApkPath(path) || isNativeAppLibraryPath(path))
                 && resolvedPackagePath(path);
+    }
+
+    /** Exact PackageManager declaration required for cross-package randomized install paths. */
+    static boolean isPackageDeclaredDependencyPath(String path) {
+        if (!hasSafePathSyntax(path)) return false;
+        String lower = path.toLowerCase(Locale.ROOT);
+        if (!lower.startsWith("/data/app/")) return false;
+        for (String privateSegment : PRIVATE_SEGMENTS) {
+            if (lower.contains(privateSegment)) return false;
+        }
+        return lower.endsWith(".apk") || lower.endsWith(".jar") || isNativeAppLibraryPath(path);
+    }
+
+    static boolean isAllowedExportPath(String path, String packageDeclaredPath) {
+        return isAllowedPath(path) || (packageDeclaredPath != null
+                && packageDeclaredPath.equals(path) && isPackageDeclaredDependencyPath(path));
+    }
+
+    static boolean isAllowedExportPath(String path, Set<String> packageDeclaredPaths) {
+        return isAllowedPath(path) || (packageDeclaredPaths != null
+                && packageDeclaredPaths.contains(path) && isPackageDeclaredDependencyPath(path));
+    }
+
+    private static boolean hasSafePathSyntax(String path) {
+        if (path == null || path.length() < 2 || path.length() > 1024
+                || path.indexOf('\0') >= 0 || path.indexOf('\\') >= 0
+                || path.contains("..") || path.contains("//") || path.indexOf('\n') >= 0
+                || path.indexOf('\r') >= 0 || path.indexOf('\'') >= 0
+                || !path.startsWith("/")) return false;
+        String lower = path.toLowerCase(Locale.ROOT);
+        for (String privateSegment : PRIVATE_SEGMENTS) if (lower.startsWith(privateSegment)) return false;
+        return !isSensitiveName(path);
     }
 
     static boolean isAllowedCommand(String command) {
@@ -937,13 +1088,41 @@ final class VehicleConfigurationFiles {
                 || pm.group(1).startsWith("com.byd.") || pm.group(1).equals("com.android.car.settings"));
     }
 
+    static boolean isStreamingInventoryCommand(String command) {
+        if (!isAllowedCommand(command)) return false;
+        String safe = command.trim();
+        return PROCESS_COMMAND.matcher(safe).matches() || MAPS_COMMAND.matcher(safe).matches()
+                || FIND_COMMANDS.contains(safe);
+    }
+
+    static boolean isAllowedCommand(String command, String packageDeclaredPath) {
+        if (isAllowedCommand(command)) return true;
+        if (packageDeclaredPath == null || !isPackageDeclaredDependencyPath(packageDeclaredPath)) return false;
+        String safe = command == null ? "" : command.trim();
+        if (safe.length() > 4096 || safe.contains("..") || safe.indexOf(';') >= 0
+                || safe.indexOf('|') >= 0 || safe.indexOf('&') >= 0 || safe.indexOf('\n') >= 0
+                || safe.indexOf('\r') >= 0 || safe.indexOf('`') >= 0 || safe.contains("$(")
+                || safe.contains(">$")) return false;
+        if (!(STAT_COMMAND.matcher(safe).matches() || READLINK_COMMAND.matcher(safe).matches()
+                || ELF_COMMAND.matcher(safe).matches())) return false;
+        return packageDeclaredPath.equals(commandPath(safe));
+    }
+
     static String quotePath(String path) {
-        if (!isAllowedPath(path)) throw new SecurityException("unsupported path");
+        return quotePath(path, null);
+    }
+
+    static String quotePath(String path, String packageDeclaredPath) {
+        if (!isAllowedExportPath(path, packageDeclaredPath)) throw new SecurityException("unsupported path");
         return "'" + path + "'";
     }
 
     static String archivePath(String path) {
-        if (!isAllowedPath(path)) throw new SecurityException("unsupported path");
+        return archivePath(path, null);
+    }
+
+    static String archivePath(String path, String packageDeclaredPath) {
+        if (!isAllowedExportPath(path, packageDeclaredPath)) throw new SecurityException("unsupported path");
         return "files/" + path.substring(1);
     }
 
@@ -989,6 +1168,20 @@ final class VehicleConfigurationFiles {
         if (PLATFORM_LIBRARIES.contains(baseName(lower))) return false;
         for (String family : LIBRARY_FAMILIES) if (baseName(lower).startsWith(family)) return true;
         return false;
+    }
+
+    static boolean isRelevantMappedLibraryPath(String path, boolean petalProcess) {
+        return isRelevantMappedLibraryPath(path, petalProcess, Collections.emptySet());
+    }
+
+    static boolean isRelevantMappedLibraryPath(String path, boolean petalProcess,
+            Set<String> packageDeclaredPaths) {
+        if (!petalProcess) return isRelevantLibraryPath(path);
+        if (!isAllowedExportPath(path, packageDeclaredPaths)) return false;
+        String lower = path.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".so") && !isSensitiveName(path)
+                && (!PLATFORM_LIBRARIES.contains(baseName(lower))
+                || "libc++_shared.so".equals(baseName(lower)));
     }
 
     static String category(String path) {
@@ -1045,12 +1238,15 @@ final class VehicleConfigurationFiles {
     private static String canonicalPath(String path, LocalAdbBridge.ConfigurationExportSession session,
             BooleanSupplier cancelled, Inventory inventory) throws IOException {
         String candidate = path == null ? "" : path.trim();
-        if (!isAllowedPath(candidate)) return null;
+        if (!isAllowedExportPath(candidate, inventory.packageDeclaredDependencyPaths)) return null;
+        String declaredPath = inventory.packageDeclaredDependencyPaths.contains(candidate) ? candidate : null;
         File local = new File(candidate);
         if (local.exists()) {
             try {
                 String canonical = local.getCanonicalPath();
-                if (!isAllowedPath(canonical)) {
+                if (!isAllowedExportPath(canonical, declaredPath)
+                        || (declaredPath != null && !isAllowedPath(canonical)
+                        && !declaredPath.equals(canonical))) {
                     inventory.unavailable(candidate, "canonical path escaped approved roots");
                     return null;
                 }
@@ -1058,13 +1254,16 @@ final class VehicleConfigurationFiles {
             } catch (IOException ignored) { return null; }
         }
         if (session == null) return candidate;
-        LocalAdbBridge.ShellResult result = run(session, "readlink -f " + quotePath(candidate));
+        LocalAdbBridge.ShellResult result = run(session,
+                "readlink -f " + quotePath(candidate, declaredPath), declaredPath);
         if (result == null || !result.success() || result.truncated) {
             inventory.unavailable(candidate, result == null ? "canonical path unavailable" : "canonical path denied");
             return null;
         }
         String canonical = result.output.trim();
-        if (!isAllowedPath(canonical)) {
+        if (!isAllowedExportPath(canonical, declaredPath)
+                || (declaredPath != null && !isAllowedPath(canonical)
+                && !declaredPath.equals(canonical))) {
             inventory.unavailable(candidate, "canonical path escaped approved roots");
             return null;
         }
@@ -1075,6 +1274,24 @@ final class VehicleConfigurationFiles {
             String command) throws IOException {
         if (!isAllowedCommand(command)) throw new SecurityException("inventory command rejected");
         return session.runFileCommand(command);
+    }
+
+    private static LocalAdbBridge.ShellResult runLines(
+            LocalAdbBridge.ConfigurationExportSession session, String command,
+            LocalAdbBridge.ShellLineConsumer consumer) throws IOException {
+        if (!isStreamingInventoryCommand(command)) {
+            throw new SecurityException("inventory streaming command rejected");
+        }
+        return session.runFileCommandLines(command, consumer);
+    }
+
+    private static LocalAdbBridge.ShellResult run(LocalAdbBridge.ConfigurationExportSession session,
+            String command, String packageDeclaredPath) throws IOException {
+        if (packageDeclaredPath == null) return run(session, command);
+        if (!isAllowedCommand(command, packageDeclaredPath)) {
+            throw new SecurityException("declared dependency command rejected");
+        }
+        return session.runDeclaredDependencyCommand(command, packageDeclaredPath);
     }
 
     private static String commandPath(String command) {
@@ -1112,11 +1329,13 @@ final class VehicleConfigurationFiles {
         return (info.applicationInfo.flags & systemFlags) != 0;
     }
 
-    private static boolean relevantProcess(String command) {
+    static boolean relevantProcess(String command) {
         String lower = command == null ? "" : command.toLowerCase(Locale.ROOT);
+        boolean petalProcess = isPetalProcess(lower);
         if (lower.contains("bydhud") || lower.contains("bydcollector")
                 || lower.contains("turnsignal") || lower.contains("mate")
-                || lower.contains("waze") || lower.contains("google") || lower.contains("maps")
+                || lower.contains("waze") || lower.contains("google")
+                || (lower.contains("maps") && !petalProcess)
                 || lower.contains("revanced")) return false;
         Matcher packageMatcher = PROCESS_PACKAGE.matcher(lower);
         boolean packageMentioned = false;
@@ -1132,12 +1351,24 @@ final class VehicleConfigurationFiles {
             }
         }
         if (packageMentioned && !knownPackageMentioned) return false;
-        return lower.contains("cluster") || lower.contains("someip") || lower.contains("kanzi")
+        return petalProcess || lower.contains("cluster") || lower.contains("someip") || lower.contains("kanzi")
                 || lower.contains("naviauto") || lower.contains("instrument")
                 || lower.contains("amapservice") || lower.contains("containerservice")
                 || lower.contains("launchermap") || lower.contains("adas")
                 || lower.contains("carsetting") || lower.contains("com.byd.sr")
                 || lower.contains("bydcamera") || lower.contains("com.byd.avc");
+    }
+
+    private static boolean isPetalProcess(String command) {
+        String[] tokens = command == null ? new String[0]
+                : command.trim().toLowerCase(Locale.ROOT).split("\\s+", 3);
+        int processIndex = tokens.length > 0 && tokens[0].matches("[0-9]{1,10}") ? 1 : 0;
+        if (processIndex >= tokens.length) return false;
+        String processName = tokens[processIndex];
+        return processName.equals(PETAL_PACKAGE)
+                || processName.startsWith(PETAL_PACKAGE + ":")
+                && processName.substring(PETAL_PACKAGE.length() + 1)
+                        .matches("[a-z0-9_.-]{1,128}");
     }
 
     private static boolean isSensitiveName(String path) {

@@ -33,7 +33,7 @@ public final class ShellWorkEntryPoint {
                  FileLock lock = owner.getChannel().tryLock()) {
                 if (lock == null) return;
                 currentControl = control;
-                JSONObject manifest = ShellWorkFiles.read(new File(control, "request.json"));
+                JSONObject manifest = ShellWorkFiles.readManifest(new File(control, "request.json"));
                 validateManifest(app, args[0], manifest);
                 if (InstrumentNavigationProxyService.isTerminalWorkState(
                         ShellWorkFiles.read(new File(control, "state.json")).optString("state"))) return;

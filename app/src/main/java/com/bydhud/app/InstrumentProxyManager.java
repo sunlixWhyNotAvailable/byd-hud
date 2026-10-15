@@ -1539,7 +1539,8 @@ final class InstrumentProxyManager {
     }
 
     Bundle registerWork(String id, String type, java.io.File artifact, JSONObject request,
-            android.os.ParcelFileDescriptor[] snapshots, int boot) throws IOException {
+            android.os.ParcelFileDescriptor requestFile, int offset,
+            android.os.ParcelFileDescriptor[] snapshots, boolean complete, int boot) throws IOException {
         boolean cleanupOnly = "shanghai".equals(type) && "cleanup".equals(request.optString("action"));
         if (!cleanupOnly && !ShellRuntimeSession.arm(context))
             throw new IOException("Shell runtime is not armed for this operation");
@@ -1550,7 +1551,7 @@ final class InstrumentProxyManager {
         try {
             current.setRecoveryEnabled(currentGeneration, ShellRuntimeSession.mayRestore(context));
             return current.registerWork(currentGeneration, id, type, artifact.getCanonicalPath(),
-                    boot, request.toString(), snapshots);
+                    boot, requestFile, offset, snapshots, complete);
         } catch (RemoteException error) {
             throw new IOException("Cannot register trusted shell operation", error);
         }

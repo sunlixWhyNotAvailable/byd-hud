@@ -12,8 +12,8 @@ android {
         applicationId = "com.bydhud.app"
         minSdk = 29
         targetSdk = 29
-        versionCode = 116
-        versionName = "3.6.3-beta.2"
+        versionCode = 117
+        versionName = "3.6.3-beta.3"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",
@@ -75,6 +75,7 @@ dependencies {
     implementation("com.android:zipflinger:8.7.3")
     implementation("io.sentry:sentry-android-core:8.43.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
 
 val copyPerformanceApkToBuildOutputs by tasks.registering(Copy::class) {

@@ -46,7 +46,8 @@ final class VehicleConfigurationDiagnostics {
             "com.bydhud.app", "com.waze", "app.revanced.android.apps.maps",
             "com.google.android.apps.maps", "com.ts.car.someip.service", "com.byd.launchermap",
             "com.example.amapservice", "com.byd.amapservice", "com.byd.containerservice",
-            "com.byd.someipsystemservice", "com.byd.clusterdebug", "com.android.launcher3"
+            "com.byd.someipsystemservice", "com.byd.clusterdebug", "com.android.launcher3",
+            "com.huawei.maps.car.app"
     };
     private static final Pattern COMPONENT = Pattern.compile(
             "([A-Za-z][\\w]*(?:\\.[A-Za-z][\\w]*)+)/([.$\\w]+)");

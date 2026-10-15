@@ -175,9 +175,12 @@ final class LogShareZip {
                         JSONObject source = new JSONObject().put("path", file.file.getCanonicalPath())
                                 .put("entry", file.entryName).put("length", file.length);
                         if (file.file.getName().endsWith(".json")) {
-                            if (file.length > 1024 * 1024) throw new IOException("oversized mutable metadata");
                             File frozen = new File(ShellWorkFiles.directory(new File(job, "metadata")), sources.length() + ".json");
                             Files.copy(file.file.toPath(), frozen.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            if (frozen.length() != file.length) {
+                                Files.deleteIfExists(frozen.toPath());
+                                throw new IOException("Mutable metadata changed during snapshot");
+                            }
                             source.put("path", frozen.getPath()).put("length", frozen.length());
                         }
                         sources.put(source);

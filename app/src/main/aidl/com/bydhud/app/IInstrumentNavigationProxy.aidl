@@ -19,7 +19,8 @@ interface IInstrumentNavigationProxy {
     Bundle startSystemCapture(long generation, String id, String cursor, in ParcelFileDescriptor destination);
     Bundle systemCaptureState(long generation, String id, boolean stop);
     Bundle registerWork(long generation, String id, String type, String artifactDirectory,
-            int boot, String requestJson, in ParcelFileDescriptor[] snapshots);
+            int boot, in ParcelFileDescriptor request, int offset,
+            in ParcelFileDescriptor[] snapshots, boolean complete);
     Bundle workState(long generation, String id);
     void completeWorkSign(long generation, String id, String requestId, boolean ok, String detail);
     void launchWork(long generation, String id);

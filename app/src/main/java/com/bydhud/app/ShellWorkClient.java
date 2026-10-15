@@ -155,7 +155,7 @@ final class ShellWorkClient {
             if (!ShellRuntimeSession.mayRestore(context)) return;
             List<PinRestore> pending = new ArrayList<>();
             for (File record : records) {
-                JSONObject expected = ShellWorkFiles.read(record);
+                JSONObject expected = ShellWorkFiles.readManifest(record);
                 if (expected.optInt("boot", -1) != boot) continue;
                 String artifact = expected.optString("artifact");
                 if (artifact.isEmpty()) continue;
@@ -217,7 +217,7 @@ final class ShellWorkClient {
                     (parent, name) -> name.endsWith(".json"));
             if (records == null) return;
             for (File record : records) {
-                JSONObject expected = ShellWorkFiles.read(record);
+                JSONObject expected = ShellWorkFiles.readManifest(record);
                 File job = new File(expected.optString("artifact", ""));
                 if (expected.optString("artifact", "").isEmpty()) continue;
                 try {
@@ -253,39 +253,72 @@ final class ShellWorkClient {
                 .put("version", BuildConfig.VERSION_CODE).put("profile", original.optString("profile"))
                 .put("artifact", artifact.getAbsolutePath()).put("input", original)
                 .put("allowedResults", new JSONArray().put("SUCCEEDED").put("FAILED").put("CANCELLED"))
-                .put("stage", "REGISTERING").put("createdAt", System.currentTimeMillis());
-
+                .put("stage", "REGISTERING").put("registrationComplete", false)
+                .put("createdAt", System.currentTimeMillis());
         if (expectationFile.isFile()) {
-            JSONObject prior = ShellWorkFiles.read(expectationFile);
+            JSONObject prior = ShellWorkFiles.readManifest(expectationFile);
             if (!sameOperation(prior, expectation))
                 throw new IOException("Operation ID is already bound to a different request");
-            return artifact;
+            expectation = prior;
         }
-        writeExpectation(context, expectation);
-        JSONArray files = snapshotFiles(type, original);
-        ParcelFileDescriptor[] descriptors = new ParcelFileDescriptor[files.length()];
         try {
-            for (int i = 0; i < files.length(); i++) {
-                File file = canonicalSnapshot(files.getString(i));
-                descriptors[i] = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
+            JSONArray files = expectation.optJSONArray("snapshotPaths");
+            if (files == null) {
+                files = snapshotFiles(type, original);
+                expectation.put("snapshotPaths", files);
             }
-            Bundle registered = InstrumentProxyManager.get(context).registerWork(id, type,
-                    artifact, original, descriptors, boot);
-            JSONObject workerInput = new JSONObject(registered.getString("worker_input", "{}"));
-            JSONArray fingerprints = new JSONArray(registered.getString("input_fingerprints", "[]"));
-            expectation.put("workerInput", workerInput).put("inputFingerprints", fingerprints)
-                    .put("stage", registered.getString("state", "REGISTERED"));
+            expectation.put("stage", "REGISTERING");
             writeExpectation(context, expectation);
+            if ("log".equals(type)) logPins.put(id, strings(original.optJSONArray("days")));
+            InstrumentProxyManager proxy = InstrumentProxyManager.get(context);
+            Bundle registered;
+            try (ParcelFileDescriptor request = ParcelFileDescriptor.open(expectationFile, ParcelFileDescriptor.MODE_READ_ONLY)) {
+                registered = proxy.registerWork(id, type, artifact, original, request,
+                        0, new ParcelFileDescriptor[0], false, boot);
+            }
+            int next = registered.getInt("next_snapshot", -1);
+            while ("REGISTERING".equals(registered.getString("state"))) {
+                if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Shell registration cancelled");
+                if (next < 0 || next > files.length()) throw new IOException("Invalid shell input cursor");
+                int count = Math.min(ShellWorkSnapshots.BATCH_SIZE, files.length() - next);
+                ParcelFileDescriptor[] descriptors = new ParcelFileDescriptor[count];
+                try {
+                    for (int i = 0; i < count; i++) descriptors[i] = ParcelFileDescriptor.open(
+                            canonicalSnapshot(files.getString(next + i)), ParcelFileDescriptor.MODE_READ_ONLY);
+                    registered = proxy.registerWork(id, type, artifact, original, null, next,
+                            descriptors, next + count == files.length(), boot);
+                } finally {
+                    for (ParcelFileDescriptor descriptor : descriptors)
+                        if (descriptor != null) try { descriptor.close(); } catch (IOException ignored) { }
+                }
+                int accepted = registered.getInt("next_snapshot", -1);
+                if (accepted != next + count) throw new IOException("Shell input batch was not accepted completely");
+                next = accepted;
+            }
+            String stage = registered.getString("state", "");
+            if (!("REGISTERED".equals(stage) || "RUNNING".equals(stage) || "SUCCEEDED".equals(stage)))
+                throw new IOException("Shell registration ended in " + stage);
+            expectation.put("registrationComplete", true).put("stage", stage);
+            writeExpectation(context, expectation);
+            AppEventLogger.event(context, "shell_work_registered id=" + safeId(id)
+                    + " type=" + type + " files=" + files.length());
         } catch (Exception error) {
             expectation.put("stage", "REGISTER_FAILED").put("error", safeError(error));
-            writeExpectation(context, expectation);
-            throw error;
-        } finally {
-            for (ParcelFileDescriptor descriptor : descriptors) {
-                if (descriptor != null) try { descriptor.close(); } catch (IOException ignored) { }
+            boolean interrupted = error instanceof java.io.InterruptedIOException || Thread.currentThread().isInterrupted();
+            // A lost Binder reply can follow a durable batch; keep its cursor for recovery.
+            if (interrupted) {
+                try {
+                    cancel(context, artifact);
+                    expectation.put("stage", "CANCELLED");
+                    logPins.remove(id);
+                } catch (IOException unavailable) {
+                    error.addSuppressed(unavailable);
+                }
             }
+            writeExpectation(context, expectation);
+            if (interrupted) Thread.currentThread().interrupt();
+            throw error;
         }
-        if ("log".equals(type)) logPins.put(id, strings(original.optJSONArray("days")));
         return artifact;
     }
 
@@ -300,7 +333,7 @@ final class ShellWorkClient {
         }
         if (type == null || id == null || !id.matches("[A-Za-z0-9_-]{1,80}"))
             throw new IOException("Unknown shell operation artifact");
-        JSONObject expected = ShellWorkFiles.read(expectationFile(context, type, id));
+        JSONObject expected = ShellWorkFiles.readManifest(expectationFile(context, type, id));
         if (!sameArtifact(expected, artifact) || !id.equals(expected.optString("id"))
                 || !type.equals(expected.optString("type"))) {
             throw new IOException("App-side shell operation expectation is missing or mismatched");
@@ -346,6 +379,11 @@ final class ShellWorkClient {
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
             throw new IOException("Shell job cannot wait on UI thread");
         JSONObject expected = expected(context, artifact);
+        if (!expected.optBoolean("registrationComplete", true)
+                || "REGISTERING".equals(expected.optString("stage"))
+                || "REGISTER_FAILED".equals(expected.optString("stage"))) {
+            prepare(context, expected.getString("type"), expected.getString("id"), expected.getJSONObject("input"));
+        }
         long start = android.os.SystemClock.elapsedRealtime();
         String lastProgress = "";
         boolean cancelSent = false;
@@ -516,30 +554,7 @@ final class ShellWorkClient {
     }
 
     static JSONArray snapshotFiles(String type, JSONObject input) throws Exception {
-        JSONArray paths = new JSONArray();
-        if ("patch".equals(type)) {
-            String source = input.optString("source");
-            if (!source.isEmpty() && input.optBoolean("directory")) {
-                File members = new File(source, "members");
-                File[] files = members.listFiles((parent, name) -> name.toLowerCase(
-                        java.util.Locale.ROOT).endsWith(".apk"));
-                if (files == null || files.length == 0)
-                    throw new IOException("APK-set inspection source has no members");
-                java.util.Arrays.sort(files, java.util.Comparator.comparing(File::getName));
-                for (File file : files) paths.put(file.getAbsolutePath());
-            } else if (!source.isEmpty()) paths.put(source);
-        } else if ("upload".equals(type)) {
-            paths.put(input.getString("archive"));
-        } else if ("log".equals(type)) {
-            JSONArray sources = input.optJSONArray("sources");
-            if (sources != null) for (int i = 0; i < sources.length(); i++) {
-                JSONObject source = sources.getJSONObject(i);
-                String path = source.optString("path");
-                if (!path.isEmpty()) paths.put(path);
-            }
-        }
-        if (paths.length() > 128) throw new IOException("Too many files in shell input snapshot");
-        return paths;
+        return ShellWorkSnapshots.paths(type, input);
     }
 
     private static File canonicalSnapshot(String path) throws IOException {

@@ -47,6 +47,10 @@ import org.json.JSONObject;
 
 //contains the LocalAdbBridge transport boundary so external communication is isolated from app logic.
 final class LocalAdbBridge {
+    interface ShellLineConsumer {
+        void accept(String line) throws IOException;
+    }
+
     private static final String TAG = "BydHudAdbBridge";
     private static final String HOST = "127.0.0.1";
     private static final int PORT = 5555;
@@ -961,9 +965,31 @@ final class LocalAdbBridge {
             return execute(safe, timeout);
         }
 
+        ShellResult runFileCommandLines(String command, ShellLineConsumer consumer) {
+            String safe = command == null ? "" : command.trim();
+            if (!fullExport || !VehicleConfigurationFiles.isStreamingInventoryCommand(safe)
+                    || consumer == null) {
+                throw new SecurityException("Full configuration streaming command is not allowlisted");
+            }
+            return executeLines(safe, FULL_INVENTORY_COMMAND_TIMEOUT_MS, consumer);
+        }
+
+        ShellResult runDeclaredDependencyCommand(String command, String packageDeclaredPath) {
+            String safe = command == null ? "" : command.trim();
+            if (!fullExport || !VehicleConfigurationFiles.isAllowedCommand(safe, packageDeclaredPath)) {
+                throw new SecurityException("PackageManager dependency command is not allowlisted");
+            }
+            return execute(safe, VehicleConfigurationReadback.COMMAND_TIMEOUT_MS);
+        }
+
         long readFile(String path, OutputStream output, long expectedBytes,
                 LongConsumer progress) throws IOException {
-            if (!VehicleConfigurationFiles.isAllowedPath(path)) {
+            return readFile(path, output, expectedBytes, progress, null);
+        }
+
+        long readFile(String path, OutputStream output, long expectedBytes,
+                LongConsumer progress, String packageDeclaredPath) throws IOException {
+            if (!VehicleConfigurationFiles.isAllowedExportPath(path, packageDeclaredPath)) {
                 throw new SecurityException("Full configuration path is not allowlisted");
             }
             String safePath = path;
@@ -1076,6 +1102,117 @@ final class LocalAdbBridge {
                 if (guard != null) guard.cancel(false);
                 busy.set(false);
             }
+        }
+
+        private ShellResult executeLines(String command, long timeoutMs, ShellLineConsumer consumer) {
+            long observedAtMs = System.currentTimeMillis();
+            long startedNanos = System.nanoTime();
+            ShellResult result;
+            if (ShellWorkEntryPoint.currentJob != null) {
+                if (stopped.get() != null || Thread.currentThread().isInterrupted()) {
+                    result = streamedFailure("export stopped");
+                } else {
+                    result = executeLocalLines(command, timeoutMs, consumer);
+                }
+            } else if (unavailable != null) {
+                result = unavailable;
+            } else if (!busy.compareAndSet(false, true)) {
+                result = exportFailure("skipped", 125, "export command already in progress", "");
+            } else {
+                ScheduledFuture<?> guard = null;
+                try {
+                    if (System.nanoTime() >= deadlineNanos) stop("session deadline");
+                    if (Thread.currentThread().isInterrupted()) stop("cancelled");
+                    if (stopped.get() != null || connection == null) {
+                        result = streamedFailure(String.valueOf(stopped.get()));
+                    } else {
+                        guard = guard(timeoutMs, "command timeout");
+                        result = connection.streamShellLines(command + "; echo " + EXIT_MARKER + "$?",
+                                consumer);
+                        if (stopped.get() != null) result = streamedFailure(String.valueOf(stopped.get()));
+                    }
+                } catch (IOException | RuntimeException error) {
+                    String reason = stopped.get();
+                    if (reason == null) {
+                        reason = exportError(error);
+                        stop("transport failed");
+                    }
+                    result = streamedFailure(reason);
+                } finally {
+                    if (guard != null) guard.cancel(false);
+                    busy.set(false);
+                }
+            }
+            return result.withTiming(observedAtMs,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
+        }
+
+        private ShellResult executeLocalLines(String command, long timeoutMs,
+                ShellLineConsumer consumer) {
+            java.lang.Process process = null;
+            Thread deadline = null;
+            AtomicBoolean finished = new AtomicBoolean();
+            try {
+                if (Thread.currentThread().isInterrupted()) return streamedFailure("export cancelled");
+                process = new ProcessBuilder("/system/bin/sh", "-c", command)
+                        .redirectErrorStream(true).start();
+                java.lang.Process running = process;
+                AtomicBoolean timedOut = new AtomicBoolean();
+                Thread owner = Thread.currentThread();
+                long deadlineNanos = System.nanoTime()
+                        + TimeUnit.MILLISECONDS.toNanos(Math.max(1L, timeoutMs));
+                deadline = new Thread(() -> {
+                    while (!finished.get()) {
+                        if (owner.isInterrupted()) {
+                            running.destroy();
+                            return;
+                        }
+                        if (System.nanoTime() >= deadlineNanos) {
+                            timedOut.set(true);
+                            running.destroy();
+                            return;
+                        }
+                        try { Thread.sleep(50L); }
+                        catch (InterruptedException ignored) { return; }
+                    }
+                }, "configuration-inventory-deadline");
+                deadline.setDaemon(true);
+                deadline.start();
+                StreamingLineOutput lines = new StreamingLineOutput(consumer, null);
+                try (InputStream input = process.getInputStream()) {
+                    byte[] buffer = new byte[16 * 1024];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) {
+                        if (Thread.currentThread().isInterrupted()) {
+                            process.destroy();
+                            return streamedFailure("export cancelled");
+                        }
+                        lines.write(buffer, 0, count);
+                    }
+                }
+                if (timedOut.get()) return streamedFailure("command timeout");
+                lines.finish();
+                int code;
+                try {
+                    code = process.waitFor();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return streamedFailure("export cancelled");
+                }
+                return lines.result(code, false);
+            } catch (IOException | RuntimeException error) {
+                return streamedFailure(exportError(error));
+            } finally {
+                finished.set(true);
+                if (deadline != null) deadline.interrupt();
+                if (process != null) process.destroy();
+            }
+        }
+
+        private ShellResult streamedFailure(String reason) {
+            boolean timeout = reason != null && (reason.contains("timeout") || reason.contains("deadline"));
+            return new ShellResult("", timeout ? 124 : -1, "", true, 0L,
+                    timeout ? "timeout" : "error", reason == null ? "inventory stream failed" : reason);
         }
 
         private ShellResult interruptedResult(OutputAccumulator output, Exception error) {
@@ -2560,6 +2697,14 @@ final class LocalAdbBridge {
             }
         }
 
+        private ShellResult streamShellLines(String command, ShellLineConsumer consumer)
+                throws IOException {
+            StreamingLineOutput output = new StreamingLineOutput(consumer, EXIT_MARKER);
+            streamShell(command, output);
+            output.finish();
+            return output.result(-1, true);
+        }
+
         //Uses the ADB sync RECV protocol so arbitrary file bytes never pass through shell text.
         long readFile(String path, OutputStream output, long expectedBytes,
                 LongConsumer progress) throws IOException {
@@ -2657,6 +2802,87 @@ final class LocalAdbBridge {
             this.raw = raw == null ? "" : raw;
             this.truncated = truncated;
             this.droppedBytes = Math.max(0L, droppedBytes);
+        }
+    }
+
+    /** Bounded per-line parser: inventory output is consumed incrementally, never aggregated. */
+    static final class StreamingLineOutput extends OutputStream {
+        private static final int MAX_LINE_BYTES = 8192;
+        private final ShellLineConsumer consumer;
+        private final String exitMarker;
+        private final ByteArrayOutputStream line = new ByteArrayOutputStream();
+        private boolean droppingLine;
+        private long droppedBytes;
+        private boolean exitMarkerSeen;
+        private int exitCode = -1;
+
+        StreamingLineOutput(ShellLineConsumer consumer, String exitMarker) {
+            this.consumer = consumer;
+            this.exitMarker = exitMarker;
+        }
+
+        @Override public void write(int value) throws IOException {
+            if ((value & 0xff) == '\n') {
+                emitLine();
+                return;
+            }
+            if (droppingLine) {
+                droppedBytes++;
+            } else if (line.size() >= MAX_LINE_BYTES) {
+                droppingLine = true;
+                droppedBytes++;
+            } else {
+                line.write(value);
+            }
+        }
+
+        @Override public void write(byte[] bytes, int offset, int length) throws IOException {
+            if (bytes == null) throw new NullPointerException("bytes");
+            if (offset < 0 || length < 0 || length > bytes.length - offset) {
+                throw new IndexOutOfBoundsException();
+            }
+            for (int index = offset; index < offset + length; index++) write(bytes[index]);
+        }
+
+        private void emitLine() throws IOException {
+            if (!droppingLine) {
+                byte[] bytes = line.toByteArray();
+                int length = bytes.length;
+                if (length > 0 && bytes[length - 1] == '\r') length--;
+                String value = new String(bytes, 0, length, StandardCharsets.UTF_8);
+                if (!isExitMarker(value)) consumer.accept(value);
+            }
+            line.reset();
+            droppingLine = false;
+        }
+
+        private boolean isExitMarker(String value) {
+            if (exitMarker == null || !value.startsWith(exitMarker)) return false;
+            String code = value.substring(exitMarker.length());
+            if (!code.matches("[0-9]{1,3}")) return false;
+            try {
+                exitCode = Integer.parseInt(code);
+                exitMarkerSeen = true;
+            } catch (NumberFormatException malformed) {
+                return false;
+            }
+            return true;
+        }
+
+        void finish() throws IOException {
+            if (line.size() > 0 || droppingLine) emitLine();
+        }
+
+        ShellResult result(int localExitCode, boolean requireExitMarker) {
+            int code = requireExitMarker ? (exitMarkerSeen ? exitCode : -1) : localExitCode;
+            boolean markerMissing = requireExitMarker && !exitMarkerSeen;
+            boolean truncated = droppedBytes > 0L || markerMissing;
+            String status = code == 0 ? "success" : code == 124 || code == 137 ? "timeout"
+                    : code == 126 ? "denied" : code == 127 ? "unsupported" : "error";
+            String error = markerMissing ? "shell exit marker unavailable"
+                    : droppedBytes > 0L ? "inventory line exceeded 8192 bytes"
+                    : code == 0 ? "" : "inventory command exited with status " + code;
+            return new ShellResult("", code, "", truncated, droppedBytes, status, error);
         }
     }
 

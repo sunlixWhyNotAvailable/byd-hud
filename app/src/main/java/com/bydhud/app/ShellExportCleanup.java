@@ -68,7 +68,7 @@ final class ShellExportCleanup {
         JSONObject request;
         JSONObject state;
         try {
-            request = ShellWorkFiles.read(requestFile);
+            request = ShellWorkFiles.readManifest(requestFile);
             state = ShellWorkFiles.read(ExportArtifactFiles.child(control, "state.json"));
         } catch (IOException unreadable) { throw new IOException("private_record_unreadable", unreadable); }
         boolean trusted = requestFile.isFile();
@@ -83,8 +83,16 @@ final class ShellExportCleanup {
         boolean settled = ShellWorkClient.terminal(state.optString("state"));
         if (trusted && !settled && current(request, version, boot, apk)
                 && !"RUNNING".equals(state.optString("state"))) {
-            result.put("reason", "registered_pending");
-            return;
+            if (!"REGISTER_FAILED".equals(hint.optString("stage"))) {
+                result.put("reason", "registered_pending");
+                return;
+            }
+            long retryUntil = request.optLong("createdAt", artifact.lastModified())
+                    + ExportArtifactFiles.LOG_RETENTION_MS;
+            if (System.currentTimeMillis() < retryUntil) {
+                result.put("reason", "registration_retry_pending").put("next", retryUntil);
+                return;
+            }
         }
         File retiredFile = ExportArtifactFiles.child(control, "retired.json");
         boolean retired = retiredFile.isFile();
@@ -94,9 +102,12 @@ final class ShellExportCleanup {
                     || marker.optInt("uid", -1) != uid) throw new IOException("ownership_mismatch");
         }
         long created = hint.optLong("createdAt", artifact.lastModified());
-        if (!trusted && !retired && !"REGISTER_FAILED".equals(hint.optString("stage"))
+        if (!trusted && !retired
                 && (created <= 0 || System.currentTimeMillis() - created < ExportArtifactFiles.LOG_RETENTION_MS)) {
             result.put("reason", "preparation_pending");
+            if ("REGISTER_FAILED".equals(hint.optString("stage")))
+                result.put("next", created > 0 ? created + ExportArtifactFiles.LOG_RETENTION_MS
+                        : System.currentTimeMillis() + 60_000L);
             return;
         }
         try (RandomAccessFile owner = new RandomAccessFile(ExportArtifactFiles.child(control, "owner.lock"), "rw");
@@ -160,7 +171,7 @@ final class ShellExportCleanup {
             if (!directory.isDirectory()) continue;
             try {
             File control = ShellWorkFiles.controlJob(directory.getName());
-            JSONObject request = ShellWorkFiles.read(ExportArtifactFiles.child(control, "request.json"));
+            JSONObject request = ShellWorkFiles.readManifest(ExportArtifactFiles.child(control, "request.json"));
             if (!"upload".equals(request.optString("type")) || request.optInt("uid", -1) != uid) continue;
             JSONObject state = ShellWorkFiles.read(ExportArtifactFiles.child(control, "state.json"));
             if (ShellWorkClient.terminal(state.optString("state"))) continue;

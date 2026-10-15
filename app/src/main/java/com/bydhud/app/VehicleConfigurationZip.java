@@ -1265,7 +1265,8 @@ final class VehicleConfigurationZip {
                     };
                     try {
                         ensureUnchanged(entry, VehicleConfigurationFiles.stat(
-                                entry.sourcePath, session, control::isCancelled));
+                                entry.sourcePath, session, control::isCancelled,
+                                entry.packageDeclaredPath));
                         try (OutputStream spool = openSpool(sourcePart)) {
                             File local = new File(entry.sourcePath);
                             if (local.canRead()) {
@@ -1273,14 +1274,16 @@ final class VehicleConfigurationZip {
                                     copyExact(input, spool, entry.size, control, onRead);
                                 }
                             } else if (session != null) {
-                                session.readFile(entry.sourcePath, spool, entry.size, onRead);
+                                session.readFile(entry.sourcePath, spool, entry.size, onRead,
+                                        entry.packageDeclaredPath);
                             } else {
                                 throw new IOException("source_not_readable_without_adb");
                             }
                         }
                         control.check();
                         ensureUnchanged(entry, VehicleConfigurationFiles.stat(
-                                entry.sourcePath, session, control::isCancelled));
+                                entry.sourcePath, session, control::isCancelled,
+                                entry.packageDeclaredPath));
                         if (sourcePart.length() != entry.size) throw new IOException("source_size_changed");
                         boolean redacted = redactFirmwareText(sourcePart, entry, collector);
                         progress.changed("ARCHIVING", entry.sourcePath, before + entry.size, total,
@@ -1413,22 +1416,551 @@ final class VehicleConfigurationZip {
         return copied;
     }
 
-    private static boolean redactFirmwareText(File spool, VehicleConfigurationFiles.Entry entry,
+    static boolean redactFirmwareText(File spool, VehicleConfigurationFiles.Entry entry,
             Collector collector) throws Exception {
         String lower = entry.sourcePath.toLowerCase(Locale.ROOT);
-        boolean text = "config".equals(entry.category) || lower.matches(".*\\.(?:json|xml|cfg|conf|ini|rc|sh|properties|txt)$");
-        if (!text) return false;
-        // Bound parsing/redaction memory, not binary APK/library/resource acquisition.
-        if (spool.length() > MAX_ENTRY_BYTES) throw new IOException("text_redaction_size_limit; file_not_exported");
-        byte[] bytes = java.nio.file.Files.readAllBytes(spool.toPath());
-        String original = new String(bytes, StandardCharsets.UTF_8);
-        if (original.indexOf('\u0000') >= 0) throw new IOException("non_text_configuration; file_not_exported");
-        String redacted = collector.maskString(redactConfigContent(original));
-        if (redacted.equals(original)) return false;
-        try (FileOutputStream output = new FileOutputStream(spool, false)) {
-            output.write(redacted.getBytes(StandardCharsets.UTF_8));
+        boolean isText = "config".equals(entry.category) || lower.matches(".*\\.(?:json|xml|cfg|conf|ini|rc|sh|properties|txt)$");
+        if (!isText) return false;
+        File current = File.createTempFile("bydhud-config-redact-", ".utf16",
+                spool.getAbsoluteFile().getParentFile());
+        File original = current;
+        try {
+            utf8ToUtf16(spool, current);
+            current = applyTextTransform(current, VehicleConfigurationZip::redactXmlContent);
+            current = applyTextTransform(current, VehicleConfigurationZip::redactXmlAttributes);
+            current = applyTextTransform(current, VehicleConfigurationZip::redactAssignments);
+            current = applyTextTransform(current, VehicleConfigurationZip::redactAuthorization);
+            current = applyTextTransform(current, VehicleConfigurationZip::redactPem);
+            current = applyTextTransform(current,
+                    (text, output) -> redactMacAddresses(text, output, collector.networkMasker));
+            current = applyTextTransform(current,
+                    (text, output) -> redactIpv4Addresses(text, output, collector.networkMasker));
+            current = applyTextTransform(current,
+                    (text, output) -> redactIpv6WildcardEndpoints(text, output,
+                            collector.networkMasker));
+            current = applyTextTransform(current,
+                    (text, output) -> redactIpv6Addresses(text, output, collector.networkMasker));
+            try (FileTextSequence text = new FileTextSequence(current)) {
+                if (containsRawNetworkAddress(text)) {
+                    throw new IOException("network address masking failed");
+                }
+            }
+            if (current == original) return false;
+            try (java.io.Reader input = new java.io.InputStreamReader(
+                    new FileInputStream(current), StandardCharsets.UTF_16LE);
+                    java.io.Writer output = new java.io.OutputStreamWriter(
+                            new FileOutputStream(spool, false), StandardCharsets.UTF_8)) {
+                char[] buffer = new char[16 * 1024];
+                int count;
+                while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            }
+            return true;
+        } finally {
+            deleteTemporaryFile(current);
+        }
+    }
+
+    private interface TextTransform {
+        boolean apply(TextSequence text, java.io.Writer output) throws IOException;
+    }
+
+    private interface TextSequence extends CharSequence {
+        @Override TextSequence subSequence(int start, int end);
+        void writeTo(java.io.Writer output, int start, int end) throws IOException;
+    }
+
+    private static final class FileTextSequence implements TextSequence, AutoCloseable {
+        private static final int CACHE_BYTES = 64 * 1024;
+        private final java.io.RandomAccessFile file;
+        private final int length;
+        private final byte[] cache = new byte[CACHE_BYTES];
+        private long cacheStart = -1;
+        private int cacheChars;
+
+        FileTextSequence(File source) throws IOException {
+            long bytes = source.length();
+            // shortcut: Java regex indexes CharSequence with int; use a long-indexed scanner
+            // if vehicle configuration files can exceed 2 Gi UTF-16 characters.
+            if ((bytes & 1L) != 0 || bytes / 2L > Integer.MAX_VALUE) {
+                throw new IOException("text_redaction_range_limit; file_not_exported");
+            }
+            length = (int) (bytes / 2L);
+            file = new java.io.RandomAccessFile(source, "r");
+        }
+
+        @Override public int length() { return length; }
+
+        @Override public char charAt(int index) {
+            if (index < 0 || index >= length) throw new IndexOutOfBoundsException();
+            try {
+                if (index < cacheStart || index >= cacheStart + cacheChars) {
+                    cacheStart = index;
+                    cacheChars = Math.min(CACHE_BYTES / 2, length - index);
+                    file.seek(2L * index);
+                    file.readFully(cache, 0, cacheChars * 2);
+                }
+            } catch (IOException error) {
+                throw new java.io.UncheckedIOException(error);
+            }
+            int offset = (int) ((index - cacheStart) * 2L);
+            return (char) ((cache[offset] & 0xff) | ((cache[offset + 1] & 0xff) << 8));
+        }
+
+        @Override public TextSequence subSequence(int start, int end) {
+            if (start < 0 || end < start || end > length) throw new IndexOutOfBoundsException();
+            return new TextSlice(this, start, end);
+        }
+
+        @Override public void writeTo(java.io.Writer output, int start, int end)
+                throws IOException {
+            writeUtf16Range(file, output, start, end);
+        }
+
+        @Override public String toString() {
+            java.io.StringWriter output = new java.io.StringWriter();
+            try {
+                writeTo(output, 0, length);
+            } catch (IOException error) {
+                throw new java.io.UncheckedIOException(error);
+            }
+            return output.toString();
+        }
+
+        @Override public void close() throws IOException { file.close(); }
+    }
+
+    private static final class TextSlice implements TextSequence {
+        private final TextSequence source;
+        private final int start;
+        private final int end;
+
+        TextSlice(TextSequence source, int start, int end) {
+            this.source = source;
+            this.start = start;
+            this.end = end;
+        }
+
+        @Override public int length() { return end - start; }
+
+        @Override public char charAt(int index) {
+            if (index < 0 || index >= length()) throw new IndexOutOfBoundsException();
+            return source.charAt(start + index);
+        }
+
+        @Override public TextSequence subSequence(int from, int to) {
+            if (from < 0 || to < from || to > length()) throw new IndexOutOfBoundsException();
+            return new TextSlice(this, from, to);
+        }
+
+        @Override public void writeTo(java.io.Writer output, int from, int to)
+                throws IOException {
+            if (from < 0 || to < from || to > length()) throw new IndexOutOfBoundsException();
+            source.writeTo(output, start + from, start + to);
+        }
+
+        @Override public String toString() {
+            java.io.StringWriter output = new java.io.StringWriter();
+            try {
+                writeTo(output, 0, length());
+            } catch (IOException error) {
+                throw new java.io.UncheckedIOException(error);
+            }
+            return output.toString();
+        }
+    }
+
+    private static File applyTextTransform(File input, TextTransform transform) throws IOException {
+        File outputFile = File.createTempFile("bydhud-config-redact-", ".utf16",
+                input.getAbsoluteFile().getParentFile());
+        boolean changed;
+        try (FileTextSequence text = new FileTextSequence(input);
+                java.io.Writer output = new java.io.OutputStreamWriter(
+                        new FileOutputStream(outputFile), StandardCharsets.UTF_16LE)) {
+            changed = transform.apply(text, output);
+        } catch (java.io.UncheckedIOException error) {
+            deleteTemporaryFile(outputFile);
+            throw error.getCause();
+        } catch (IOException | RuntimeException | Error error) {
+            deleteTemporaryFile(outputFile);
+            throw error;
+        }
+        if (!changed) {
+            deleteTemporaryFile(outputFile);
+            return input;
+        }
+        try {
+            deleteTemporaryFile(input);
+        } catch (IOException cleanupError) {
+            deleteTemporaryFile(outputFile);
+            throw cleanupError;
+        }
+        return outputFile;
+    }
+
+    private static void deleteTemporaryFile(File file) throws IOException {
+        if (file.exists() && !file.delete()) {
+            throw new IOException("text_redaction_temp_cleanup_failed");
+        }
+    }
+
+    private static void utf8ToUtf16(File input, File output) throws IOException {
+        try (java.io.Reader reader = new java.io.InputStreamReader(
+                new FileInputStream(input), StandardCharsets.UTF_8);
+                java.io.Writer writer = new java.io.OutputStreamWriter(
+                        new FileOutputStream(output), StandardCharsets.UTF_16LE)) {
+            char[] buffer = new char[16 * 1024];
+            int count;
+            while ((count = reader.read(buffer)) != -1) {
+                for (int i = 0; i < count; i++) {
+                    if (buffer[i] == '\u0000') {
+                        throw new IOException("non_text_configuration; file_not_exported");
+                    }
+                }
+                writer.write(buffer, 0, count);
+            }
+        }
+    }
+
+    private static void writeUtf16Range(java.io.RandomAccessFile source,
+            java.io.Writer output, int start, int end) throws IOException {
+        byte[] bytes = new byte[16 * 1024];
+        char[] chars = new char[bytes.length / 2];
+        source.seek(2L * start);
+        int remaining = end - start;
+        while (remaining > 0) {
+            int count = Math.min(remaining, chars.length);
+            source.readFully(bytes, 0, count * 2);
+            for (int i = 0; i < count; i++) {
+                int offset = i * 2;
+                chars[i] = (char) ((bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8));
+            }
+            output.write(chars, 0, count);
+            remaining -= count;
+        }
+    }
+
+    private static void writeRange(TextSequence text, java.io.Writer output, int start, int end)
+            throws IOException {
+        text.writeTo(output, start, end);
+    }
+
+    private static boolean redactXmlContent(TextSequence text, java.io.Writer output)
+            throws IOException {
+        java.util.regex.Matcher tags = XML_SENSITIVE_CONTENT.matcher(text);
+        int cursor = 0;
+        boolean changed = false;
+        while (tags.find()) {
+            if (rangeEquals(text, tags.end(1), tags.start(3), "[REDACTED]")) {
+                writeRange(text, output, cursor, tags.end());
+            } else {
+                writeRange(text, output, cursor, tags.start());
+                writeRange(text, output, tags.start(1), tags.end(1));
+                output.write("[REDACTED]");
+                writeRange(text, output, tags.start(3), tags.end(3));
+                changed = true;
+            }
+            cursor = tags.end();
+        }
+        writeRange(text, output, cursor, text.length());
+        return changed;
+    }
+
+    private static boolean redactXmlAttributes(TextSequence text, java.io.Writer output)
+            throws IOException {
+        java.util.regex.Matcher tags = XML_TAG.matcher(text);
+        int cursor = 0;
+        boolean changed = false;
+        while (tags.find()) {
+            TextSequence tag = text.subSequence(tags.start(), tags.end());
+            java.util.regex.Matcher attributes = XML_ATTRIBUTE.matcher(tag);
+            boolean sensitive = false;
+            while (attributes.find()) {
+                if ((equalsIgnoreCase(tag, attributes.start(1), attributes.end(1), "name")
+                        || equalsIgnoreCase(tag, attributes.start(1), attributes.end(1), "key"))
+                        && isSensitiveConfigKey(tag.subSequence(
+                                attributes.start(3), attributes.end(3)))) {
+                    sensitive = true;
+                    break;
+                }
+            }
+            if (!sensitive) continue;
+            writeRange(text, output, cursor, tags.start());
+            attributes.reset();
+            int tagCursor = 0;
+            boolean tagChanged = false;
+            while (attributes.find()) {
+                if (!isXmlValueAttribute(tag, attributes.start(1), attributes.end(1))) continue;
+                char quote = tag.charAt(attributes.start(2));
+                if (xmlAttributeAlreadyRedacted(tag, attributes, quote)) continue;
+                writeRange(tag, output, tagCursor, attributes.start());
+                writeRange(tag, output, attributes.start(1), attributes.end(1));
+                output.write('=');
+                output.write(quote);
+                output.write("[REDACTED]");
+                output.write(quote);
+                tagCursor = attributes.end();
+                tagChanged = true;
+            }
+            if (tagChanged) {
+                writeRange(tag, output, tagCursor, tag.length());
+                changed = true;
+            } else {
+                writeRange(text, output, tags.start(), tags.end());
+            }
+            cursor = tags.end();
+        }
+        writeRange(text, output, cursor, text.length());
+        return changed;
+    }
+
+    private static boolean isXmlValueAttribute(TextSequence tag, int start, int end) {
+        return equalsIgnoreCase(tag, start, end, "value")
+                || equalsIgnoreCase(tag, start, end, "val")
+                || equalsIgnoreCase(tag, start, end, "content")
+                || equalsIgnoreCase(tag, start, end, "data");
+    }
+
+    private static boolean xmlAttributeAlreadyRedacted(TextSequence tag,
+            java.util.regex.Matcher attribute, char quote) {
+        int nameLength = attribute.end(1) - attribute.start(1);
+        int expectedLength = nameLength + 1 + 1 + "[REDACTED]".length() + 1;
+        if (attribute.end() - attribute.start() != expectedLength) return false;
+        int cursor = attribute.start();
+        for (int i = 0; i < nameLength; i++) {
+            if (tag.charAt(cursor + i) != tag.charAt(attribute.start(1) + i)) return false;
+        }
+        cursor += nameLength;
+        if (tag.charAt(cursor++) != '=' || tag.charAt(cursor++) != quote) return false;
+        if (!rangeEquals(tag, cursor, cursor + "[REDACTED]".length(), "[REDACTED]")) {
+            return false;
+        }
+        return tag.charAt(cursor + "[REDACTED]".length()) == quote;
+    }
+
+    private static boolean redactAssignments(TextSequence text, java.io.Writer output)
+            throws IOException {
+        java.util.regex.Matcher keys = CONFIG_KEY.matcher(text);
+        int cursor = 0;
+        boolean changed = false;
+        while (keys.find()) {
+            if (keys.start() < cursor || !isSensitiveConfigKey(keys.group(1))) continue;
+            int start = keys.end();
+            while (start < text.length() && Character.isWhitespace(text.charAt(start))) start++;
+            if (start < text.length()
+                    && (text.charAt(start) == '"' || text.charAt(start) == '\'')) {
+                start++;
+                while (start < text.length() && Character.isWhitespace(text.charAt(start))) start++;
+            }
+            if (start < text.length() && text.charAt(start) == '>') continue;
+            if (start < text.length()
+                    && (text.charAt(start) == ':' || text.charAt(start) == '=')) start++;
+            while (start < text.length() && Character.isWhitespace(text.charAt(start))) start++;
+            int end = configValueEnd(text, start);
+            if (end <= start) continue;
+            String replacement = redactionFor(text, start, end);
+            if (rangeEquals(text, start, end, replacement)) continue;
+            writeRange(text, output, cursor, start);
+            output.write(replacement);
+            cursor = end;
+            changed = true;
+        }
+        writeRange(text, output, cursor, text.length());
+        return changed;
+    }
+
+    private static boolean redactAuthorization(TextSequence text, java.io.Writer output)
+            throws IOException {
+        java.util.regex.Matcher values = AUTHORIZATION_VALUE.matcher(text);
+        int cursor = 0;
+        boolean changed = false;
+        while (values.find()) {
+            String replacement = values.group(1) + " [REDACTED]";
+            if (rangeEquals(text, values.start(), values.end(), replacement)) continue;
+            writeRange(text, output, cursor, values.start());
+            output.write(replacement);
+            cursor = values.end();
+            changed = true;
+        }
+        writeRange(text, output, cursor, text.length());
+        return changed;
+    }
+
+    private static boolean redactPem(TextSequence text, java.io.Writer output) throws IOException {
+        java.util.regex.Matcher values = PEM_VALUE.matcher(text);
+        int cursor = 0;
+        boolean changed = false;
+        while (values.find()) {
+            writeRange(text, output, cursor, values.start());
+            output.write("[REDACTED PEM]");
+            cursor = values.end();
+            changed = true;
+        }
+        writeRange(text, output, cursor, text.length());
+        return changed;
+    }
+
+    private static boolean redactMacAddresses(TextSequence text, java.io.Writer output,
+            NetworkMasker masker) throws IOException {
+        java.util.regex.Matcher values = MAC_ADDRESS.matcher(text);
+        int cursor = 0;
+        boolean changed = false;
+        while (values.find()) {
+            String key = values.group(1).toLowerCase(Locale.ROOT).replace('-', ':');
+            String alias = NetworkMasker.alias(masker.macAliases, key, "MAC");
+            if (rangeEquals(text, values.start(1), values.end(1), alias)) continue;
+            writeRange(text, output, cursor, values.start(1));
+            output.write(alias);
+            cursor = values.end(1);
+            changed = true;
+        }
+        writeRange(text, output, cursor, text.length());
+        return changed;
+    }
+
+    private static boolean redactIpv4Addresses(TextSequence text, java.io.Writer output,
+            NetworkMasker masker) throws IOException {
+        java.util.regex.Matcher values = IPV4_ADDRESS.matcher(text);
+        int cursor = 0;
+        boolean changed = false;
+        while (values.find()) {
+            String replacement = NetworkMasker.alias(masker.ipAliases, values.group(1), "IP")
+                    + (values.group(2) == null ? "" : values.group(2));
+            if (rangeEquals(text, values.start(), values.end(), replacement)) continue;
+            writeRange(text, output, cursor, values.start());
+            output.write(replacement);
+            cursor = values.end();
+            changed = true;
+        }
+        writeRange(text, output, cursor, text.length());
+        return changed;
+    }
+
+    private static boolean redactIpv6WildcardEndpoints(TextSequence text,
+            java.io.Writer output, NetworkMasker masker) throws IOException {
+        java.util.regex.Matcher values = IPV6_WILDCARD_ENDPOINT.matcher(text);
+        int cursor = 0;
+        boolean changed = false;
+        String alias = null;
+        while (values.find()) {
+            if (alias == null) alias = NetworkMasker.alias(masker.ipAliases, "::", "IP");
+            writeRange(text, output, cursor, values.start());
+            output.write(alias);
+            cursor = values.end();
+            changed = true;
+        }
+        writeRange(text, output, cursor, text.length());
+        return changed;
+    }
+
+    private static boolean redactIpv6Addresses(TextSequence text, java.io.Writer output,
+            NetworkMasker masker) throws IOException {
+        java.util.regex.Matcher values = IPV6_ADDRESS.matcher(text);
+        int cursor = 0;
+        boolean changed = false;
+        while (values.find()) {
+            String open = values.group(1);
+            String address = values.group(2);
+            int zoneStart = values.start(3);
+            int zoneEnd = values.end(3);
+            String close = values.group(4);
+            if (!NetworkMasker.validBrackets(open, close) || !NetworkMasker.isIpv6(address)) {
+                continue;
+            }
+            writeRange(text, output, cursor, values.start());
+            output.write(open);
+            output.write(NetworkMasker.alias(masker.ipAliases,
+                    address.toLowerCase(Locale.ROOT), "IP"));
+            if (zoneStart >= 0) writeRange(text, output, zoneStart, zoneEnd);
+            output.write(close);
+            if (values.start(5) >= 0) writeRange(text, output, values.start(5), values.end(5));
+            cursor = values.end();
+            changed = true;
+        }
+        writeRange(text, output, cursor, text.length());
+        return changed;
+    }
+
+    private static boolean containsRawNetworkAddress(TextSequence text) {
+        if (MAC_ADDRESS.matcher(text).find() || IPV4_ADDRESS.matcher(text).find()
+                || IPV6_WILDCARD_ENDPOINT.matcher(text).find()) return true;
+        java.util.regex.Matcher values = IPV6_ADDRESS.matcher(text);
+        while (values.find()) {
+            if (NetworkMasker.validBrackets(values.group(1), values.group(4))
+                    && NetworkMasker.isIpv6(values.group(2))) return true;
+        }
+        return false;
+    }
+
+    private static boolean rangeEquals(TextSequence text, int start, int end, String value) {
+        if (end - start != value.length()) return false;
+        for (int i = 0; i < value.length(); i++) {
+            if (text.charAt(start + i) != value.charAt(i)) return false;
         }
         return true;
+    }
+
+    private static boolean equalsIgnoreCase(TextSequence text, int start, int end, String value) {
+        if (end - start != value.length()) return false;
+        for (int i = 0; i < value.length(); i++) {
+            if (Character.toLowerCase(text.charAt(start + i))
+                    != Character.toLowerCase(value.charAt(i))) return false;
+        }
+        return true;
+    }
+
+    private static int configValueEnd(CharSequence value, int start) {
+        if (start >= value.length()) return start;
+        char first = value.charAt(start);
+        if (first == '"' || first == '\'') {
+            boolean escaped = false;
+            for (int i = start + 1; i < value.length(); i++) {
+                char current = value.charAt(i);
+                if (escaped) escaped = false;
+                else if (current == '\\') escaped = true;
+                else if (current == first) return i + 1;
+            }
+            return value.length();
+        }
+        if (first == '{' || first == '[') {
+            char close = first == '{' ? '}' : ']';
+            int depth = 0;
+            char quote = 0;
+            boolean escaped = false;
+            for (int i = start; i < value.length(); i++) {
+                char current = value.charAt(i);
+                if (quote != 0) {
+                    if (escaped) escaped = false;
+                    else if (current == '\\') escaped = true;
+                    else if (current == quote) quote = 0;
+                } else if (current == '"' || current == '\'') {
+                    quote = current;
+                } else if (current == first) {
+                    depth++;
+                } else if (current == close && --depth == 0) {
+                    return i + 1;
+                }
+            }
+            return value.length();
+        }
+        int end = start;
+        while (end < value.length()) {
+            char current = value.charAt(end);
+            if (current == '\r' || current == '\n' || current == ';'
+                    || current == ',' || current == '}') break;
+            end++;
+        }
+        return end;
+    }
+
+    private static String redactionFor(TextSequence value, int start, int end) {
+        if (end - start >= 2) {
+            char first = value.charAt(start);
+            char last = value.charAt(end - 1);
+            if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+                return first + "[REDACTED]" + last;
+            }
+        }
+        return "[REDACTED]";
     }
 
     static JSONObject fileMetadata(VehicleConfigurationFiles.Entry entry, File spool,
@@ -1762,14 +2294,33 @@ final class VehicleConfigurationZip {
     }
 
     private static boolean isSensitiveConfigKey(String key) {
-        String safe = key == null ? "" : key.toLowerCase(Locale.ROOT);
-        if (SENSITIVE_KEY.matcher(safe.replace("_", "").replace("-", ""))
-                .matches()) {
-            return true;
+        return isSensitiveConfigKey((CharSequence) (key == null ? "" : key));
+    }
+
+    private static boolean isSensitiveConfigKey(CharSequence key) {
+        StringBuilder compact = new StringBuilder(64);
+        boolean compactTooLong = false;
+        for (int i = 0; i < key.length(); i++) {
+            char value = key.charAt(i);
+            if (value == '_' || value == '-') continue;
+            if (compact.length() == 64) compactTooLong = true;
+            else if (!compactTooLong) compact.append(value);
         }
-        for (String segment : safe.split("[._-]+")) {
-            if (SENSITIVE_KEY.matcher(segment).matches()) {
-                return true;
+        if (!compactTooLong && SENSITIVE_KEY.matcher(compact).matches()) return true;
+
+        StringBuilder segment = new StringBuilder(64);
+        boolean segmentTooLong = false;
+        for (int i = 0; i <= key.length(); i++) {
+            char value = i == key.length() ? '.' : key.charAt(i);
+            if (value == '.' || value == '_' || value == '-') {
+                if (!segmentTooLong && SENSITIVE_KEY.matcher(segment).matches()) return true;
+                segment.setLength(0);
+                segmentTooLong = false;
+            } else if (segment.length() == 64) {
+                segmentTooLong = true;
+                segment.setLength(0);
+            } else if (!segmentTooLong) {
+                segment.append(value);
             }
         }
         return false;

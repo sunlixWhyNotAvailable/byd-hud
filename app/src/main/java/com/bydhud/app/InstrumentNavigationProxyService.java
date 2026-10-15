@@ -26,7 +26,6 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
-import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -617,76 +616,103 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         finally { Binder.restoreCallingIdentity(identity); }
     }
 
-    @Override public synchronized Bundle registerWork(long requestGeneration, String id,
-            String type, String artifactDirectory, int boot, String requestJson,
-            ParcelFileDescriptor[] snapshots) {
+    @Override public Bundle registerWork(long requestGeneration, String id,
+            String type, String artifactDirectory, int boot, ParcelFileDescriptor request,
+            int offset, ParcelFileDescriptor[] snapshots, boolean complete) {
         enforceSession(requestGeneration);
         long identity = Binder.clearCallingIdentity();
+        java.util.List<ShellWorkSnapshots.Source> sources = new java.util.ArrayList<>();
         try (ShellWorkFiles.OperationLock admission = ShellWorkFiles.lockOperation(id)) {
             Context app = shellAppContext();
-            int currentBoot = ShellWorkEntryPoint.bootCount();
-            if (boot != currentBoot) throw new SecurityException("Shell job boot identity changed");
+            if (boot != ShellWorkEntryPoint.bootCount())
+                throw new SecurityException("Shell job boot identity changed");
             if (!validWorkType(type) || id == null || !id.matches("[A-Za-z0-9_-]{1,80}"))
                 throw new SecurityException("Invalid shell operation identity");
-            if (requestJson == null || requestJson.getBytes(StandardCharsets.UTF_8).length > 768 * 1024)
-                throw new SecurityException("Shell operation descriptor is oversized");
+            int count = snapshots == null ? 0 : snapshots.length;
+            if (count > ShellWorkSnapshots.BATCH_SIZE)
+                throw new SecurityException("Shell input batch is oversized");
             File sharedRoot = ShellWorkFiles.directory(ShellWorkFiles.root(app)).getCanonicalFile();
             File artifact = ShellWorkFiles.inside(sharedRoot, artifactDirectory);
             if (!artifact.getParentFile().equals(sharedRoot)
                     || !artifact.getName().equals(type + "-" + id))
                 throw new SecurityException("Invalid shell artifact location");
-            org.json.JSONObject original = new org.json.JSONObject(requestJson);
-            validateWorkInput(app, id, type, original);
-            org.json.JSONArray paths = ShellWorkClient.snapshotFiles(type, original);
-            int descriptorCount = snapshots == null ? 0 : snapshots.length;
-            if (descriptorCount != paths.length())
-                throw new SecurityException("Shell input snapshot count mismatch");
+            org.json.JSONObject original = null;
+            org.json.JSONArray declaredPaths = null;
+            if (request != null) {
+                if (!android.system.OsConstants.S_ISREG(android.system.Os.fstat(request.getFileDescriptor()).st_mode))
+                    throw new SecurityException("Shell request must be a regular file");
+                try (java.io.InputStream input = new ParcelFileDescriptor.AutoCloseInputStream(request)) {
+                    org.json.JSONObject supplied = ShellWorkFiles.readManifest(input);
+                    original = supplied.getJSONObject("input");
+                    declaredPaths = supplied.getJSONArray("snapshotPaths");
+                }
+                validateWorkInput(app, id, type, original);
+            }
             File control = ShellWorkFiles.controlJob(id);
             if (new File(control, "retired.json").exists())
                 throw new SecurityException("Retired operation cannot be registered again");
             File manifestFile = new File(control, "request.json");
-            org.json.JSONObject manifest = manifestFile.isFile()
-                    ? ShellWorkFiles.read(manifestFile) : null;
-            if (manifest != null) {
+            org.json.JSONObject manifest;
+            if (manifestFile.isFile()) {
+                manifest = ShellWorkFiles.readManifest(manifestFile);
                 if (!id.equals(manifest.optString("id")) || !type.equals(manifest.optString("type"))
+                        || allowedUid != manifest.optInt("uid", -1)
+                        || appVersionCode != manifest.optInt("version", -1)
+                        || !app.getApplicationInfo().sourceDir.equals(manifest.optString("apk"))
                         || boot != manifest.optInt("boot", -1)
                         || !artifact.getAbsolutePath().equals(manifest.optString("artifact"))
-                        || !original.toString().equals(manifest.optJSONObject("input").toString())) {
+                        || (original != null && (!original.toString().equals(manifest.getJSONObject("input").toString())
+                                || !declaredPaths.toString().equals(manifest.getJSONArray("snapshotPaths").toString()))))
                     throw new SecurityException("Operation ID is already bound to a different request");
+                org.json.JSONObject state = readWorkState(control);
+                String phase = state.optString("state", manifest.optString("state"));
+                if (isTerminalWorkState(phase) || "RUNNING".equals(phase))
+                    return registrationState(control, manifest, state);
+                // A process can stop between committing the manifest and publishing its state.
+                if ("REGISTERED".equals(manifest.optString("state"))) {
+                    writeWorkState(control, new org.json.JSONObject().put("state", "REGISTERED")
+                            .put("progress", new org.json.JSONObject().put("phase", "REGISTERED")));
+                    return registrationState(control, manifest, readWorkState(control));
                 }
-                return registrationState(manifest, readWorkState(control));
+            } else {
+                if (original == null || offset != 0) throw new IOException("Shell registration request is missing");
+                if (!declaredPaths.toString().equals(ShellWorkSnapshots.paths(type, original).toString()))
+                    throw new SecurityException("Shell input selection changed before registration");
+                if (!control.isDirectory() && !control.mkdirs()) throw new IOException("Cannot create private shell operation");
+                android.system.Os.chmod(control.getPath(), 0700);
+                manifest = new org.json.JSONObject().put("schema", 1).put("id", id).put("type", type)
+                        .put("uid", allowedUid).put("version", appVersionCode)
+                        .put("apk", app.getApplicationInfo().sourceDir).put("boot", boot)
+                        .put("artifact", artifact.getAbsolutePath()).put("input", original)
+                        .put("workerInput", new org.json.JSONObject(original.toString()))
+                        .put("snapshotPaths", declaredPaths)
+                        .put("inputFingerprints", new org.json.JSONArray()).put("nextSnapshot", 0)
+                        .put("state", "REGISTERING").put("createdAt", System.currentTimeMillis());
+                ShellWorkFiles.write(manifestFile, manifest);
+                writeWorkState(control, new org.json.JSONObject().put("state", "REGISTERING")
+                        .put("progress", new org.json.JSONObject().put("phase", "COPYING")));
             }
-            if (!control.isDirectory() && !control.mkdirs())
-                throw new IOException("Cannot create private shell operation");
-            android.system.Os.chmod(control.getPath(), 0700);
-            org.json.JSONArray fingerprints = new org.json.JSONArray();
-            org.json.JSONObject workerInput = new org.json.JSONObject(original.toString());
-            File snapshotsDir = new File(control, "snapshots");
-            if (paths.length() > 0) {
-                if (snapshotsDir.exists()) deletePrivateTree(snapshotsDir, control);
-                if (!snapshotsDir.mkdirs()) throw new IOException("Cannot create private shell snapshots");
+            if (count == 0 && !complete) return registrationState(control, manifest, readWorkState(control));
+            for (ParcelFileDescriptor snapshot : snapshots == null ? new ParcelFileDescriptor[0] : snapshots) {
+                if (snapshot == null) throw new SecurityException("Missing shell input descriptor");
+                android.system.StructStat stat = android.system.Os.fstat(snapshot.getFileDescriptor());
+                if (!android.system.OsConstants.S_ISREG(stat.st_mode) || stat.st_size < 0)
+                    throw new SecurityException("Shell input must be a regular file");
+                sources.add(new ShellWorkSnapshots.Source(new ParcelFileDescriptor.AutoCloseInputStream(snapshot), stat.st_size));
             }
-            for (int index = 0; index < paths.length(); index++) {
-                String sourceName = paths.getString(index);
-                File target = snapshotTarget(type, workerInput, snapshotsDir, index, sourceName);
-                CopyDigest digest = copySnapshot(snapshots[index], target);
-                fingerprints.put(new org.json.JSONObject().put("index", index)
-                        .put("length", digest.length).put("sha256", digest.sha256));
-                replaceSnapshotPath(type, workerInput, index, target.getAbsolutePath());
+            org.json.JSONObject cursor = ShellWorkSnapshots.append(control, manifest, offset, sources, complete);
+            synchronized (this) {
+                String stage = new File(control, "cancel").exists() ? "CANCELLED" : cursor.getString("state");
+                writeWorkState(control, new org.json.JSONObject().put("state", stage)
+                        .put("progress", new org.json.JSONObject().put("phase", complete ? "REGISTERED" : "COPYING")
+                                .put("files", cursor.getInt("nextSnapshot"))));
+                return registrationState(control, manifest, readWorkState(control));
             }
-            manifest = new org.json.JSONObject().put("schema", 1).put("id", id).put("type", type)
-                    .put("uid", allowedUid).put("version", appVersionCode)
-                    .put("apk", app.getApplicationInfo().sourceDir).put("boot", boot)
-                    .put("artifact", artifact.getAbsolutePath()).put("input", original)
-                    .put("workerInput", workerInput).put("inputFingerprints", fingerprints)
-                    .put("state", "REGISTERED").put("createdAt", System.currentTimeMillis());
-            ShellWorkFiles.write(manifestFile, manifest);
-            writeWorkState(control, new org.json.JSONObject().put("state", "REGISTERED")
-                    .put("progress", new org.json.JSONObject().put("phase", "REGISTERED")));
-            return registrationState(manifest, readWorkState(control));
         } catch (Exception error) {
             throw new IllegalStateException("Cannot register trusted shell operation: " + error.getMessage(), error);
         } finally {
+            for (ShellWorkSnapshots.Source source : sources) try { source.input.close(); } catch (IOException ignored) { }
+            if (request != null) try { request.close(); } catch (IOException ignored) { }
             closeDescriptors(snapshots);
             Binder.restoreCallingIdentity(identity);
         }
@@ -699,7 +725,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             if (id == null || !id.matches("[A-Za-z0-9_-]{1,80}"))
                 throw new SecurityException("Invalid shell operation ID");
             File control = ShellWorkFiles.controlJob(id);
-            org.json.JSONObject request = ShellWorkFiles.read(new File(control, "request.json"));
+            org.json.JSONObject request = ShellWorkFiles.readManifest(new File(control, "request.json"));
             if (!id.equals(request.optString("id")) || request.optInt("uid", -1) != allowedUid
                     || request.optInt("version", -1) != appVersionCode)
                 throw new SecurityException("Trusted shell operation identity mismatch");
@@ -751,7 +777,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         try (ShellWorkFiles.OperationLock admission = ShellWorkFiles.lockOperation(id)) {
             Context app = shellAppContext();
             File control = ShellWorkFiles.controlJob(id);
-            org.json.JSONObject request = ShellWorkFiles.read(new File(control, "request.json"));
+            org.json.JSONObject request = ShellWorkFiles.readManifest(new File(control, "request.json"));
             if (!id.equals(request.optString("id")) || request.optInt("uid", -1) != allowedUid
                     || request.optInt("version", -1) != appVersionCode
                     || !request.optString("apk").equals(app.getApplicationInfo().sourceDir))
@@ -762,6 +788,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             org.json.JSONObject state = readWorkState(control);
             String phase = state.optString("state");
             if (isTerminalWorkState(phase)) return;
+            if (!"REGISTERED".equals(request.optString("state")))
+                throw new IOException("Shell input registration is incomplete");
             if ("RUNNING".equals(phase) || new File(control, "started.json").exists()) {
                 if (!awaitingWorkStart(state))
                     finishInterruptedWork(control, request);
@@ -796,7 +824,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         long identity = Binder.clearCallingIdentity();
         try {
             File control = ShellWorkFiles.controlJob(id);
-            org.json.JSONObject request = ShellWorkFiles.read(new File(control, "request.json"));
+            org.json.JSONObject request = ShellWorkFiles.readManifest(new File(control, "request.json"));
             if (!id.equals(request.optString("id")) || request.optInt("uid", -1) != allowedUid)
                 throw new SecurityException("Shell operation owner changed");
             org.json.JSONObject workState = readWorkState(control);
@@ -930,72 +958,10 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         }
     }
 
-    private static File snapshotTarget(String type, org.json.JSONObject input, File root,
-            int index, String originalPath) throws Exception {
-        if ("patch".equals(type) && input.optBoolean("directory")) {
-            String base = new File(originalPath).getName();
-            if (!base.toLowerCase(java.util.Locale.ROOT).endsWith(".apk"))
-                throw new SecurityException("Invalid APK-set member");
-            File members = new File(root, "inspect-set/members");
-            if (!members.isDirectory() && !members.mkdirs()) throw new IOException("Cannot snapshot APK set");
-            return new File(members, base);
-        }
-        String suffix = new File(originalPath).getName();
-        String ext = suffix.matches(".*\\.[A-Za-z0-9]{1,8}$")
-                ? suffix.substring(suffix.lastIndexOf('.')) : ".bin";
-        return new File(root, String.format(java.util.Locale.ROOT, "%04d%s", index, ext));
-    }
-
-    private static void replaceSnapshotPath(String type, org.json.JSONObject input, int index,
-            String replacement) throws Exception {
-        if ("patch".equals(type)) {
-            if (input.optBoolean("directory")) input.put("source", new File(replacement).getParentFile()
-                    .getParentFile().getAbsolutePath());
-            else input.put("source", replacement);
-        }
-        else if ("upload".equals(type)) input.put("archive", replacement);
-        else if ("log".equals(type)) {
-            org.json.JSONArray sources = input.getJSONArray("sources");
-            int seen = 0;
-            for (int i = 0; i < sources.length(); i++) {
-                org.json.JSONObject source = sources.getJSONObject(i);
-                if (source.optString("path").isEmpty()) continue;
-                if (seen++ == index) { source.put("path", replacement); break; }
-            }
-        }
-    }
-
-    private static CopyDigest copySnapshot(ParcelFileDescriptor descriptor, File target) throws Exception {
-        if (descriptor == null) throw new SecurityException("Missing shell input descriptor");
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        long length = 0;
-        try (FileInputStream input = new FileInputStream(descriptor.getFileDescriptor());
-             FileOutputStream output = new FileOutputStream(target)) {
-            byte[] buffer = new byte[64 * 1024]; int read;
-            while ((read = input.read(buffer)) >= 0) {
-                length += read;
-                if (length > 2L * 1024L * 1024L * 1024L)
-                    throw new IOException("Shell input snapshot exceeds size limit");
-                digest.update(buffer, 0, read); output.write(buffer, 0, read);
-            }
-            output.getFD().sync();
-        }
-        android.system.Os.chmod(target.getPath(), 0600);
-        byte[] bytes = digest.digest();
-        char[] hex = new char[bytes.length * 2];
-        final char[] digits = "0123456789abcdef".toCharArray();
-        for (int i = 0; i < bytes.length; i++) {
-            int value = bytes[i] & 0xff; hex[i * 2] = digits[value >>> 4]; hex[i * 2 + 1] = digits[value & 15];
-        }
-        return new CopyDigest(length, new String(hex));
-    }
-
-    private static Bundle registrationState(org.json.JSONObject manifest, org.json.JSONObject state)
-            throws Exception {
+    private static Bundle registrationState(File control, org.json.JSONObject manifest, org.json.JSONObject state) throws Exception {
         Bundle bundle = new Bundle();
-        bundle.putString("state", state.optString("state", "REGISTERED"));
-        bundle.putString("worker_input", manifest.getJSONObject("workerInput").toString());
-        bundle.putString("input_fingerprints", manifest.getJSONArray("inputFingerprints").toString());
+        bundle.putString("state", state.optString("state", manifest.optString("state")));
+        bundle.putInt("next_snapshot", ShellWorkSnapshots.progress(control, manifest).getInt("nextSnapshot"));
         return bundle;
     }
 
@@ -1072,10 +1038,6 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             if (descriptor != null) try { descriptor.close(); } catch (IOException ignored) { }
     }
 
-    private static final class CopyDigest {
-        final long length; final String sha256;
-        CopyDigest(long length, String sha256) { this.length = length; this.sha256 = sha256; }
-    }
 
     private static Bundle outputSuspendedResult() {
         return InstrumentProxyContract.operationResult(new ArrayList<>(),
