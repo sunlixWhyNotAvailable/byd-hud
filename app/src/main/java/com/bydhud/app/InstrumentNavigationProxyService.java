@@ -47,10 +47,6 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private static final int FID_NATIVE_ETA_ARRIVAL_HOUR = 1_139_839_000;
     private static final int FID_NATIVE_ETA_ARRIVAL_MINUTE = 1_139_839_008;
     private static final int FID_NATIVE_ETA_ARRIVAL_SECOND = 1_139_839_016;
-    private static final int FID_LANE_COUNT = 427_827_416;
-    private static final int FID_LANE_GUIDE_BASE = 427_827_288;
-    private static final int FID_LANE_STATE_BASE = 427_827_296;
-    private static final int FID_LANE_VISIBLE_BASE = 427_827_300;
     private static final int SETTING_LANE_DISTANCE = 1_285_554_184;
     private static final int SETTING_LANE_COUNT = 1_285_554_200;
     private static final int FID_DISTANCE_TO_TRAFFIC_LIGHT = HudCheckTrafficLight.DISTANCE_FID;
@@ -115,6 +111,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private volatile int activeCapabilities;
     private final HudCheckTrafficLight.Output trafficLightOutput = new HudCheckTrafficLight.Output();
     private boolean outputSuspended;
+    private boolean laneEncodingUnsupported;
     private final Handler recoveryHandler = new Handler(Looper.getMainLooper());
     private volatile boolean recoveryEnabled;
     private volatile boolean stopped;
@@ -321,12 +318,12 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     @Override
-    public Bundle sendGuidance(long requestGeneration, int icon,
+    public Bundle sendGuidance(long requestGeneration, int compatibilityProfile, int icon,
             int distanceMeters, String road,
             int[] laneDirections, int[] laneRecommendations) {
         enforceSession(requestGeneration);
         String roadText = road == null ? "" : road;
-        if (!InstrumentProxyContract.validGuidance(
+        if (!InstrumentProxyContract.validGuidance(compatibilityProfile,
                 icon, distanceMeters, roadText, laneDirections, laneRecommendations)) {
             throw new IllegalArgumentException("invalid guidance frame");
         }
@@ -362,7 +359,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     sdkSucceeded = !extendedIcon && succeeded(operations, first, 2);
                 }
                 if (hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_LANES)) {
-                    addLaneOperations(operations, directions, recommendations,
+                    addLaneOperations(operations, compatibilityProfile,
+                            directions, recommendations,
                             directions.length == 0 ? -1 : Math.max(0, distanceMeters));
                 }
                 return finishOperations(operations, fidSucceeded || sdkSucceeded);
@@ -1066,35 +1064,32 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     private void addLaneOperations(List<InstrumentProxyContract.Operation> operations,
-            int[] directions, int[] recommendations, int distanceMeters) {
-        InstrumentApi current = instrument();
-        if (current != null && current.settingWriter != null) {
-            operations.add(setSettingInt(SETTING_LANE_COUNT, directions.length));
-            for (int index = 0; index < SETTING_LANE_STATES.length; index++) {
-                operations.add(setSettingInt(SETTING_LANE_STATES[index],
-                        index < directions.length ? directions[index] : 255));
+            int compatibilityProfile, int[] directions, int[] recommendations,
+            int distanceMeters) {
+        boolean baidu = compatibilityProfile == ManeuverCompatibilityProfile.BAIDU;
+        InstrumentLaneEncoding.Encoding encoded = InstrumentLaneEncoding.encode(
+                compatibilityProfile, directions, recommendations);
+        if (baidu && !encoded.issue.isEmpty()) {
+            if (!laneEncodingUnsupported) {
+                Log.w(TAG, "Baidu Instrument lanes cleared: " + encoded.issue);
             }
-            operations.add(setSettingInt(SETTING_LANE_DISTANCE, distanceMeters));
+            laneEncodingUnsupported = true;
+        } else {
+            laneEncodingUnsupported = false;
         }
 
-        int[] featureIds = new int[25];
-        int[] values = new int[25];
-        featureIds[0] = FID_LANE_COUNT;
-        values[0] = directions.length;
-        for (int index = 0; index < HudLaneModel.MAX_LANES; index++) {
-            int offset = index * 16;
-            boolean present = index < directions.length;
-            int recommendation = present ? recommendations[index] : 255;
-            featureIds[index + 1] = FID_LANE_GUIDE_BASE + offset;
-            values[index + 1] = present
-                    ? laneGuideValue(directions[index], recommendation) : -1;
-            featureIds[index + 9] = FID_LANE_STATE_BASE + offset;
-            values[index + 9] = present
-                    ? recommendation == 255 ? 5 : 0 : 14;
-            featureIds[index + 17] = FID_LANE_VISIBLE_BASE + offset;
-            values[index + 17] = present ? 1 : -1;
+        InstrumentApi current = instrument();
+        if (current != null && current.settingWriter != null) {
+            operations.add(setSettingInt(SETTING_LANE_COUNT, encoded.laneCount()));
+            if (!baidu) {
+                for (int index = 0; index < SETTING_LANE_STATES.length; index++) {
+                    operations.add(setSettingInt(SETTING_LANE_STATES[index],
+                            index < directions.length ? directions[index] : 255));
+                }
+                operations.add(setSettingInt(SETTING_LANE_DISTANCE, distanceMeters));
+            }
         }
-        operations.add(setInstrumentLaneBatch(featureIds, values));
+        operations.add(setInstrumentLaneBatch(encoded.featureIds, encoded.values));
     }
 
     private InstrumentProxyContract.Operation setSettingInt(int featureId, int value) {
@@ -1160,74 +1155,6 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         } catch (Throwable error) {
             return operation(name, -1, startedAt, describe(error));
         }
-    }
-
-    private static int laneGuideValue(int direction, int recommendation) {
-        if (isComplexLane(direction)) {
-            int complex = complexLaneGuide(direction, recommendation);
-            if (complex >= 0) return complex;
-        } else if (recommendation != 255 && recommendation != -1) {
-            return simpleFrontLane(recommendation);
-        }
-        return simpleBackLane(direction);
-    }
-
-    static int laneGuideValueForTest(int direction, int recommendation) {
-        return laneGuideValue(direction, recommendation);
-    }
-
-    private static boolean isComplexLane(int direction) {
-        switch (direction) {
-            case 2:
-            case 4:
-            case 6:
-            case 7:
-            case 9:
-            case 10:
-            case 11:
-            case 12:
-            case 16:
-            case 17:
-            case 18:
-            case 19:
-            case 20:
-                return true;
-            default:
-                return false;
-        }
-    }
-
-    private static int complexLaneGuide(int direction, int recommendation) {
-        switch (direction) {
-            case 2: return recommendation == 0 ? 51 : recommendation == 1 ? 52 : -1;
-            case 4: return recommendation == 0 ? 53 : recommendation == 3 ? 54 : -1;
-            case 6: return recommendation == 1 ? 55 : recommendation == 3 ? 56 : -1;
-            case 7: return recommendation == 0 ? 57
-                    : recommendation == 1 ? 58 : recommendation == 3 ? 59 : -1;
-            case 9: return recommendation == 0 ? 60 : recommendation == 5 ? 61 : -1;
-            case 10: return recommendation == 0 ? 62 : recommendation == 8 ? 63 : -1;
-            case 11: return recommendation == 1 ? 64 : recommendation == 5 ? 65 : -1;
-            case 12: return recommendation == 3 ? 66 : recommendation == 8 ? 67 : -1;
-            case 16: return recommendation == 0 ? 70
-                    : recommendation == 1 ? 71 : recommendation == 5 ? 72 : -1;
-            case 17: return recommendation == 3 ? 73 : recommendation == 5 ? 74 : -1;
-            case 18: return recommendation == 1 ? 75
-                    : recommendation == 3 ? 76 : recommendation == 5 ? 77 : -1;
-            case 19: return recommendation == 0 ? 78
-                    : recommendation == 3 ? 79 : recommendation == 5 ? 80 : -1;
-            case 20: return recommendation == 1 ? 81 : recommendation == 8 ? 82 : -1;
-            default: return -1;
-        }
-    }
-
-    private static int simpleBackLane(int direction) {
-        if (direction >= 0 && direction < 13) return direction + 1;
-        return direction >= 16 && direction < 255 ? direction : -1;
-    }
-
-    private static int simpleFrontLane(int direction) {
-        if (direction >= 0 && direction < 13) return direction + 26;
-        return direction >= 16 && direction < 255 ? direction + 25 : -1;
     }
 
     private InstrumentProxyContract.Operation setFeature(

@@ -39,6 +39,25 @@ final class HudLaneModel {
         return lanes;
     }
 
+    // Selects the physical edge lanes only for Baidu's numeric Instrument batch.
+    static LaneSpec[] parse(HudState state, int compatibilityProfile) {
+        if (ManeuverCompatibilityProfile.normalize(compatibilityProfile)
+                != ManeuverCompatibilityProfile.BAIDU) {
+            return parse(state);
+        }
+        String[] tokens = splitTokens(state.laneString);
+        if (tokens.length <= MAX_LANES) return parse(state);
+        if (state.numOfLanes > 0 && state.numOfLanes != tokens.length) {
+            return new LaneSpec[0];
+        }
+        LaneSpec[] lanes = new LaneSpec[MAX_LANES];
+        for (int index = 0; index < MAX_LANES; index++) {
+            int source = index < 4 ? index : tokens.length - 4 + index - 4;
+            lanes[index] = parseLane(tokens[source], source, tokens.length);
+        }
+        return lanes;
+    }
+
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static String signature(HudState state) {
         LaneSpec[] lanes = parse(state);

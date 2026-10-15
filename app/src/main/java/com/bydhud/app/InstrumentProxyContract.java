@@ -8,7 +8,7 @@ import java.util.List;
 
 /** Fixed IPC and diagnostic contract shared by the app and its shell helper. */
 final class InstrumentProxyContract {
-    static final int PROTOCOL_VERSION = 8;
+    static final int PROTOCOL_VERSION = 9;
     static final int CAP_SYSTEM_CONTEXT = 1;
     static final int CAP_DIRECT_FID = 1 << 1;
     static final int CAP_INSTRUMENT_SDK = 1 << 2;
@@ -213,6 +213,19 @@ final class InstrumentProxyContract {
             int[] laneDirections, int[] laneRecommendations) {
         return validGuidance(icon, distanceMeters, road)
                 && validLanes(laneDirections, laneRecommendations);
+    }
+
+    static boolean validCompatibilityProfile(int profile) {
+        return profile == ManeuverCompatibilityProfile.AMAP
+                || profile == ManeuverCompatibilityProfile.BAIDU;
+    }
+
+    static boolean validGuidance(int compatibilityProfile, int icon,
+            int distanceMeters, String road,
+            int[] laneDirections, int[] laneRecommendations) {
+        return validCompatibilityProfile(compatibilityProfile)
+                && validGuidance(icon, distanceMeters, road,
+                        laneDirections, laneRecommendations);
     }
 
     static boolean validLanes(int[] laneDirections, int[] laneRecommendations) {

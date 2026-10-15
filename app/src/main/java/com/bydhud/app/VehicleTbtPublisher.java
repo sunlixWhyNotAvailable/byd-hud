@@ -88,6 +88,7 @@ final class VehicleTbtPublisher {
     private String lastInstrumentRoad = "";
     private int[] lastInstrumentLaneDirections = new int[0];
     private int[] lastInstrumentLaneRecommendations = new int[0];
+    private int lastInstrumentCompatibilityProfile = ManeuverCompatibilityProfile.AMAP;
     private boolean lastGuidanceHasAmapFallback;
     private boolean handoffPendingInstrumentRecovery;
     private boolean hasLastInstrumentSemantic;
@@ -725,7 +726,9 @@ final class VehicleTbtPublisher {
         lastInstrumentRoad = "";
         lastInstrumentLaneDirections = new int[0];
         lastInstrumentLaneRecommendations = new int[0];
+        lastInstrumentCompatibilityProfile = trace.compatibilityProfile;
         instrument.sendTerminalGuidanceClear(
+                trace.compatibilityProfile,
                 result -> ownerHandler.post(() -> recordInstrumentResult(
                         result, trace, 0, 0, -1, "")));
     }
@@ -739,11 +742,14 @@ final class VehicleTbtPublisher {
                 && ManeuverCompatibilityProfile.isBaiduInstrumentIcon(icon);
         int nextIcon = extendedBaiduIcon ? icon : Math.max(0, Math.min(49, icon));
         int nextDistance = Math.max(-1, Math.min(2_000_000, distance));
+        int nextProfile = trace == null ? ManeuverCompatibilityProfile.AMAP
+                : trace.compatibilityProfile;
         String normalizedRoad = preserveText(road);
         String nextRoad = normalizedRoad.length() <= 512
                 ? normalizedRoad : normalizedRoad.substring(0, 512);
         LanePayload nextLanes = lanes == null ? LanePayload.EMPTY : lanes;
-        boolean sameGuidance = lastInstrumentIcon == nextIcon
+        boolean sameGuidance = lastInstrumentCompatibilityProfile == nextProfile
+                && lastInstrumentIcon == nextIcon
                 && lastInstrumentDistance == nextDistance
                 && lastInstrumentRoad.equals(nextRoad)
                 && Arrays.equals(lastInstrumentLaneDirections, nextLanes.directions)
@@ -761,6 +767,7 @@ final class VehicleTbtPublisher {
         lastInstrumentRoad = nextRoad;
         lastInstrumentLaneDirections = nextLanes.directions.clone();
         lastInstrumentLaneRecommendations = nextLanes.recommendations.clone();
+        lastInstrumentCompatibilityProfile = nextProfile;
         int sentIcon = lastInstrumentIcon;
         int sentDistance = lastInstrumentDistance;
         String sentRoad = lastInstrumentRoad;
@@ -772,7 +779,7 @@ final class VehicleTbtPublisher {
             recordHudCheck(trace, "Instrument", 0, hudCheckInstrumentReason);
         }
         instrument.sendGuidance(
-                sentIcon, sentDistance, sentRoad,
+                nextProfile, sentIcon, sentDistance, sentRoad,
                 sentLaneDirections, sentLaneRecommendations,
                 result -> ownerHandler.post(() -> recordInstrumentGuidanceResult(
                         result, trace, sentIcon, sentDistance, sentRoad,
@@ -1485,7 +1492,8 @@ final class VehicleTbtPublisher {
                 DirectTbtFrame.TravelMetrics.unavailable(),
                 new LanePayload(lastInstrumentLaneDirections,
                         lastInstrumentLaneRecommendations),
-                compatibilityProfileFor(owner, null),
+                hasInstrumentGuidance ? lastInstrumentCompatibilityProfile
+                        : compatibilityProfileFor(owner, null),
                 new ManeuverCompatibilityProfile.Mapping(0, 0,
                         lastInstrumentIcon, 0, 0, true));
         trace.routeToken = routeToken;
@@ -1503,6 +1511,7 @@ final class VehicleTbtPublisher {
             int[] laneDirections = lastInstrumentLaneDirections.clone();
             int[] laneRecommendations = lastInstrumentLaneRecommendations.clone();
             instrument.sendGuidance(
+                    trace.compatibilityProfile,
                     icon, distance, road, laneDirections, laneRecommendations,
                     result -> ownerHandler.post(() -> recordInstrumentGuidanceResult(
                             result, trace, icon, distance, road,
@@ -1542,7 +1551,8 @@ final class VehicleTbtPublisher {
                 lastInstrumentDistance, lastInstrumentRoad,
                 DirectTbtFrame.TravelMetrics.unavailable(),
                 DirectTbtFrame.TravelMetrics.unavailable(), LanePayload.EMPTY,
-                compatibilityProfileFor(owner, null),
+                hasInstrumentGuidance ? lastInstrumentCompatibilityProfile
+                        : compatibilityProfileFor(owner, null),
                 new ManeuverCompatibilityProfile.Mapping(0, 0,
                         lastInstrumentIcon, 0, 0, true));
         trace.routeToken = routeToken;
@@ -1599,6 +1609,7 @@ final class VehicleTbtPublisher {
         if (trace == null || !matches(trace.owner, trace.generation)
                 || trace.routeToken != routeToken) return;
         boolean latestGuidance = lastInstrumentIcon == icon
+                && lastInstrumentCompatibilityProfile == trace.compatibilityProfile
                 && lastInstrumentDistance == distance
                 && lastInstrumentRoad.equals(road)
                 && Arrays.equals(lastInstrumentLaneDirections, laneDirections)
@@ -1787,8 +1798,8 @@ final class VehicleTbtPublisher {
         LanePayload lanes = LanePayload.EMPTY;
         if (shouldPublishLanes(HudPrefs.isLaneOutputEnabled(context), manualState)) {
             lanes = manualState == null
-                    ? lanePayloadForTest(frame == null ? null : frame.getLanes())
-                    : lanePayloadForTest(manualState);
+                    ? lanePayloadForTest(frame == null ? null : frame.getLanes(), profile)
+                    : lanePayloadForTest(manualState, profile);
         }
         Trace trace = new Trace(source, safe(owner), generation,
                 "tbt-" + transactionSequence.incrementAndGet(), safe(reason),
@@ -1904,11 +1915,43 @@ final class VehicleTbtPublisher {
                 Arrays.copyOf(directions, count), Arrays.copyOf(recommendations, count));
     }
 
+    static LanePayload lanePayloadForTest(
+            List<DirectTbtFrame.Lane> lanes, int compatibilityProfile) {
+        if (ManeuverCompatibilityProfile.normalize(compatibilityProfile)
+                != ManeuverCompatibilityProfile.BAIDU) {
+            return lanePayloadForTest(lanes);
+        }
+        if (lanes == null || lanes.isEmpty()) return LanePayload.EMPTY;
+        int count = Math.min(HudLaneModel.MAX_LANES, lanes.size());
+        int[] directions = new int[count];
+        int[] recommendations = new int[count];
+        for (int index = 0; index < count; index++) {
+            int sourceIndex = index < 4 || lanes.size() <= HudLaneModel.MAX_LANES
+                    ? index : lanes.size() - (HudLaneModel.MAX_LANES - index);
+            DirectTbtFrame.Lane lane = lanes.get(sourceIndex);
+            if (lane == null) return LanePayload.EMPTY;
+            int direction = lane.getAmapCode();
+            int recommendation = lane.getAmapRecommendationCode();
+            if (direction < 0 || direction >= 255
+                    || (recommendation != DirectTbtFrame.Lane.NO_RECOMMENDATION
+                    && (recommendation < 0 || recommendation >= 255))) {
+                return LanePayload.EMPTY;
+            }
+            directions[index] = direction;
+            recommendations[index] = recommendation;
+        }
+        return new LanePayload(directions, recommendations);
+    }
+
     static LanePayload lanePayloadForTest(HudState state) {
+        return lanePayloadForTest(state, ManeuverCompatibilityProfile.AMAP);
+    }
+
+    static LanePayload lanePayloadForTest(HudState state, int compatibilityProfile) {
         if (state == null || (!state.includeLaneBitmap && state.hudCheck == null)) {
             return LanePayload.EMPTY;
         }
-        HudLaneModel.LaneSpec[] lanes = HudLaneModel.parse(state);
+        HudLaneModel.LaneSpec[] lanes = HudLaneModel.parse(state, compatibilityProfile);
         int[] directions = new int[lanes.length];
         int[] recommendations = new int[lanes.length];
         for (int index = 0; index < lanes.length; index++) {

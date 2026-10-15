@@ -81,6 +81,7 @@ final class InstrumentProxyManager {
     private boolean guidanceBarrierActive;
     private boolean terminalClearInFlight;
     private long guidanceBarrierToken;
+    private int terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
     private final List<ResultCallback> terminalClearCallbacks = new ArrayList<>();
     private PendingTrafficLight pendingTrafficLight;
     private PendingTrafficLight deferredTrafficLight;
@@ -612,9 +613,9 @@ final class InstrumentProxyManager {
         });
     }
 
-    void sendGuidance(int icon, int distanceMeters, String road,
+    void sendGuidance(int compatibilityProfile, int icon, int distanceMeters, String road,
             int[] laneDirections, int[] laneRecommendations, ResultCallback callback) {
-        if (!InstrumentProxyContract.validGuidance(
+        if (!InstrumentProxyContract.validGuidance(compatibilityProfile,
                 icon, distanceMeters, road, laneDirections, laneRecommendations)) {
             deliver(callback, Result.unavailable("invalid guidance frame"));
             return;
@@ -624,7 +625,7 @@ final class InstrumentProxyManager {
         boolean deferredPath;
         synchronized (callLock) {
             PendingGuidance next = new PendingGuidance(
-                    icon, distanceMeters, preserveText(road),
+                    compatibilityProfile, icon, distanceMeters, preserveText(road),
                     laneDirections, laneRecommendations, callback);
             deferredPath = guidanceBarrierActive;
             if (deferredPath) {
@@ -807,7 +808,11 @@ final class InstrumentProxyManager {
     }
 
     /** Clears Instrument guidance and fences the next normal frame behind that clear. */
-    void sendTerminalGuidanceClear(ResultCallback callback) {
+    void sendTerminalGuidanceClear(int compatibilityProfile, ResultCallback callback) {
+        if (!InstrumentProxyContract.validCompatibilityProfile(compatibilityProfile)) {
+            deliver(callback, Result.unavailable("invalid guidance profile"));
+            return;
+        }
         PendingGuidance superseded;
         PendingGuidance deferredSuperseded = null;
         ExecutorService executor = null;
@@ -821,6 +826,7 @@ final class InstrumentProxyManager {
                 // A second terminal is still the final frame.  Drop the frame
                 // deferred behind the first clear instead of replaying it after
                 // the joined terminal callbacks complete.
+                // Keep the first clear's profile: it describes the output being retired.
                 if (shouldDropDeferredGuidanceForDuplicateTerminalForTest(
                         true, deferredGuidance != null)) {
                     deferredSuperseded = deferredGuidance;
@@ -830,6 +836,7 @@ final class InstrumentProxyManager {
             } else {
                 guidanceBarrierActive = true;
                 terminalClearInFlight = false;
+                terminalClearProfile = compatibilityProfile;
                 barrierToken = ++guidanceBarrierToken;
                 expectedEpoch = callEpoch;
                 terminalClearCallbacks.clear();
@@ -861,17 +868,20 @@ final class InstrumentProxyManager {
     }
 
     private void executeTerminalGuidanceClear(long requestToken, long requestEpoch) {
+        int outgoingProfile;
         synchronized (callLock) {
             if (!guidanceBarrierActive || requestToken != guidanceBarrierToken
                     || requestEpoch != callEpoch) {
                 return;
             }
             terminalClearInFlight = true;
+            outgoingProfile = terminalClearProfile;
         }
         executeCall("terminal_guidance_clear",
                 result -> finishTerminalGuidanceClear(requestToken, result),
                 (current, currentGeneration) -> current.sendGuidance(
-                        currentGeneration, 0, -1, "", new int[0], new int[0]));
+                        currentGeneration, outgoingProfile,
+                        0, -1, "", new int[0], new int[0]));
     }
 
     private void finishTerminalGuidanceClear(long requestToken, Result result) {
@@ -882,6 +892,7 @@ final class InstrumentProxyManager {
             if (!guidanceBarrierActive || requestToken != guidanceBarrierToken) return;
             guidanceBarrierActive = false;
             terminalClearInFlight = false;
+            terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
             callbacks = new ArrayList<>(terminalClearCallbacks);
             terminalClearCallbacks.clear();
             deferred = deferredGuidance;
@@ -920,7 +931,7 @@ final class InstrumentProxyManager {
         if (request == null) return;
         executeCall("guidance", request.callback,
                 (current, currentGeneration) -> current.sendGuidance(
-                        currentGeneration, request.icon,
+                        currentGeneration, request.compatibilityProfile, request.icon,
                         request.distanceMeters, request.road,
                         request.laneDirections, request.laneRecommendations));
     }
@@ -1134,6 +1145,7 @@ final class InstrumentProxyManager {
                 terminalClearCallbacks.clear();
                 guidanceBarrierActive = false;
                 terminalClearInFlight = false;
+                terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
                 guidanceBarrierToken++;
                 deferred = deferredGuidance;
                 deferredGuidance = null;
@@ -2014,6 +2026,7 @@ final class InstrumentProxyManager {
     }
 
     private static final class PendingGuidance {
+        final int compatibilityProfile;
         final int icon;
         final int distanceMeters;
         final String road;
@@ -2021,9 +2034,10 @@ final class InstrumentProxyManager {
         final int[] laneRecommendations;
         final ResultCallback callback;
 
-        PendingGuidance(int icon, int distanceMeters,
+        PendingGuidance(int compatibilityProfile, int icon, int distanceMeters,
                 String road, int[] laneDirections, int[] laneRecommendations,
                 ResultCallback callback) {
+            this.compatibilityProfile = compatibilityProfile;
             this.icon = icon;
             this.distanceMeters = distanceMeters;
             this.road = road;

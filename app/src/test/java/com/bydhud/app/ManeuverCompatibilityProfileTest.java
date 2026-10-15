@@ -92,6 +92,20 @@ public final class ManeuverCompatibilityProfileTest {
                 "road", new int[] {0}, new int[0]));
     }
 
+    @Test public void ipcGuidanceRequiresAnExactCompatibilityProfile() {
+        assertTrue(InstrumentProxyContract.validCompatibilityProfile(
+                ManeuverCompatibilityProfile.AMAP));
+        assertTrue(InstrumentProxyContract.validCompatibilityProfile(
+                ManeuverCompatibilityProfile.BAIDU));
+        assertFalse(InstrumentProxyContract.validCompatibilityProfile(2));
+        assertFalse(InstrumentProxyContract.validCompatibilityProfile(-1));
+        assertTrue(InstrumentProxyContract.validGuidance(
+                ManeuverCompatibilityProfile.BAIDU, 1001, 0, "road",
+                new int[] {0}, new int[] {255}));
+        assertFalse(InstrumentProxyContract.validGuidance(
+                2, 1001, 0, "road", new int[0], new int[0]));
+    }
+
     private static String repeat(char value, int count) {
         char[] characters = new char[count];
         java.util.Arrays.fill(characters, value);
