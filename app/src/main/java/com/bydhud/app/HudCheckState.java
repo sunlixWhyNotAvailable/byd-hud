@@ -115,6 +115,7 @@ public final class HudCheckState {
     public final boolean laneBitmap;
     public final boolean transliterate;
     public final int extendedIndex;
+    // Retained checkpoint key: the historical Basic format now runs as No PNG.
     public final boolean legacyBasic;
 
     public HudCheckState() {
@@ -306,7 +307,7 @@ public final class HudCheckState {
         return (mode == Mode.BASIC && !legacyBasic) || isLivePipelineCheck();
     }
 
-    /** Returns null for the pre-3.6.3 Basic reference, isolated Extended cases and Shanghai. */
+    /** Returns null for No PNG Basic, isolated Extended cases and Shanghai. */
     public DirectTbtFrame liveFrame() {
         if (legacyBasic) return null;
         if (mode == Mode.BASIC) {

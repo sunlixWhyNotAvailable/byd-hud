@@ -203,14 +203,20 @@ public class NativeRoadInfoTest {
         assertEquals(99, legacy.selectBasicFormat(false).liveFrame().getBydManeuver());
     }
 
-    @Test public void legacyBasicEncodesPre363FieldsAndCompanionManeuvers() {
+    @Test public void noPngBasicOmitsImageFieldAndKeepsLegacyFieldsAndCompanionManeuvers() {
         HudCheckState initial = new HudCheckState().selectBasicFormat(true);
         // Images are explicit encoder inputs; Android rendering is not exercised here.
+        byte[] image = java.util.Base64.getDecoder().decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEakAAAAASUVORK5CYII=");
         for (int[] sample : new int[][] {{0, 11, 9}, {1, 1, 2}, {2, 2, 3},
                 {5, 1, 2}, {6, 7, 6}, {7, 8, 7}, {8, 11, 9}}) {
             HudCheckState state = initial.step(HudCheckState.Field.MANEUVER, sample[0]);
-            Map<Integer, Object> fields = road(HudCheckPayload.buildIsolatedRoadInfo(
-                    state, new byte[0], new byte[0]));
+            byte[] packet = HudCheckPayload.buildIsolatedRoadInfo(state, image, image);
+            Map<Integer, Object> fields = road(packet);
+            assertFalse(fields.containsKey(8));
+            assertArrayEquals(image, (byte[]) fields.get(7));
+            assertArrayEquals(packet, HudCheckPayload.buildIsolatedRoadInfo(
+                    state.withManeuverBitmap(true), image, image));
             assertEquals(2L, fields.get(2));
             assertEquals(6L, fields.get(6));
             assertEquals((long) sample[1], fields.get(28));
@@ -225,6 +231,9 @@ public class NativeRoadInfoTest {
             assertEquals(0, mapping.roundaboutExit);
         }
         assertEquals(23, initial.step(HudCheckState.Field.MANEUVER, 8).toHudState().turnBitmapId);
+        Map<Integer, Object> extended = road(HudCheckPayload.buildIsolatedRoadInfo(
+                initial.selectMode(HudCheckState.Mode.EXTENDED), image, image));
+        assertArrayEquals(image, (byte[]) extended.get(8));
     }
 
     private static DirectTbtFrame navigation(int amap, int nativeId) {

@@ -59,7 +59,7 @@ public final class HudCheckPayload {
         boolean extended = state.mode == HudCheckState.Mode.EXTENDED;
         byte[] lanePng = !extended && state.laneBitmap
                 ? buildLanePngSafely(context, hud) : new byte[0];
-        byte[] maneuverPng = !extended && state.maneuverBitmap
+        byte[] maneuverPng = state.legacyBasic ? new byte[0] : !extended && state.maneuverBitmap
                 ? HudGraphicPayload.buildTurnPng(hud)
                 : HudGraphicPayload.buildOemTurnPng(HudState.TURN_BITMAP_BLANK_SOURCE_ID);
 
@@ -74,7 +74,8 @@ public final class HudCheckPayload {
         writeVarintField(fields, 5, hud.numOfLanes);
         writeVarintField(fields, 6, 6);
         writeBytesField(fields, 7, lanePng);
-        writeBytesField(fields, 8, maneuverPng);
+        // No PNG keeps the historical packet but omits the image field entirely.
+        if (!state.legacyBasic) writeBytesField(fields, 8, maneuverPng);
         writeVarintField(fields, 9, hud.distanceToIntersection);
         writeStringField(fields, 10, hud.roadName);
         writeVarintField(fields, 16, 2);

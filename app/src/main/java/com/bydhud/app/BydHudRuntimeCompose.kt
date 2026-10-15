@@ -7768,7 +7768,7 @@ private fun HudCheckTab(
                     ) {
                         Segmented(
                             left = language.choose("Поточний", "Current", "Текущий"),
-                            right = language.choose("До 3.6.3", "Before 3.6.3", "До 3.6.3"),
+                            right = language.choose("Без PNG", "No PNG", "Без PNG"),
                             leftActive = !state.legacyBasic,
                             palette = palette,
                             itemWidth = 110.dp,

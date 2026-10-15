@@ -15,10 +15,9 @@ final class HudCheckDiagnostics {
                 + " reason=" + token(reason);
         if (sample.legacyBasic) {
             HudState state = sample.toHudState();
-            line += " format=pre-3.6.3 f2=2 f6=6 maneuver=" + state.maneuverId
+            line += " format=no-png f2=2 f6=6 maneuver=" + state.maneuverId
                     + " distance_m=" + state.distanceToIntersection
-                    + " png_source=" + (sample.maneuverBitmap ? state.turnBitmapId
-                    : HudState.TURN_BITMAP_BLANK_SOURCE_ID)
+                    + " f8=omitted png_source=none"
                     + " f19=0 f20=0 f30=empty f31=empty f32=0";
         }
         if (sample.isLiveCheck()) {
@@ -54,7 +53,7 @@ final class HudCheckDiagnostics {
             }
             return "extended-" + (sample.extendedIndex + 1);
         }
-        return (sample.legacyBasic ? "basic-pre363-m" : "basic-m")
+        return (sample.legacyBasic ? "basic-no-png-m" : "basic-m")
                 + sample.maneuverIndex + "-l" + sample.laneIndex
                 + "-d" + sample.distanceIndex + "-s" + sample.streetIndex
                 + "-t" + sample.trafficLightIndex + "-mb" + sample.maneuverBitmap
