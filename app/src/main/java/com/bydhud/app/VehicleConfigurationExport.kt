@@ -176,7 +176,8 @@ object VehicleConfigurationExport {
                     synchronized(this) {
                         if (active === control && !control.isCancelled) {
                             state.value = state.value?.copy(phase = ConfigurationExportPhase.FAILED,
-                                detail = error.javaClass.simpleName)
+                                detail = failureDetail(error))
+                            logFailure(error)
                             state.value?.let { logProgress(it) }
                         }
                     }
@@ -216,8 +217,9 @@ object VehicleConfigurationExport {
             active = null
             MainActivity.releaseShareOperation()
             state.value = state.value!!.copy(phase = ConfigurationExportPhase.FAILED,
-                detail = error.javaClass.simpleName,
+                detail = failureDetail(error),
                 endedAtElapsedMs = SystemClock.elapsedRealtime())
+            logFailure(error)
             state.value?.let { logProgress(it) }
             return false
         }
@@ -623,6 +625,15 @@ object VehicleConfigurationExport {
             .put("saveCancelled", current.saveCancelled).put("autoOpenDestination", current.autoOpenDestination)
             .put("archives", org.json.JSONArray(archives.map { it.path }))
         ShellRuntimeSession.prefs(app).edit().putString("configuration_work", value.toString()).commit()
+    }
+
+    private fun failureDetail(error: Exception): String =
+        "${error.javaClass.simpleName}: ${error.message.orEmpty()}".take(1024)
+
+    private fun logFailure(error: Exception) {
+        val detail = android.util.Log.getStackTraceString(error).take(2048)
+            .replace('\n', ' ').replace('\r', ' ')
+        logEvent("failure=$detail")
     }
 
     private fun logProgress(snapshot: ConfigurationExportSnapshot) {

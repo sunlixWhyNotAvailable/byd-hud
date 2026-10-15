@@ -1572,7 +1572,8 @@ final class HudOutputCoordinator {
         if (first.mode == HudCheckState.Mode.EXTENDED) {
             return first.extendedIndex == second.extendedIndex;
         }
-        return first.maneuverIndex == second.maneuverIndex
+        return first.legacyBasic == second.legacyBasic
+                && first.maneuverIndex == second.maneuverIndex
                 && first.laneIndex == second.laneIndex
                 && first.distanceIndex == second.distanceIndex
                 && first.streetIndex == second.streetIndex

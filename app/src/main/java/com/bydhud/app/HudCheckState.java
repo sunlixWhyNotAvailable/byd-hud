@@ -115,16 +115,17 @@ public final class HudCheckState {
     public final boolean laneBitmap;
     public final boolean transliterate;
     public final int extendedIndex;
+    public final boolean legacyBasic;
 
     public HudCheckState() {
-        this(Mode.BASIC, false, true, 0, 0, 0, 0, 0, false, false, false, 0);
+        this(Mode.BASIC, false, true, 0, 0, 0, 0, 0, false, false, false, 0, false);
     }
 
     private HudCheckState(Mode mode, boolean running, boolean automatic,
                           int maneuverIndex, int laneIndex, int distanceIndex,
                           int streetIndex, int trafficLightIndex,
                           boolean maneuverBitmap, boolean laneBitmap,
-                          boolean transliterate, int extendedIndex) {
+                          boolean transliterate, int extendedIndex, boolean legacyBasic) {
         this.mode = mode == null ? Mode.BASIC : mode;
         this.running = running;
         this.automatic = automatic;
@@ -137,6 +138,7 @@ public final class HudCheckState {
         this.laneBitmap = laneBitmap;
         this.transliterate = transliterate;
         this.extendedIndex = wrap(extendedIndex, extendedCount());
+        this.legacyBasic = this.mode == Mode.BASIC && legacyBasic;
     }
 
     public HudCheckState selectMode(Mode value) {
@@ -145,7 +147,14 @@ public final class HudCheckState {
                 ? this
                 : new HudCheckState(selected, false, automatic, maneuverIndex, laneIndex,
                         distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
-                        laneBitmap, transliterate, extendedIndex);
+                        laneBitmap, transliterate, extendedIndex, false);
+    }
+
+    public HudCheckState selectBasicFormat(boolean legacy) {
+        if (mode != Mode.BASIC || legacyBasic == legacy) return this;
+        return new HudCheckState(mode, false, automatic, maneuverIndex, laneIndex,
+                distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
+                laneBitmap, transliterate, extendedIndex, legacy);
     }
 
     org.json.JSONObject checkpoint() throws org.json.JSONException {
@@ -153,7 +162,8 @@ public final class HudCheckState {
                 .put("automatic", automatic).put("maneuver", maneuverIndex).put("lane", laneIndex)
                 .put("distance", distanceIndex).put("street", streetIndex).put("light", trafficLightIndex)
                 .put("maneuverBitmap", maneuverBitmap).put("laneBitmap", laneBitmap)
-                .put("transliterate", transliterate).put("extended", extendedIndex);
+                .put("transliterate", transliterate).put("extended", extendedIndex)
+                .put("legacyBasic", legacyBasic);
     }
 
     static HudCheckState restore(org.json.JSONObject state) {
@@ -161,20 +171,21 @@ public final class HudCheckState {
                 state.optBoolean("running"), state.optBoolean("automatic", true),
                 state.optInt("maneuver"), state.optInt("lane"), state.optInt("distance"),
                 state.optInt("street"), state.optInt("light"), state.optBoolean("maneuverBitmap"),
-                state.optBoolean("laneBitmap"), state.optBoolean("transliterate"), state.optInt("extended"));
+                state.optBoolean("laneBitmap"), state.optBoolean("transliterate"), state.optInt("extended"),
+                state.optBoolean("running") && state.optBoolean("legacyBasic"));
     }
 
     public HudCheckState toggleRun() {
         if (mode == Mode.SHANGHAI) return this;
         return new HudCheckState(mode, !running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap,
-                transliterate, extendedIndex);
+                transliterate, extendedIndex, legacyBasic);
     }
 
     public HudCheckState stop() {
         return running ? new HudCheckState(mode, false, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap,
-                transliterate, extendedIndex) : this;
+                transliterate, extendedIndex, legacyBasic) : this;
     }
 
     public HudCheckState step(Field field, int delta) {
@@ -215,25 +226,25 @@ public final class HudCheckState {
     public HudCheckState withAutomatic(boolean value) {
         return automatic == value ? this : new HudCheckState(mode, running, value,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                maneuverBitmap, laneBitmap, transliterate, extendedIndex);
+                maneuverBitmap, laneBitmap, transliterate, extendedIndex, legacyBasic);
     }
 
     public HudCheckState withManeuverBitmap(boolean value) {
         return maneuverBitmap == value ? this : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                value, laneBitmap, transliterate, extendedIndex);
+                value, laneBitmap, transliterate, extendedIndex, legacyBasic);
     }
 
     public HudCheckState withLaneBitmap(boolean value) {
         return laneBitmap == value ? this : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                maneuverBitmap, value, transliterate, extendedIndex);
+                maneuverBitmap, value, transliterate, extendedIndex, legacyBasic);
     }
 
     public HudCheckState withTransliterate(boolean value) {
         return transliterate == value ? this : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                maneuverBitmap, laneBitmap, value, extendedIndex);
+                maneuverBitmap, laneBitmap, value, extendedIndex, legacyBasic);
     }
 
     public String maneuverLabel(boolean ukrainian) {
@@ -290,13 +301,14 @@ public final class HudCheckState {
         return mode == Mode.EXTENDED && liveScenario() != null;
     }
 
-    /** Basic and appended live cases share the production Direct TBT input model. */
+    /** Current Basic and appended live cases share the production Direct TBT input model. */
     public boolean isLiveCheck() {
-        return mode == Mode.BASIC || isLivePipelineCheck();
+        return (mode == Mode.BASIC && !legacyBasic) || isLivePipelineCheck();
     }
 
-    /** Returns null for the isolated legacy Extended catalog and Shanghai mode. */
+    /** Returns null for the pre-3.6.3 Basic reference, isolated Extended cases and Shanghai. */
     public DirectTbtFrame liveFrame() {
+        if (legacyBasic) return null;
         if (mode == Mode.BASIC) {
             Maneuver maneuver = MANEUVERS[maneuverIndex];
             return maneuver.frame(distance(), effectiveStreet());
@@ -373,6 +385,10 @@ public final class HudCheckState {
         // Stock suppresses artwork. HudCheckPayload selects blank S72 for f8
         // independently; source identity must not be lost with the PNG.
         state.turnBitmapId = live == null ? maneuver.pngId : live.bitmapId;
+        if (legacyBasic && maneuverIndex == 8) {
+            state.maneuverId = 11;
+            state.turnBitmapId = 23;
+        }
         state.turnBitmapMode = HudState.TURN_BITMAP_OEM;
         state.navigationStatus = 2;
         state.crossStatus = 2;
@@ -395,7 +411,7 @@ public final class HudCheckState {
     private HudCheckState replace(int maneuver, int lanes, int distance, int street,
                                   int trafficLight, int extended) {
         return new HudCheckState(mode, running, automatic, maneuver, lanes, distance, street,
-                trafficLight, maneuverBitmap, laneBitmap, transliterate, extended);
+                trafficLight, maneuverBitmap, laneBitmap, transliterate, extended, legacyBasic);
     }
 
     private HudCheckLiveScenario liveScenario() {
@@ -425,14 +441,14 @@ public final class HudCheckState {
                 && trafficLightIndex == that.trafficLightIndex
                 && maneuverBitmap == that.maneuverBitmap && laneBitmap == that.laneBitmap
                 && transliterate == that.transliterate && extendedIndex == that.extendedIndex
-                && mode == that.mode;
+                && mode == that.mode && legacyBasic == that.legacyBasic;
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(mode, running, automatic, maneuverIndex, laneIndex, distanceIndex,
                 streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap, transliterate,
-                extendedIndex);
+                extendedIndex, legacyBasic);
     }
 
     private static class Label {

@@ -613,7 +613,18 @@ final class NavHudLiveSender {
             current = instance;
         }
         // Enqueue even if Start is still waiting on the worker; FIFO makes Stop win.
-        if (current != null) current.updateHudCheck(HudCheckState::stop, reason);
+        if (current != null) current.updateHudCheck(
+                state -> state.stop().selectBasicFormat(false), reason);
+    }
+
+    static void resetLegacyHudCheckOnBackground() {
+        // Reset the opt-in reference without changing existing manual/background keepalive.
+        NavHudLiveSender current;
+        synchronized (NavHudLiveSender.class) {
+            current = instance;
+        }
+        if (current != null) current.updateHudCheck(state -> state.legacyBasic
+                ? state.stop().selectBasicFormat(false) : state, "hud-check-background");
     }
 
     static boolean isCurrentMapLiveSessionForTest(HudMapLiveState state, long session) {

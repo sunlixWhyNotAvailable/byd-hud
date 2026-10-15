@@ -63,6 +63,12 @@ public final class HudCheckPayload {
                 ? HudGraphicPayload.buildTurnPng(hud)
                 : HudGraphicPayload.buildOemTurnPng(HudState.TURN_BITMAP_BLANK_SOURCE_ID);
 
+        return buildIsolatedRoadInfo(state, lanePng, maneuverPng);
+    }
+
+    static byte[] buildIsolatedRoadInfo(HudCheckState state, byte[] lanePng, byte[] maneuverPng) {
+        HudState hud = state.toHudState();
+        boolean extended = state.mode == HudCheckState.Mode.EXTENDED;
         ByteArrayOutputStream fields = new ByteArrayOutputStream();
         writeVarintField(fields, 2, 2);
         writeVarintField(fields, 5, hud.numOfLanes);
@@ -77,7 +83,7 @@ public final class HudCheckPayload {
 
         // Every snapshot clears optional fields first; this prevents a previous
         // extended case's ETA/camera/geometry from lingering in a receiver.
-        writeExtendedNeutralFields(fields, extended ? "" : DIAGNOSTIC_GUIDE_LINE);
+        writeExtendedNeutralFields(fields, "");
         if (extended) writeExtendedFields(fields, state.extendedIndex);
         return wrap(fields.toByteArray());
     }

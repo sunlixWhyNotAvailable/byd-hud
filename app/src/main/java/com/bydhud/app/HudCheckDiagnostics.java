@@ -13,6 +13,14 @@ final class HudCheckDiagnostics {
         String line = "hud_check case=" + sampleKey(sample) + " plane=" + channel
                 + " result=" + (result > 0 ? "sent" : result < 0 ? "unavailable-or-error" : "waiting")
                 + " reason=" + token(reason);
+        if (sample.legacyBasic) {
+            HudState state = sample.toHudState();
+            line += " format=pre-3.6.3 f2=2 f6=6 maneuver=" + state.maneuverId
+                    + " distance_m=" + state.distanceToIntersection
+                    + " png_source=" + (sample.maneuverBitmap ? state.turnBitmapId
+                    : HudState.TURN_BITMAP_BLANK_SOURCE_ID)
+                    + " f19=0 f20=0 f30=empty f31=empty f32=0";
+        }
         if (sample.isLiveCheck()) {
             DirectTbtFrame frame = sample.liveFrame();
             HudManeuverGeometry.Selection geometry = sample.liveGeometry();
@@ -46,7 +54,8 @@ final class HudCheckDiagnostics {
             }
             return "extended-" + (sample.extendedIndex + 1);
         }
-        return "basic-m" + sample.maneuverIndex + "-l" + sample.laneIndex
+        return (sample.legacyBasic ? "basic-pre363-m" : "basic-m")
+                + sample.maneuverIndex + "-l" + sample.laneIndex
                 + "-d" + sample.distanceIndex + "-s" + sample.streetIndex
                 + "-t" + sample.trafficLightIndex + "-mb" + sample.maneuverBitmap
                 + "-lb" + sample.laneBitmap + "-tr" + sample.transliterate;

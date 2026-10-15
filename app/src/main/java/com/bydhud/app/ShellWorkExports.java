@@ -20,8 +20,8 @@ final class ShellWorkExports {
         }
         control.check();
         JSONObject completed = ShellWorkClient.await(context, job, update -> {
-            String phase = update.optString("phase");
-            if ("RUNNING".equals(phase) || phase.isEmpty()) return;
+            String phase = update == null ? "" : update.optString("phase");
+            if (!isConfigurationCollectionPhase(phase)) return;
             progress.changed(phase, update.optString("file"), update.optLong("bytes"), update.optLong("total", -1),
                     update.optInt("files"), update.optInt("count", -1), update.optInt("missing"));
         });
@@ -32,6 +32,11 @@ final class ShellWorkExports {
                 volumes.isEmpty() ? null : volumes.get(0), "", completed.optInt("missing"));
         result.volumes = volumes; result.completedAtMs = completed.getLong("completedAt");
         return result;
+    }
+
+    static boolean isConfigurationCollectionPhase(String phase) {
+        return "INVENTORY".equals(phase) || "DIAGNOSTICS".equals(phase)
+                || "COPYING".equals(phase) || "ARCHIVING".equals(phase);
     }
 
     static String uploadWorkId(String operationId) {

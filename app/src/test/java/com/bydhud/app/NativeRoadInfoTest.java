@@ -182,6 +182,51 @@ public class NativeRoadInfoTest {
         assertEquals(basic.liveGeometry().line, basic.withManeuverBitmap(true).liveGeometry().line);
     }
 
+    @Test public void basicFormatSwitchStopsOutputWithoutLosingSelectionsOrLeakingIntoExtended() {
+        HudCheckState current = new HudCheckState().step(HudCheckState.Field.MANEUVER, 8)
+                .withManeuverBitmap(true).toggleRun();
+        assertFalse(current.legacyBasic);
+        assertSame(current, current.selectBasicFormat(false));
+        HudCheckState legacy = current.selectBasicFormat(true);
+        assertFalse(legacy.running);
+        assertEquals(current.maneuverIndex, legacy.maneuverIndex);
+        assertTrue(legacy.maneuverBitmap);
+        assertFalse(legacy.isLiveCheck());
+        assertNull(legacy.liveFrame());
+        assertFalse(HudOutputCoordinator.sameHudCheckPayload(current, legacy));
+        assertTrue(legacy.toggleRun().legacyBasic);
+        assertTrue(legacy.toggleRun().stop().legacyBasic);
+        HudCheckState extended = legacy.selectMode(HudCheckState.Mode.EXTENDED);
+        assertFalse(extended.legacyBasic);
+        assertSame(extended, extended.selectBasicFormat(true));
+        assertEquals(current.stop(), legacy.selectBasicFormat(false));
+        assertEquals(99, legacy.selectBasicFormat(false).liveFrame().getBydManeuver());
+    }
+
+    @Test public void legacyBasicEncodesPre363FieldsAndCompanionManeuvers() {
+        HudCheckState initial = new HudCheckState().selectBasicFormat(true);
+        // Images are explicit encoder inputs; Android rendering is not exercised here.
+        for (int[] sample : new int[][] {{0, 11, 9}, {1, 1, 2}, {2, 2, 3},
+                {5, 1, 2}, {6, 7, 6}, {7, 8, 7}, {8, 11, 9}}) {
+            HudCheckState state = initial.step(HudCheckState.Field.MANEUVER, sample[0]);
+            Map<Integer, Object> fields = road(HudCheckPayload.buildIsolatedRoadInfo(
+                    state, new byte[0], new byte[0]));
+            assertEquals(2L, fields.get(2));
+            assertEquals(6L, fields.get(6));
+            assertEquals((long) sample[1], fields.get(28));
+            assertEquals((long) state.distance(), fields.get(9));
+            assertEquals(state.effectiveStreet(), text(fields, 10));
+            assertGeometryCleared(fields);
+            HudState hud = state.toHudState();
+            VehicleTbtPublisher.ManualMapping mapping = VehicleTbtPublisher.manualMappingForTest(
+                    hud.turnBitmapId, hud.maneuverId);
+            assertEquals(sample[1], mapping.instrumentId);
+            assertEquals(sample[2], mapping.amapManeuver);
+            assertEquals(0, mapping.roundaboutExit);
+        }
+        assertEquals(23, initial.step(HudCheckState.Field.MANEUVER, 8).toHudState().turnBitmapId);
+    }
+
     private static DirectTbtFrame navigation(int amap, int nativeId) {
         return new DirectTbtFrame(amap, amap, nativeId, 60, "Main Street", "Continue", "",
                 null, null, Collections.emptyList(), DirectTbtFrame.AlertOverlay.inactive());

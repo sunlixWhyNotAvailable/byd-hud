@@ -7762,6 +7762,21 @@ private fun HudCheckTab(
                         .border(1.dp, palette.border, RoundedCornerShape(8.dp))
                         .background(palette.panel)
                 ) {
+                    ActionRow(
+                        language.choose("Формат перевірки", "Check format", "Формат проверки"),
+                        "", palette, verticalPadding = 6.dp
+                    ) {
+                        Segmented(
+                            left = language.choose("Поточний", "Current", "Текущий"),
+                            right = language.choose("До 3.6.3", "Before 3.6.3", "До 3.6.3"),
+                            leftActive = !state.legacyBasic,
+                            palette = palette,
+                            itemWidth = 110.dp,
+                            onLeft = { runAction { activity.composeHudCheckSelectBasicFormat(false) } },
+                            onRight = { runAction { activity.composeHudCheckSelectBasicFormat(true) } }
+                        )
+                    }
+                    Divider(palette)
                     HudCheckRow(copy.checkManeuvers, copy.checkManeuversHint,
                         localizeHudCheckLabel(state.maneuverLabel(ukrainian), language), palette,
                         onPrevious = { step(HudCheckState.Field.MANEUVER, -1) },
