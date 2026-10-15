@@ -86,6 +86,43 @@ Open `Options` to choose the fields you want. The `?` buttons show illustrations
 
 <p align="center"><img src="docs/screenshots/en/settings-basic-navigation.png" alt="Basic navigation settings" width="100%"></p>
 
+### Denza Fusion AR (experimental)
+
+`Options → Basic navigation output → Denza Fusion AR` adds an approximate native
+AR arrow for Google Maps on Denza. It is off by default and requires `Native
+output`, the vehicle's `Navigation fusion` setting and Android precise location
+permission. Other navigators and the default native-arrow mapping are unchanged.
+
+The curve is built from Google's current maneuver/distance and a fresh GPS fix;
+it is not Google's route polyline. It starts 50 m before the turn, or four
+seconds before it when faster (at most 150 m), with accuracy within 20 m and a
+course measured while moving. A parked cold start does not invent a
+heading. At a stop, an already measured course can be held for up to 15 seconds.
+Poor/stale GPS, a missing current step, route loss or disabling the setting clears
+the retained geometry. Ordinary maneuver, distance and text output remains
+available. Roundabouts and other unsupported shapes use ordinary guidance only.
+
+The vehicle's AR engine plays a turn as a timed animation and restarts it
+whenever the turn point (field 31) changes or the distance (field 9) grows.
+So within one Google step the turn point is placed once and never moves, the
+distance sent to the HUD only falls (a rise of 30 m or more counts as a
+reroute and starts a new step), and AR that has dropped out stays off until
+the next step instead of coming back. From 25 m out, AR already shown holds
+through the corner until Google moves to the next step: the turn point and
+curve stay as they were and only the car's position and heading follow the
+fix, since a car turning in no longer matches the course the point was
+projected along.
+
+The setting selects the Denza Apps road layout and maneuver IDs, including
+separate sharp-turn and U-turn IDs. In this profile the original Google image
+and road go together and the distance is the step's lowest; generic lane/composite layouts, ETA-in-street
+formatting and small-distance clamping are bypassed. AR refreshes at 350 ms;
+unchanged compact guidance has a five-second heartbeat. Disabling Native output
+returns to the ordinary output path.
+
+The setting remains off by default: the curve is an approximation, and it has
+been checked on one car (Denza with the Navigation fusion HUD).
+
 ### Arrival time and remaining journey
 
 Choose `Next stop` or `Entire route` in the ETA options, then enable arrival time, remaining time and/or remaining distance. If a whole-route value is unavailable, an available next-stop value is used instead.

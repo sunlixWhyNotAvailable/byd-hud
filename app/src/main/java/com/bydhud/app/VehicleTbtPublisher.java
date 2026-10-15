@@ -336,6 +336,14 @@ final class VehicleTbtPublisher {
         endRoute(packageName, generation, reason, true);
     }
 
+    /** Clear a superseded hint while keeping the route/session available for its next frame. */
+    void clearGuidance(String packageName, long generation, String reason) {
+        if (!routeActive || !matches(packageName, generation)) return;
+        Trace trace = trace(packageName, generation, reason, null, null);
+        sendTerminalGuidanceClear(trace);
+        sendAmapTerminal(trace);
+    }
+
     void endManualRoute(String packageName, long generation, String reason) {
         endRoute(packageName, generation, reason, false);
     }

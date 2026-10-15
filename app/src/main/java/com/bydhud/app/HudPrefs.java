@@ -13,6 +13,7 @@ final class HudPrefs {
     private static final String KEY_SMALL_DISTANCE_CLAMP = "small_distance_clamp";
     private static final String KEY_OUTPUT_PNG = "output_png";
     private static final String KEY_OUTPUT_NATIVE = "output_native";
+    private static final String KEY_DENZA_AR = "denza_ar";
     private static final String KEY_OUTPUT_LANES = "output_lanes";
     private static final String KEY_OUTPUT_DISTANCE = "output_distance";
     private static final String KEY_OUTPUT_STREET = "output_street";
@@ -164,6 +165,15 @@ final class HudPrefs {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isNativeOutputEnabled(Context context) {
         return prefs(context).getBoolean(KEY_OUTPUT_NATIVE, true);
+    }
+
+    static boolean isDenzaArEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_DENZA_AR, false);
+    }
+
+    static void setDenzaArEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_DENZA_AR, enabled).apply();
+        markOutputOptionChanged(KEY_DENZA_AR);
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

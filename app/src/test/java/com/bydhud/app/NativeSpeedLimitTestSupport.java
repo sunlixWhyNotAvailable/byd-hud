@@ -75,6 +75,7 @@ final class NativeSpeedLimitTestSupport {
         HandlerThread ownerThread = ReflectionHelpers.getField(coordinator, "workerThread");
         Handler testWorker = new Handler(Looper.getMainLooper());
         ReflectionHelpers.setField(coordinator, "worker", testWorker);
+        ReflectionHelpers.setField(coordinator, "denzaAr", new DenzaArController(context, testWorker));
         NativeSpeedLimitController nativeSpeed = new NativeSpeedLimitController(context,
                 testWorker, () -> coordinatorOutputActive(coordinator), owner -> {
                     ReflectionHelpers.setField(coordinator,

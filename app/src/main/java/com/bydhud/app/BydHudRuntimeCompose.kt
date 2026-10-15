@@ -2578,6 +2578,15 @@ private fun OptionsTab(
                     runAction { activity.composeSetLaneOutputEnabled(it) }
                 }
             }
+            row("denza-ar") {
+                SwitchRow("Denza Fusion AR", language.choose(
+                    "Об’ємна стрілка Google Maps для Denza. Потрібні штатний вивід і точне місцезнаходження. За слабкого GPS залишаються звичайні підказки.",
+                    "Google Maps AR arrow for Denza. Requires native output and precise location. Ordinary guidance remains when GPS is unreliable.",
+                    "Объёмная стрелка Google Maps для Denza. Нужны штатный вывод и точное местоположение. При слабом GPS остаются обычные подсказки."
+                ), snapshot.denzaArEnabled, palette) {
+                    runAction { activity.composeSetDenzaArEnabled(it) }
+                }
+            }
             row("street-output") {
                 SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette,
                     onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.BasicStreet, copy.streetOutput, snapshot.streetOutputEnabled) }) {

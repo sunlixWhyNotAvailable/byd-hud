@@ -101,6 +101,8 @@ final class HudOutputCoordinator {
                 .put("navigatorMapPngBytes", navigatorMapPng.length)
                 .put("nativeMapClearPending", nativeMapClearPending)
                 .put("directFramePresent", directFrame != null)
+                .put("denzaArEnabled", HudPrefs.isDenzaArEnabled(context))
+                .put("denzaArStatus", denzaAr.status())
                 .put("boundReferencePresent", client.isBound()).put("bindingPresent", client.hasBinding())
                 .put("serviceStarted", serviceStarted).put("generation", generation)
                 .put("bindGeneration", bindGeneration).put("bindCheckScheduled", bindCheckScheduled)
@@ -125,6 +127,10 @@ final class HudOutputCoordinator {
     private final SomeIpHudClient client;
     private final SomeIpTxLog txLog;
     private final NativeSpeedLimitController nativeSpeed;
+    private final DenzaArController denzaAr;
+    private final DenzaOutputCadence denzaCadence = new DenzaOutputCadence();
+    private DirectTbtFrame rawArFrame;
+    private DenzaArGeometry lastArGeometry;
     private final HudCheckDiagnostics hudCheckDiagnostics = new HudCheckDiagnostics();
     private String mapOwnerPackage = "";
     private long mapOwnerGeneration = Long.MIN_VALUE;
@@ -264,6 +270,7 @@ final class HudOutputCoordinator {
         this.context = context;
         workerThread.start();
         worker = new Handler(workerThread.getLooper());
+        denzaAr = new DenzaArController(context, worker);
         nativeSpeed = new NativeSpeedLimitController(context, worker,
                 () -> activeSource != Source.NONE && activeSource == desiredSource()
                         && hasFrame(activeSource) && serviceStarted && clientBoundForNative(),
@@ -566,9 +573,19 @@ final class HudOutputCoordinator {
             GMapsDirectChannel.BitmapSelection bitmapSelection,
             Consumer<String> bitmapTxLogger,
             String ownerPackage, long ownerSessionGeneration, String sourceRoad) {
+        publishDirect(frame, reason, receivedAtMs, bitmapSelection, bitmapTxLogger,
+                ownerPackage, ownerSessionGeneration, sourceRoad, null);
+    }
+
+    void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs,
+            GMapsDirectChannel.BitmapSelection bitmapSelection,
+            Consumer<String> bitmapTxLogger,
+            String ownerPackage, long ownerSessionGeneration, String sourceRoad,
+            DirectTbtFrame rawArFrame) {
         worker.post(() -> {
             if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) return;
             directFrame = frame;
+            this.rawArFrame = rawArFrame;
             directSourceRoad = sourceRoad == null ? "" : sourceRoad;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
@@ -854,6 +871,7 @@ final class HudOutputCoordinator {
     private void reconcile(String reason, long endDetectedAtMs,
             Runnable firstClearCompletion) {
         Source target = desiredSource();
+        if (target != Source.DIRECT) stopDenzaAr();
         if (pendingSource == Source.NONE && target == activeSource) {
             if (target == Source.NONE && (finalClearInProgress
                     || pendingFinalClearCompletion != null)) {
@@ -1169,6 +1187,7 @@ final class HudOutputCoordinator {
                     return;
                 }
                 serviceStarted = true;
+                denzaCadence.reset();
                 if (source == Source.DIRECT) {
                     directServiceReadyAtMs = SystemClock.elapsedRealtime();
                 }
@@ -1194,6 +1213,13 @@ final class HudOutputCoordinator {
             byte[] payload = buildPayload(source);
             byte[] semanticPayload = source == Source.DIRECT
                     ? preparedDirectSemanticPayload : payload;
+            boolean denzaOutput = source == Source.DIRECT && isDenzaDirect();
+            byte[] denzaGuidance = denzaOutput ? preparedDirectPayload.build(2) : null;
+            if (denzaOutput && !denzaCadence.shouldSend(denzaGuidance,
+                    lastArGeometry != null, SystemClock.elapsedRealtime())) {
+                scheduleSend(DenzaOutputCadence.POLL_MS);
+                return;
+            }
             int result = sendPayload(source, channelFor(source), "payload", reason,
                     payload, semanticPayload);
             long duration = SystemClock.elapsedRealtime() - startedAt;
@@ -1208,6 +1234,8 @@ final class HudOutputCoordinator {
                 return;
             }
             recordPayloadSuccess();
+            if (denzaOutput) denzaCadence.sent(denzaGuidance,
+                    lastArGeometry != null, SystemClock.elapsedRealtime());
             publishNativeMap(reason);
             if (source == Source.MANUAL && manualMapLiveSession != 0L) {
                 nativeSpeed.refreshMapLive(manualMapLiveSession,
@@ -1253,7 +1281,9 @@ final class HudOutputCoordinator {
                 }
                 directCounter = (directCounter + 1) & 0xff;
             }
-            scheduleSend(source == Source.DIRECT ? DIRECT_INTERVAL_MS : DEFAULT_INTERVAL_MS);
+            scheduleSend(source == Source.DIRECT
+                    ? (isDenzaDirect() ? DenzaOutputCadence.POLL_MS : DIRECT_INTERVAL_MS)
+                    : DEFAULT_INTERVAL_MS);
         } catch (RemoteException e) {
             sendFailures++;
             handleTransportFailure("send source=" + source, e);
@@ -1424,8 +1454,40 @@ final class HudOutputCoordinator {
         }
     }
 
+    private boolean isDenzaDirect() {
+        return HudPrefs.isDenzaArEnabled(context)
+                && HudPrefs.isNativeOutputEnabled(context)
+                && GMapsDirectChannel.PACKAGE_NAME.equals(directOwnerPackage);
+    }
+
+    private byte[] roadClear(Source source) {
+        denzaCadence.reset();
+        return source == Source.DIRECT && isDenzaDirect()
+                ? DirectTbtPayload.buildDenzaClear() : DirectTbtPayload.buildClear();
+    }
+
     private byte[] buildPayload(Source source) {
         if (source == Source.DIRECT) {
+            boolean denza = isDenzaDirect();
+            DenzaArFrame ar = denzaAr.resolve(
+                    denza && HudPrefs.isNativeOutputEnabled(context),
+                    directOwnerSessionGeneration, rawArFrame, SystemClock.elapsedRealtime());
+            DenzaArGeometry geometry = ar == null ? null : ar.getGeometry();
+            if (denza) {
+                // The same input instruction drives the glyph, distance and curve.
+                // No generic display transformation may rewrite one of them independently.
+                // Field 9 is the tracker's held step distance, which never grows within a step.
+                lastArGeometry = geometry;
+                DirectTbtFrame denzaFrame = rawArFrame != null ? rawArFrame : directFrame;
+                preparedDirectPayload = ar == null ? DirectTbtPayload.prepareDenza(denzaFrame)
+                        : DirectTbtPayload.prepareDenza(denzaFrame, ar.getDistanceMeters());
+                preparedDirectBitmapSelection = directBitmapSelection;
+                preparedDirectBitmapTxLogger = directBitmapTxLogger;
+                preparedDirectSemanticPayload = preparedDirectPayload.build(2,
+                        geometry == null ? null : DenzaArFields.encode(geometry));
+                return preparedDirectSemanticPayload;
+            }
+            denzaCadence.reset();
             int optionsRevision = HudPrefs.outputOptionsRevision();
             long nowWallTimeMs = System.currentTimeMillis();
             long wallMinute = HudEtaResolver.epochMinute(nowWallTimeMs);
@@ -1929,7 +1991,7 @@ final class HudOutputCoordinator {
         flushNativeMapClear(reason, true);
         resetEtaStreetText("clear:" + kind);
         if (!manualEnabled) releaseHudCheckAuxiliary(reason);
-        byte[] payload = DirectTbtPayload.buildClear();
+        byte[] payload = roadClear(source);
         int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
         logAsync("clear result=" + result + " reason=" + reason);
         if (!isPayloadSuccessResult(result)) {
@@ -1947,7 +2009,7 @@ final class HudOutputCoordinator {
         try {
             flushNativeMapClear(reason, true);
             if (!manualEnabled) releaseHudCheckAuxiliary(reason);
-            byte[] payload = DirectTbtPayload.buildClear();
+            byte[] payload = roadClear(source);
             int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
             long completedAtMs = SystemClock.elapsedRealtime();
             logAsync("clear result=" + result + " reason=" + reason);
@@ -1959,6 +2021,7 @@ final class HudOutputCoordinator {
     }
 
     private void stopServiceAndUnbind(String reason) {
+        stopDenzaAr();
         stopNavigatorMap("transport-stop:" + reason);
         flushNativeMapClear(reason, true);
         nativeSpeed.stop("transport-stop:" + reason);
@@ -2389,10 +2452,22 @@ final class HudOutputCoordinator {
     }
 
     private void stopDirectPresentation(String reason) {
+        stopDenzaAr();
         // Direct lifecycle events can arrive while manual calibration owns the HUD.
         if (desiredSource() == Source.MANUAL) return;
         stopNavigatorMap(reason);
         nativeSpeed.stop(reason);
+    }
+
+    private void stopDenzaAr() {
+        denzaAr.stop();
+        denzaCadence.reset();
+        rawArFrame = null;
+        lastArGeometry = null;
+        // The Denza layout must not be reused by the ordinary path: rebuild from scratch.
+        candidateDirectPayload = null;
+        preparedDirectPayload = null;
+        preparedDirectSemanticPayload = null;
     }
 
     private void invalidateDirectOwnerOnWorker(String reason) {

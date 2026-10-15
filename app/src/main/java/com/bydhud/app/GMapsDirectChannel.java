@@ -675,6 +675,15 @@ final class GMapsDirectChannel {
         return true;
     }
 
+    private long bitmapStepStartSequence = -1L;
+    private long bitmapStepSourceAfterMs = -1L;
+
+    private boolean bitmapBelongsToCurrentStep(ManeuverBitmap candidate, long sequence) {
+        return candidate != null && (candidate.sourceSequence >= 0L
+                ? candidate.sourceSequence >= bitmapStepStartSequence && candidate.sourceSequence <= sequence
+                : candidate.sourceAtMs > bitmapStepSourceAfterMs);
+    }
+
     private void handleFrame(Bundle data, GMapsTimingDiagnostics.Frame timing) {
         byte[] payload = data.getByteArray("payload");
         long sequence = data.getLong("sequence", -1L);
@@ -688,12 +697,13 @@ final class GMapsDirectChannel {
             listener.onLog("frame ignored reason=terminal-latched sequence=" + sequence);
             return;
         }
+        lastSequence = sequence; // Consume even malformed frames; older data must not resurrect guidance.
         if (payload == null || payload.length == 0 || payload.length > MAX_FRAME_BYTES) {
             listener.onLog("frame rejected reason=size sequence=" + sequence
                     + " bytes=" + (payload == null ? 0 : payload.length));
+            clearGuidance("invalid-frame-size");
             return;
         }
-        lastSequence = sequence;
         logRawFrame(sequence, frameCase, payload);
         if ("4".equals(frameCase)) {
             finishNavigation("terminal-case-4");
@@ -713,6 +723,7 @@ final class GMapsDirectChannel {
                     parseStartElapsedMs, parseEndElapsedMs));
             listener.onLog("frame rejected reason=parse sequence=" + sequence
                     + " error=" + error.getClass().getSimpleName());
+            clearGuidance("invalid-frame");
             return;
         }
         long parseEndElapsedMs = SystemClock.elapsedRealtime();
@@ -726,6 +737,7 @@ final class GMapsDirectChannel {
             if (!"route_state".equals(shape)
                     || !Boolean.TRUE.equals(summary.get("currentStepAvailable"))) {
                 listener.onLog("frame ignored sequence=" + sequence + " shape=" + shape);
+                clearGuidance("no-current-step:" + shape);
                 return;
             }
             Integer currentStepIndex = integerValue(summary.get("currentStepIndex"));
@@ -739,7 +751,12 @@ final class GMapsDirectChannel {
                 return;
             }
             int wireValue = intValue(summary.get("maneuverEnum"), -1);
-            int distance = Math.max(0, intValue(summary.get("distanceMeters"), 0));
+            Integer suppliedDistance = integerValue(summary.get("distanceMeters"));
+            if (suppliedDistance == null || suppliedDistance < 0) {
+                clearGuidance("distance-unavailable");
+                return;
+            }
+            int distance = suppliedDistance;
             GMapsDirectManeuverMap.Result mapping = maneuverMap.map(wireValue, distance > 0);
             String road = joinedLines(summary.get("cueLines"));
             if (road.isEmpty()) road = joinedLines(summary.get("longCueLines"));
@@ -747,11 +764,24 @@ final class GMapsDirectChannel {
                     "sourceElapsedMs", SystemClock.elapsedRealtime());
             DirectTbtFrame.TripMetrics tripMetrics = tripMetrics(
                     summary, System.currentTimeMillis());
+            int stepIndex = currentStepIndex == null ? -1 : currentStepIndex;
+            boolean stepChanged = currentFrame == null
+                    || currentFrame.getSourceStepIndex() != stepIndex
+                    || currentFrame.getRawManeuverType() != wireValue
+                    || !currentFrame.getRoadText().equals(road);
+            if (stepChanged) {
+                bitmapStepStartSequence = sequence;
+                if (currentFrame != null) {
+                    bitmapStepSourceAfterMs = Math.max(bitmapStepSourceAfterMs, currentStructuredFrameAtMs);
+                }
+            }
+            ManeuverBitmap bitmap = maneuverBitmaps.get(mapping.maneuverName);
+            if (!bitmapBelongsToCurrentStep(bitmap, sequence)) bitmap = null;
             byte[] fallbackPng = HudGraphicPayload.buildOemTurnPng(mapping.fallbackSource);
             BitmapSelection bitmapSelection = BitmapSelection.select(
                     sequence,
                     mapping.maneuverName,
-                    maneuverBitmaps.get(mapping.maneuverName),
+                    bitmap,
                     fallbackPng,
                     frameAtMs,
                     "matched");
@@ -759,21 +789,23 @@ final class GMapsDirectChannel {
             currentManeuver = mapping.maneuverName;
             currentStructuredFrameAtMs = frameAtMs;
             currentFallbackPng = fallbackPng;
-            List<DirectTbtFrame.Lane> lanes = mapLanes(summary.get("lanes"));
+            List<DirectTbtFrame.Lane> lanes = Boolean.FALSE.equals(summary.get("laneGuidanceActive"))
+                    ? Collections.emptyList() : mapLanes(summary.get("lanes"));
             currentFrame = new DirectTbtFrame(
                     wireValue,
                     mapping.intermediate,
                     mapping.nativeManeuver,
                     distance,
                     road,
-                    "",
+                    stringValue(summary.get("contentDescription")),
                     road,
                     maneuverPng,
                     null,
                     lanes,
                     DirectTbtFrame.AlertOverlay.inactive(),
                     tripMetrics).withVehicleTbt(
-                    mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber);
+                    mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber)
+                    .withSourceStepIndex(currentStepIndex == null ? -1 : currentStepIndex);
             boolean firstFrame = !firstStructuredFrame;
             if (!navigating) {
                 navigating = true;
@@ -808,11 +840,25 @@ final class GMapsDirectChannel {
         } catch (Exception error) {
             listener.onLog("frame rejected reason=parse sequence=" + sequence
                     + " error=" + error.getClass().getSimpleName());
+            clearGuidance("invalid-frame");
         }
     }
 
+    /** Route liveness is not proof that the previous turn is still current (e.g. rerouting). */
+    private void clearGuidance(String reason) {
+        boolean hadFrame = currentFrame != null;
+        currentFrame = null;
+        currentManeuver = "";
+        currentFallbackPng = new byte[0];
+        currentStructuredFrameAtMs = 0L;
+        maneuverBitmaps.clear();
+        maneuverMap.reset();
+        bitmapStepSourceAfterMs = Math.max(bitmapStepSourceAfterMs, SystemClock.elapsedRealtime());
+        if (hadFrame) listener.onGuidanceUnavailable(OWNER_PACKAGE, sessionGeneration, reason);
+    }
+
     private void handleManeuverBitmap(Bundle data) {
-        String maneuver = safe(data.getString("maneuver"));
+        String maneuver = bitmapManeuverName(data.getString("maneuver"));
         String viewId = safe(data.getString("viewId"));
         long incomingProducerEpoch = data.getLong("producerEpoch", -1L);
         long incomingRouteGeneration = routeGeneration(data);
@@ -860,7 +906,8 @@ final class GMapsDirectChannel {
         }
         maneuverBitmaps.put(maneuver, candidate);
         boolean ordered = sourceSequence < 0L || sourceSequence <= lastSequence;
-        boolean currentMatch = ordered && candidate.matches(currentManeuver)
+        boolean currentMatch = ordered && bitmapBelongsToCurrentStep(candidate, lastSequence)
+                && candidate.matches(currentManeuver)
                 && currentFrame != null;
         long frameDelayMs = currentStructuredFrameAtMs <= 0L
                 ? -1L : sourceAtMs - currentStructuredFrameAtMs;
@@ -915,6 +962,8 @@ final class GMapsDirectChannel {
     }
 
     private void resetSession() {
+        bitmapStepStartSequence = -1L;
+        bitmapStepSourceAfterMs = -1L;
         lastSequence = -1L;
         currentStructuredFrameAtMs = 0L;
         currentManeuver = "";
@@ -1140,10 +1189,10 @@ final class GMapsDirectChannel {
         if (!(value instanceof List)) return Collections.emptyList();
         List<DirectTbtFrame.Lane> mapped = new ArrayList<>();
         for (Object laneValue : (List<?>) value) {
-            if (!(laneValue instanceof Map)) continue;
+            if (!(laneValue instanceof Map)) return Collections.emptyList();
             Map<?, ?> lane = (Map<?, ?>) laneValue;
             Object arrowsValue = lane.get("arrows");
-            if (!(arrowsValue instanceof List)) continue;
+            if (!(arrowsValue instanceof List)) return Collections.emptyList();
             Map<?, ?> firstSupported = null;
             Map<?, ?> recommendedSupported = null;
             StringBuilder raw = new StringBuilder();
@@ -1167,7 +1216,8 @@ final class GMapsDirectChannel {
             }
             Map<?, ?> selected = recommendedSupported == null
                     ? firstSupported : recommendedSupported;
-            if (selected == null) continue;
+            // Omitting a physical lane shifts every lane after it to the wrong position.
+            if (selected == null) return Collections.emptyList();
             int direction = mapLaneDirection(selected);
             mapped.add(new DirectTbtFrame.Lane(
                     direction,
@@ -1239,6 +1289,17 @@ final class GMapsDirectChannel {
 
     private static String safe(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private static String bitmapManeuverName(String value) {
+        String name = safe(value);
+        // Maps 25.16's maneuver value is not a Java Enum: its toString() is
+        // "{DEPART}". Accept that exact wrapper as well as newer enum.name()
+        // producers, before cache lookup so both forms share ordering fences.
+        if (name.matches("\\{[A-Z][A-Z_]*\\}")) {
+            return name.substring(1, name.length() - 1);
+        }
+        return name;
     }
 
     private static String sha256(byte[] bytes) {
@@ -1465,6 +1526,7 @@ final class GMapsDirectChannel {
         void onChannelStarted(String ownerPackage, long sessionGeneration, String reason);
         void onHandshakeAvailable(String ownerPackage, long sessionGeneration, String reason);
         void onHandshakeUnavailable(String ownerPackage, long sessionGeneration, String reason);
+        void onGuidanceUnavailable(String ownerPackage, long sessionGeneration, String reason);
         void onRouteState(String ownerPackage, long sessionGeneration,
                 long producerEpoch, long routeGeneration, boolean routeActive,
                 boolean routeActiveKnown, String reason);

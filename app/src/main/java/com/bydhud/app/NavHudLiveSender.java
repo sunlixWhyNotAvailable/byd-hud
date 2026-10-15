@@ -1697,6 +1697,22 @@ final class NavHudLiveSender {
                     }
 
                     @Override
+                    public void onGuidanceUnavailable(String ownerPackage, long sessionGeneration,
+                            String reason) {
+                        handler.post(() -> {
+                            if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
+                            latestGMapsDirectFrame = null;
+                            gmapsDirectFrameReceived = false;
+                            gmapsDirectState = GMapsDirectState.ACTIVE_WAITING_FRAME;
+                            if (isHudOutputOwner(ownerPackage)) {
+                                hudOutput.clearDirectFrameForLoss(ownerPackage, sessionGeneration,
+                                        reason, SystemClock.elapsedRealtime());
+                            }
+                            tbtPublisher.clearGuidance(ownerPackage, sessionGeneration, reason);
+                        });
+                    }
+
+                    @Override
                     public void onLog(String message) {
                         logGMapsDirectChannelEvent(message);
                     }
@@ -3580,7 +3596,7 @@ final class NavHudLiveSender {
         }
         hudOutput.publishDirect(
                 outputFrame, reason, now, bitmapSelection, this::logGMapsDirectChannelEvent,
-                ownerPackage, sessionGeneration, frame.getRoadText());
+                ownerPackage, sessionGeneration, frame.getRoadText(), frame);
         hudDispatched = true;
         hudDispatchElapsedMs = SystemClock.elapsedRealtime();
         hudOutput.selectNavigationSource(
