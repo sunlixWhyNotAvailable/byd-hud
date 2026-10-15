@@ -3580,7 +3580,7 @@ final class NavHudLiveSender {
         }
         hudOutput.publishDirect(
                 outputFrame, reason, now, bitmapSelection, this::logGMapsDirectChannelEvent,
-                ownerPackage, sessionGeneration, frame.getRoadText());
+                ownerPackage, sessionGeneration, frame.getRoadText(), frame);
         hudDispatched = true;
         hudDispatchElapsedMs = SystemClock.elapsedRealtime();
         hudOutput.selectNavigationSource(

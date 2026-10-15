@@ -62,6 +62,67 @@ public final class DirectTbtPayload {
         return prepare(frame, options, true, EXPERIMENTAL, nowWallTimeMs);
     }
 
+    /** {@link #prepareDenza(DirectTbtFrame, int)} with the frame's own distance in field 9,
+     * for output without an AR tracker frame.
+     */
+    static Prepared prepareDenza(DirectTbtFrame frame) {
+        return prepareDenza(frame, frame == null ? 0 : frame.getDistanceMeters());
+    }
+
+    /** Denza Apps' complete RoadInfo layout, before the optional AR fields.
+     * Adapted from xor777/denza-lab 854bc915, HudSomeIpClient.buildPayload.
+     * Keep this path independent of generic bitmap layouts, lane mode and distance clamping.
+     * Field 9 carries {@code distanceMeters}, the AR tracker's held step distance: the
+     * vehicle AR engine restarts a running turn scene whenever field 9 grows.
+     */
+    static Prepared prepareDenza(DirectTbtFrame frame, int distanceMeters) {
+        DirectTbtFrame source = frame == null ? DirectTbtFrame.empty() : frame;
+        DirectTbtFrame.TravelMetrics route = source.getTripMetrics().getWholeRoute();
+        if (!route.hasAnyValue()) route = source.getTripMetrics().getNextStop();
+        long meters = route.getRemainingDistanceMeters();
+        long seconds = route.getRemainingTimeSeconds();
+        byte[] icon = source.getManeuverPng();
+        int nativeId = DenzaManeuver.fromGoogle(source.getRawManeuverType()).getNativeId();
+        ByteArrayOutputStream fields = new ByteArrayOutputStream();
+        writeVarintField(fields, 16, 2);
+        if (meters >= 0) writeVarintField(fields, 3, meters);
+        if (seconds >= 0) writeVarintField(fields, 4, seconds);
+        if (icon.length > 0) writeBytesField(fields, 8, icon);
+        writeVarintField(fields, 9, distanceMeters);
+        int textStart = fields.size();
+        String road = source.getRoadText();
+        if (!road.isEmpty()) writeStringField(fields, 10, road);
+        int textEnd = fields.size();
+        if (source.getSpeedLimit().isActive()) {
+            writeVarintField(fields, 11, source.getSpeedLimit().getKph());
+        }
+        if (meters >= 0) writeStringField(fields, 26, denzaRouteDistance(meters));
+        if (seconds >= 0) writeStringField(fields, 27, denzaRemainingTime(seconds));
+        writeVarintField(fields, 28, nativeId);
+        return new Prepared(fields.toByteArray(), icon.length > 0 ? "png" : "native",
+                nativeId, distanceMeters, road, 0, 0, icon,
+                textStart, textEnd, false, "denza_apps");
+    }
+
+    private static String denzaRouteDistance(long meters) {
+        if (meters < 1000) return meters + " м";
+        if (meters < 10000) return String.format(Locale.ROOT, "%.1f км", meters / 1000.0).replace('.', ',');
+        return Math.round(meters / 1000.0) + " км";
+    }
+
+    private static String denzaRemainingTime(long seconds) {
+        long minutes = (seconds + 59) / 60;
+        return minutes < 60 ? minutes + " мин"
+                : (minutes / 60) + " ч" + (minutes % 60 == 0 ? "" : " " + (minutes % 60) + " мин");
+    }
+
+    static byte[] buildDenzaClear() {
+        ByteArrayOutputStream inner = new ByteArrayOutputStream();
+        writeVarintField(inner, 2, 2);
+        writeVarintField(inner, 16, 1);
+        return wrap(inner.toByteArray());
+    }
+
     static Prepared prepare(DirectTbtFrame frame, Options options, HudExperimentalCompositor compositor) {
         return prepare(frame, options, compositor, System.currentTimeMillis());
     }
@@ -583,9 +644,14 @@ public final class DirectTbtPayload {
         }
 
         public byte[] build(int counter) {
+            return build(counter, null);
+        }
+
+        byte[] build(int counter, byte[] arFields) {
             long safeCounter = counter & 0xffL;
             int counterBytes = 1 + varintSize(safeCounter);
-            int innerLength = counterBytes + fields.length;
+            int arLength = arFields == null ? 0 : arFields.length;
+            int innerLength = counterBytes + fields.length + arLength;
             byte[] payload = new byte[1 + varintSize(innerLength) + innerLength];
             int offset = 0;
             payload[offset++] = 0x0a;
@@ -593,6 +659,7 @@ public final class DirectTbtPayload {
             payload[offset++] = 0x10;
             offset = writeVarint(payload, offset, safeCounter);
             System.arraycopy(fields, 0, payload, offset, fields.length);
+            if (arLength > 0) System.arraycopy(arFields, 0, payload, offset + fields.length, arLength);
             return payload;
         }
     }

@@ -886,6 +886,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isDetailedDebugArtifactsEnabled(this),
                 HudPrefs.isPngOutputEnabled(this),
                 HudPrefs.isNativeOutputEnabled(this),
+                HudPrefs.isDenzaArEnabled(this),
                 HudPrefs.isLaneOutputEnabled(this),
                 HudPrefs.isDistanceOutputEnabled(this),
                 HudPrefs.isStreetOutputEnabled(this),
@@ -1540,6 +1541,30 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetNativeOutputEnabled(boolean enabled) {
         setNativeOutputEnabled(enabled);
+    }
+
+    private static final int DENZA_LOCATION_REQUEST = 2401;
+
+    public void composeSetDenzaArEnabled(boolean enabled) {
+        if (enabled && checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION}, DENZA_LOCATION_REQUEST);
+            return;
+        }
+        HudPrefs.setDenzaArEnabled(this, enabled);
+        refreshControls();
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions,
+            int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == DENZA_LOCATION_REQUEST) {
+            HudPrefs.setDenzaArEnabled(this,
+                    checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                            == android.content.pm.PackageManager.PERMISSION_GRANTED);
+            refreshControls();
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -2820,6 +2845,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean detailedDebugArtifactsEnabled;
         public final boolean pngOutputEnabled;
         public final boolean nativeOutputEnabled;
+        public final boolean denzaArEnabled;
         public final boolean laneOutputEnabled;
         public final boolean distanceOutputEnabled;
         public final boolean streetOutputEnabled;
@@ -2912,7 +2938,7 @@ public final class MainActivity extends ComponentActivity {
 
         ComposeSnapshot(String uiLanguage, boolean darkTheme, boolean bootEnabled,
                 boolean detailedDebugArtifactsEnabled,
-                boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
+                boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean denzaArEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
                 int transliterationMode,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
@@ -2971,6 +2997,7 @@ public final class MainActivity extends ComponentActivity {
             this.detailedDebugArtifactsEnabled = detailedDebugArtifactsEnabled;
             this.pngOutputEnabled = pngOutputEnabled;
             this.nativeOutputEnabled = nativeOutputEnabled;
+            this.denzaArEnabled = denzaArEnabled;
             this.laneOutputEnabled = laneOutputEnabled;
             this.distanceOutputEnabled = distanceOutputEnabled;
             this.streetOutputEnabled = streetOutputEnabled;
@@ -3098,6 +3125,7 @@ public final class MainActivity extends ComponentActivity {
                     && detailedDebugArtifactsEnabled == other.detailedDebugArtifactsEnabled
                     && pngOutputEnabled == other.pngOutputEnabled
                     && nativeOutputEnabled == other.nativeOutputEnabled
+                    && denzaArEnabled == other.denzaArEnabled
                     && laneOutputEnabled == other.laneOutputEnabled
                     && distanceOutputEnabled == other.distanceOutputEnabled
                     && streetOutputEnabled == other.streetOutputEnabled
@@ -3191,7 +3219,7 @@ public final class MainActivity extends ComponentActivity {
         public int hashCode() {
             return Objects.hash(
                     uiLanguage, uaLanguage, darkTheme, bootEnabled, detailedDebugArtifactsEnabled,
-                    pngOutputEnabled, nativeOutputEnabled, laneOutputEnabled,
+                    pngOutputEnabled, nativeOutputEnabled, denzaArEnabled, laneOutputEnabled,
                     distanceOutputEnabled, streetOutputEnabled, transliterationMode,
                     textDirectionOutputEnabled,
                     wazeAlertsEnabled, wazeAlertField, tbtWithoutHudOutputEnabled,

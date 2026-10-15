@@ -773,7 +773,8 @@ final class GMapsDirectChannel {
                     lanes,
                     DirectTbtFrame.AlertOverlay.inactive(),
                     tripMetrics).withVehicleTbt(
-                    mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber);
+                    mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber)
+                    .withSourceStepIndex(currentStepIndex == null ? -1 : currentStepIndex);
             boolean firstFrame = !firstStructuredFrame;
             if (!navigating) {
                 navigating = true;
