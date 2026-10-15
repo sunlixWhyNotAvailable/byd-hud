@@ -20,17 +20,12 @@ public final class HudCheckPayload {
     private static final long ROAD_SERVICE_ID = 0x000B010A00010000L;
     private static final long TRAFFIC_INFO_SERVICE_ID = 0x000B000700070000L;
     private static final long MATRIX_SERVICE_ID = 0x000B820282020000L;
-    private static final long STATISTIC_SERVICE_ID = 0x000B000D000D0000L;
-    private static final long ROUTE_METADATA_SERVICE_ID = 0x000B000E000E0000L;
 
     private static final long MAP_PATH_TOPIC = 0x4010A00018002L;
     private static final long MAP_TOPIC = 0x4010A00018003L;
     private static final long TRAFFIC_INFO_TOPIC = 0x4000700078003L;
     private static final long MATRIX_TRAFFIC_LIGHT_TOPIC = 0x4820282028001L;
     private static final long MATRIX_NAV_ACTION_CAMERA_TOPIC = 0x482028202800BL;
-    private static final long STATISTIC_SEGMENTS_TOPIC = 0x0004000D000D8001L;
-    private static final long STATISTIC_SEGMENTS_2_TOPIC = 0x0004000D000D8002L;
-    private static final long STATISTIC_SUMMARY_TOPIC = 0x0004000E000E8001L;
     private static final int EXTENDED_MAP_INDEX = 15;
     private static final int EXTENDED_NAV_MAP_INDEX = 16;
     private static final int EXTENDED_TRAFFIC_SPEED_INDEX = 17;
@@ -39,57 +34,36 @@ public final class HudCheckPayload {
     private static final int EXTENDED_CAMERA_INDEX = 20;
     private static final int EXTENDED_LANES_INDEX = 21;
     private static final int EXTENDED_LIGHT_INDEX = 22;
-    private static final int EXTENDED_SEGMENTS_INDEX = 23;
-    private static final int EXTENDED_SUMMARY_INDEX = 24;
-
-    private static final long[] AUXILIARY_SERVICES = {
-            ROAD_SERVICE_ID, TRAFFIC_INFO_SERVICE_ID, MATRIX_SERVICE_ID,
-            STATISTIC_SERVICE_ID, ROUTE_METADATA_SERVICE_ID
-    };
 
     private HudCheckPayload() {
     }
 
+    static boolean needsManeuverClear(HudCheckState previous, HudCheckState next) {
+        // Current remains the original comparison packet, including its recurring blank PNG.
+        return previous != null && previous.isLiveCheck() && previous.maneuverBitmap
+                && next != null && next.isLiveCheck() && next.legacyBasic && !next.maneuverBitmap;
+    }
+
+    static byte[] buildManeuverClear(Context context, HudCheckState state) {
+        if (context != null) HudGraphicPayload.setContext(context);
+        byte[] lanes = state.laneBitmap ? buildLanePngSafely(context, state.toHudState()) : new byte[0];
+        return buildManeuverClear(state, lanes,
+                HudGraphicPayload.buildOemTurnPng(HudState.TURN_BITMAP_BLANK_SOURCE_ID));
+    }
+
+    static byte[] buildManeuverClear(HudCheckState state, byte[] lanePng, byte[] blankPng) {
+        if (blankPng == null || blankPng.length == 0) {
+            throw new IllegalArgumentException("Blank maneuver PNG is missing");
+        }
+        return prepareLive(state, lanePng, blankPng, true).build(0);
+    }
+
     /** Builds one real RoadInfo event with only the selected diagnostic fields. */
     public static byte[] buildRoadInfo(Context context, HudCheckState source) {
-        HudCheckState state = source == null ? new HudCheckState() : source;
-        if (state.isLiveCheck()) return prepareLive(context, state).build(0);
-        if (context != null) HudGraphicPayload.setContext(context);
-        HudState hud = state.toHudState();
-        boolean extended = state.mode == HudCheckState.Mode.EXTENDED;
-        byte[] lanePng = !extended && state.laneBitmap
-                ? buildLanePngSafely(context, hud) : new byte[0];
-        byte[] maneuverPng = state.legacyBasic ? new byte[0] : !extended && state.maneuverBitmap
-                ? HudGraphicPayload.buildTurnPng(hud)
-                : HudGraphicPayload.buildOemTurnPng(HudState.TURN_BITMAP_BLANK_SOURCE_ID);
-
-        return buildIsolatedRoadInfo(state, lanePng, maneuverPng);
+        return prepareLive(context, source).build(0);
     }
 
-    static byte[] buildIsolatedRoadInfo(HudCheckState state, byte[] lanePng, byte[] maneuverPng) {
-        HudState hud = state.toHudState();
-        boolean extended = state.mode == HudCheckState.Mode.EXTENDED;
-        ByteArrayOutputStream fields = new ByteArrayOutputStream();
-        writeVarintField(fields, 2, 2);
-        writeVarintField(fields, 5, hud.numOfLanes);
-        writeVarintField(fields, 6, 6);
-        writeBytesField(fields, 7, lanePng);
-        // No PNG keeps the historical packet but omits the image field entirely.
-        if (!state.legacyBasic) writeBytesField(fields, 8, maneuverPng);
-        writeVarintField(fields, 9, hud.distanceToIntersection);
-        writeStringField(fields, 10, hud.roadName);
-        writeVarintField(fields, 16, 2);
-        writeVarintField(fields, 28, hud.maneuverId);
-        writeStringField(fields, 29, HudLaneModel.field29Value(hud));
-
-        // Every snapshot clears optional fields first; this prevents a previous
-        // extended case's ETA/camera/geometry from lingering in a receiver.
-        writeExtendedNeutralFields(fields, "");
-        if (extended) writeExtendedFields(fields, state.extendedIndex);
-        return wrap(fields.toByteArray());
-    }
-
-    /** Prepares Basic and appended live-pipeline cases with the production TBT formatter. */
+    /** Prepares Basic and Extended with the same production TBT formatter. */
     static DirectTbtPayload.Prepared prepareLive(Context context, HudCheckState source) {
         HudCheckState state = source == null ? new HudCheckState() : source;
         if (!state.isLiveCheck()) {
@@ -97,15 +71,27 @@ public final class HudCheckPayload {
         }
         if (context != null) HudGraphicPayload.setContext(context);
 
-        DirectTbtFrame frame = state.liveFrame();
         HudState hud = state.toHudState();
-        boolean basic = state.mode == HudCheckState.Mode.BASIC;
-        byte[] maneuverPng = basic && state.maneuverBitmap
+        byte[] maneuverPng = state.maneuverBitmap
                 ? HudGraphicPayload.buildTurnPng(hud)
-                : HudGraphicPayload.buildOemTurnPng(basic
-                        ? HudState.TURN_BITMAP_BLANK_SOURCE_ID : hud.turnBitmapId);
-        byte[] lanePng = basic && state.laneBitmap
+                : !state.legacyBasic
+                ? HudGraphicPayload.buildOemTurnPng(HudState.TURN_BITMAP_BLANK_SOURCE_ID)
+                : new byte[0];
+        byte[] lanePng = state.laneBitmap
                 ? buildLanePngSafely(context, hud) : new byte[0];
+        return prepareLive(state, lanePng, maneuverPng);
+    }
+
+    static DirectTbtPayload.Prepared prepareLive(HudCheckState state,
+            byte[] lanePng, byte[] maneuverPng) {
+        return prepareLive(state, lanePng, maneuverPng, false);
+    }
+
+    private static DirectTbtPayload.Prepared prepareLive(HudCheckState state,
+            byte[] lanePng, byte[] maneuverPng, boolean clearManeuver) {
+        DirectTbtFrame frame = state.liveFrame();
+        if (frame == null) throw new IllegalArgumentException("HUD Check state is not a live-pipeline case");
+        HudState hud = state.toHudState();
         List<DirectTbtFrame.Lane> lanes = new ArrayList<>();
         for (HudLaneModel.LaneSpec lane : HudLaneModel.parse(hud)) {
             lanes.add(new DirectTbtFrame.Lane(
@@ -119,8 +105,15 @@ public final class HudCheckPayload {
                 new DirectTbtPayload.Options(true, true, true, true, true);
         ByteArrayOutputStream baseline = new ByteArrayOutputStream();
         writeExtendedNeutralFields(baseline, "");
-        return DirectTbtPayload.prepare(frame, options)
-                .withHudCheckBaseline(baseline.toByteArray());
+        ByteArrayOutputStream overrides = new ByteArrayOutputStream();
+        if (state.mode == HudCheckState.Mode.EXTENDED) {
+            writeExtendedFields(overrides, state.extendedIndex);
+        }
+        DirectTbtPayload.Prepared prepared = !state.legacyBasic
+                ? DirectTbtPayload.prepare(frame, options)
+                : DirectTbtPayload.prepareDiagnostic(frame, options,
+                        state.maneuverBitmap || clearManeuver, !state.maneuverBitmap);
+        return prepared.withHudCheckBaseline(baseline.toByteArray(), overrides.toByteArray());
     }
 
     /** Returns auxiliary events for the current extended case; Basic has none. */
@@ -162,16 +155,6 @@ public final class HudCheckPayload {
                 result.add(new Packet(MATRIX_SERVICE_ID, MATRIX_TRAFFIC_LIGHT_TOPIC,
                         buildTrafficLightPayload(true)));
                 break;
-            case EXTENDED_SEGMENTS_INDEX:
-                result.add(new Packet(STATISTIC_SERVICE_ID, STATISTIC_SEGMENTS_TOPIC,
-                        buildStatisticSegmentPayload(0xD619A0F8L, true, 5.0d, 2.2d)));
-                result.add(new Packet(STATISTIC_SERVICE_ID, STATISTIC_SEGMENTS_2_TOPIC,
-                        buildStatisticSegmentMarkerPayload(0xE38A6876L)));
-                break;
-            case EXTENDED_SUMMARY_INDEX:
-                result.add(new Packet(ROUTE_METADATA_SERVICE_ID, STATISTIC_SUMMARY_TOPIC,
-                        buildStatisticSummaryPayload(true)));
-                break;
             default:
                 break;
         }
@@ -189,12 +172,6 @@ public final class HudCheckPayload {
         result.add(new Packet(MATRIX_SERVICE_ID, MATRIX_NAV_ACTION_CAMERA_TOPIC, empty));
         result.add(new Packet(MATRIX_SERVICE_ID, 0x000482028202800CL,
                 buildRouteLanesPayload(true)));
-        result.add(new Packet(STATISTIC_SERVICE_ID, STATISTIC_SEGMENTS_TOPIC,
-                buildStatisticSegmentPayload(0xD619A0F8L, false, 0.0d, 0.0d)));
-        result.add(new Packet(STATISTIC_SERVICE_ID, STATISTIC_SEGMENTS_2_TOPIC,
-                buildStatisticSegmentMarkerPayload(0xE38A6876L)));
-        result.add(new Packet(ROUTE_METADATA_SERVICE_ID, STATISTIC_SUMMARY_TOPIC,
-                buildStatisticSummaryPayload(false)));
         return Collections.unmodifiableList(result);
     }
 
@@ -242,7 +219,8 @@ public final class HudCheckPayload {
     }
 
     private static void writeExtendedFields(ByteArrayOutputStream out, int index) {
-        if (index >= 25 && index < HudCheckLiveScenario.FIRST_EXTENDED_INDEX) {
+        if (index >= HudCheckGeometry.FIRST_EXTENDED_INDEX
+                && index < HudCheckLiveScenario.FIRST_EXTENDED_INDEX) {
             writeDoubleField(out, 19, HudCheckGeometry.LONGITUDE);
             writeDoubleField(out, 20, HudCheckGeometry.LATITUDE);
             writeDoubleField(out, 32, HudCheckGeometry.heading(index));
@@ -393,33 +371,6 @@ public final class HudCheckPayload {
             writeBytesField(fields, 6, new byte[]{(byte) 255, 0, (byte) 255, 0, (byte) 255});
         }
         writeDoubleField(fields, 9, System.currentTimeMillis());
-        return wrap(fields.toByteArray());
-    }
-
-    private static byte[] buildStatisticSegmentPayload(long marker, boolean active,
-                                                        double length, double time) {
-        ByteArrayOutputStream fields = new ByteArrayOutputStream();
-        writeVarintField(fields, 1, marker);
-        writeVarintField(fields, 5, active ? 1 : 0);
-        writeDoubleField(fields, 12, active ? length : 0.0d);
-        writeDoubleField(fields, 13, active ? time : 0.0d);
-        return wrap(fields.toByteArray());
-    }
-
-    private static byte[] buildStatisticSegmentMarkerPayload(long marker) {
-        ByteArrayOutputStream fields = new ByteArrayOutputStream();
-        writeVarintField(fields, 1, marker);
-        return wrap(fields.toByteArray());
-    }
-
-    private static byte[] buildStatisticSummaryPayload(boolean active) {
-        ByteArrayOutputStream fields = new ByteArrayOutputStream();
-        writeVarintField(fields, 1, 1);
-        writeVarintField(fields, 3, active ? 1 : 0);
-        // Probe terminal frames retain a fresh timestamp while deactivating
-        // the route metadata, preventing a stale session from being treated
-        // as current by receivers.
-        writeDoubleField(fields, 4, System.currentTimeMillis() * 1_000.0d);
         return wrap(fields.toByteArray());
     }
 

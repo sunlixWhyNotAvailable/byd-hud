@@ -6,7 +6,7 @@ import java.util.List;
 
 /** Explicit HUD Check inputs sent through the production Direct TBT formatter. */
 final class HudCheckLiveScenario {
-    static final int FIRST_EXTENDED_INDEX = 34;
+    static final int FIRST_EXTENDED_INDEX = 32;
 
     private static final List<HudCheckLiveScenario> SCENARIOS = Collections.unmodifiableList(Arrays.asList(
             straight("neutral-before-right"),

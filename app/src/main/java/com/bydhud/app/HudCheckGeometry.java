@@ -20,7 +20,8 @@ final class HudCheckGeometry {
             "[[121.47832416666667,31.228410277777776,0],[121.47840472222222,31.228449722222223,0],[121.47820413231142,31.228749265761152,0],[121.47787185805525,31.228586565952945,0],[121.47763615838211,31.228471154388853,0],[121.47690766450096,31.228114443591853,0],[121.47626626335975,31.227800378205455,0]]"
     };
     private HudCheckGeometry() { }
-    static String line(int extendedIndex) { return LINES[extendedIndex - 25]; }
+    static final int FIRST_EXTENDED_INDEX = 23;
+    static String line(int extendedIndex) { return LINES[extendedIndex - FIRST_EXTENDED_INDEX]; }
     static double heading(int extendedIndex) { return HEADING; }
     static String display(int extendedIndex) {
         String line = line(extendedIndex);

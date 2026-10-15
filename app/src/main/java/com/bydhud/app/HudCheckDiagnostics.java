@@ -13,26 +13,28 @@ final class HudCheckDiagnostics {
         String line = "hud_check case=" + sampleKey(sample) + " plane=" + channel
                 + " result=" + (result > 0 ? "sent" : result < 0 ? "unavailable-or-error" : "waiting")
                 + " reason=" + token(reason);
-        if (sample.legacyBasic) {
-            HudState state = sample.toHudState();
-            line += " format=no-png f2=2 f6=6 maneuver=" + state.maneuverId
-                    + " distance_m=" + state.distanceToIntersection
-                    + " f8=omitted png_source=none"
-                    + " f19=0 f20=0 f30=empty f31=empty f32=0";
-        }
         if (sample.isLiveCheck()) {
             DirectTbtFrame frame = sample.liveFrame();
             HudManeuverGeometry.Selection geometry = sample.liveGeometry();
-            int pngSource = sample.mode == HudCheckState.Mode.BASIC && !sample.maneuverBitmap
-                    ? HudState.TURN_BITMAP_BLANK_SOURCE_ID : sample.toHudState().turnBitmapId;
-            line += " maneuver=" + frame.getBydManeuver()
+            boolean bitmap = sample.maneuverBitmap;
+            boolean current = !sample.legacyBasic;
+            String pngSource = bitmap ? Integer.toString(sample.toHudState().turnBitmapId)
+                    : current ? Integer.toString(HudState.TURN_BITMAP_BLANK_SOURCE_ID) : "none";
+            line += " format=" + (current ? "current" : "no-png")
+                    + " maneuver=" + frame.getBydManeuver()
+                    + " f28=" + (bitmap && !current ? "omitted" : frame.getBydManeuver())
+                    + " f8=" + (bitmap ? "png" : current ? "blank_s72" : "omitted")
                     + " distance_m=" + frame.getDistanceMeters()
                     + " amap=" + frame.getAmapManeuver()
                     + " tbt_broadcast=" + frame.getAmapBroadcastManeuver()
                     + " png_source=" + pngSource
-                    + " geometry=" + geometry.name + " source=HUD_CHECK"
-                    + " f19=" + geometry.longitude + " f20=" + geometry.latitude
-                    + " f32=" + geometry.heading;
+                    + " baseline_geometry=" + geometry.name + " source=HUD_CHECK"
+                    + " baseline_f19=" + geometry.longitude + " baseline_f20=" + geometry.latitude
+                    + " baseline_f32=" + geometry.heading;
+            if (sample.mode == HudCheckState.Mode.EXTENDED) {
+                line += " stage_fields=" + token(sample.extendedField())
+                        + " stage_value=" + token(sample.extendedValue());
+            }
             if (frame.getRoundaboutExit().hasDirection()) {
                 line += " " + frame.getRoundaboutExit().diagnostics();
             }
@@ -47,13 +49,9 @@ final class HudCheckDiagnostics {
 
     static String sampleKey(HudCheckState sample) {
         if (sample == null) return "none";
-        if (sample.mode == HudCheckState.Mode.EXTENDED) {
-            if (sample.isLivePipelineCheck()) {
-                return "extended-" + (sample.extendedIndex + 1) + "-" + sample.liveScenarioKey();
-            }
-            return "extended-" + (sample.extendedIndex + 1);
-        }
-        return (sample.legacyBasic ? "basic-no-png-m" : "basic-m")
+        String stage = sample.mode == HudCheckState.Mode.EXTENDED
+                ? "extended-" + (sample.extendedIndex + 1) + "-" : "";
+        return stage + (sample.legacyBasic ? "basic-no-png-m" : "basic-m")
                 + sample.maneuverIndex + "-l" + sample.laneIndex
                 + "-d" + sample.distanceIndex + "-s" + sample.streetIndex
                 + "-t" + sample.trafficLightIndex + "-mb" + sample.maneuverBitmap

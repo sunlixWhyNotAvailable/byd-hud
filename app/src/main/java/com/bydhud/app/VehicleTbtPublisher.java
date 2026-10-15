@@ -398,9 +398,8 @@ final class VehicleTbtPublisher {
             HudState state, String reason) {
         if (state == null || !routeActive || !matches(packageName, generation)) return;
         if (state.hudCheck != null && !hudCheckProfileActive) {
-            hudCheckManeuverCompatibilityProfile = state.hudCheck.legacyBasic
-                    ? ManeuverCompatibilityProfile.AMAP : ManeuverCompatibilityProfile.normalize(
-                            HudPrefs.maneuverCompatibilityProfile(context));
+            hudCheckManeuverCompatibilityProfile = ManeuverCompatibilityProfile.normalize(
+                    HudPrefs.maneuverCompatibilityProfile(context));
             hudCheckProfileActive = true;
             lastManeuverMappingLogKey = "";
             log("tbt_maneuver_profile profile="
@@ -412,7 +411,7 @@ final class VehicleTbtPublisher {
         }
         latestHudCheck = state.hudCheck;
         if (state.hudCheck != null) {
-            int lightIndex = state.hudCheck.mode == HudCheckState.Mode.BASIC
+            int lightIndex = state.hudCheck.isLiveCheck()
                     ? state.hudCheck.trafficLightIndex : -1;
             publishHudCheckLight(lightIndex, reason, false);
         }
@@ -1291,7 +1290,6 @@ final class VehicleTbtPublisher {
     private void sendAmapFrame(int amapIcon, int roundaboutExit, int distance,
             String road, DirectTbtFrame.TravelMetrics metrics, Trace trace,
             boolean deduplicate, NativeEtaSnapshot etaSnapshot) {
-        boolean legacyCheck = trace != null && trace.hudCheck != null && trace.hudCheck.legacyBasic;
         boolean amapOwnsNativeEta = etaSnapshot != null
                 && etaSnapshot.writer == NativeEtaTransportPolicy.Writer.AMAP;
         int routeDistance = amapOwnsNativeEta
@@ -1313,7 +1311,6 @@ final class VehicleTbtPublisher {
                 + "|maneuverProfile:" + (trace == null
                         ? ManeuverCompatibilityProfile.AMAP : trace.compatibilityProfile)
                 + "|etaMode:" + nativeEtaOutputMode
-                + "|legacyCheck:" + legacyCheck
                 + "|etaStrings:" + durationText + "|" + arrivalText
                 + (etaSnapshot == null ? "" : "|native:" + etaSnapshot.semanticKey
                         + "|writer:" + etaSnapshot.writer);
@@ -1338,16 +1335,12 @@ final class VehicleTbtPublisher {
         intent.putExtra("NEXT_ROAD_NAME", nextRoad);
         intent.putExtra("ROUTE_REMAIN_DIS", routeDistance);
         intent.putExtra("ROUTE_REMAIN_TIME", routeTime);
-        if (!legacyCheck) {
-            intent.putExtra("ROUTE_REMAIN_TIME_AUTO", durationText);
-            intent.putExtra("ETA_TEXT", arrivalText);
-        }
+        intent.putExtra("ROUTE_REMAIN_TIME_AUTO", durationText);
+        intent.putExtra("ETA_TEXT", arrivalText);
         byte[] arguments = amapBytes(10001, publishedIcon, publishedRoundaboutExit, distance,
                 nextRoad, routeDistance, routeTime);
-        if (!legacyCheck) {
-            arguments = appendBytes(arguments, nativeEtaAmapBytes(
-                    routeDistance, routeTime, durationText, arrivalText));
-        }
+        arguments = appendBytes(arguments, nativeEtaAmapBytes(
+                routeDistance, routeTime, durationText, arrivalText));
         if (sendAmap(intent, "frame", trace, arguments)) {
             hasLastAmapSemantic = true;
             lastAmapSemanticKey = semanticKey;

@@ -96,6 +96,19 @@ public final class DirectTbtPayload {
 
     private static Prepared prepare(DirectTbtFrame frame, Options options, boolean render,
             HudExperimentalCompositor compositor, long nowWallTimeMs) {
+        return prepare(frame, options, render, compositor, nowWallTimeMs, false, true, true);
+    }
+
+    /** Diagnostic channel selection leaves the remaining RoadInfo fields unchanged. */
+    static Prepared prepareDiagnostic(DirectTbtFrame frame, Options options,
+            boolean maneuverBitmap, boolean nativeManeuver) {
+        return prepare(frame, options, true, EXPERIMENTAL, System.currentTimeMillis(),
+                true, maneuverBitmap, nativeManeuver);
+    }
+
+    private static Prepared prepare(DirectTbtFrame frame, Options options, boolean render,
+            HudExperimentalCompositor compositor, long nowWallTimeMs,
+            boolean diagnostic, boolean maneuverBitmap, boolean nativeManeuverEnabled) {
         DirectTbtFrame safeFrame = frame == null ? DirectTbtFrame.empty() : frame;
         Options safeOptions = options == null ? Options.ALL : options;
         DirectTbtFrame.AlertOverlay separateWarning = safeOptions.presentation.separateWarning()
@@ -107,7 +120,7 @@ public final class DirectTbtPayload {
                 ? safeFrame.getLanes() : Collections.emptyList();
         byte[] lanePng = safeOptions.lanes ? safeFrame.getLanePng() : new byte[0];
         byte[] navManeuverPng = safeFrame.getManeuverPng();
-        boolean blankLaneManeuver = !alert.isActive()
+        boolean blankLaneManeuver = !diagnostic && !alert.isActive()
                 && (lanePng.length > 0 || !lanes.isEmpty())
                 && navManeuverPng.length == 0;
         boolean destinationManeuver = !alert.isActive()
@@ -146,7 +159,7 @@ public final class DirectTbtPayload {
             displayText = metrics.street(displayText, safeOptions.presentation.streetFormat == 1);
         }
 
-        if (!safeOptions.png) maneuverPng = new byte[0];
+        if (!safeOptions.png || (diagnostic && !maneuverBitmap)) maneuverPng = new byte[0];
         if (!safeOptions.nativeManeuver) nativeManeuver = 0;
         if (!safeOptions.distance) distanceMeters = 0;
         int speedPlacement = speedPlacement(safeFrame, safeOptions);
@@ -199,7 +212,7 @@ public final class DirectTbtPayload {
             }
         }
         String maneuverMode = maneuverSpeedApplied ? "speed_limit"
-                : !safeOptions.png ? "disabled"
+                : !safeOptions.png || (diagnostic && !maneuverBitmap) ? "disabled"
                 : alert.isActive() ? "alert"
                 : blankLaneManeuver || blankDestinationManeuver ? "blank_s72"
                 : navManeuverPng.length > 0 ? "current" : "empty";
@@ -260,7 +273,8 @@ public final class DirectTbtPayload {
         if (!lanes.isEmpty()) writeVarintField(fields, 5, lanes.size());
         writeVarintField(fields, 6, lanePng.length > 0 || !lanes.isEmpty() ? 6 : 1);
         writeBytesField(fields, 7, lanePng);
-        writeBytesField(fields, 8, maneuverPng);
+        // Map/ETA/warning composition may still own f8 without a maneuver bitmap.
+        if (!diagnostic || maneuverPng.length > 0) writeBytesField(fields, 8, maneuverPng);
         writeVarintField(fields, 9, Math.max(0, distanceMeters));
         int displayTextStart = fields.size();
         writeStringField(fields, 10, displayText);
@@ -275,10 +289,13 @@ public final class DirectTbtPayload {
         if (safeOptions.etaOutputMode == HudPrefs.ETA_OUTPUT_NATIVE) {
             writeStringField(fields, 27, nativeFormatted.arrivalQualifier);
         }
-        writeVarintField(fields, 28, Math.max(0, nativeManeuver));
+        if (!diagnostic || nativeManeuverEnabled) {
+            writeVarintField(fields, 28, Math.max(0, nativeManeuver));
+        }
         if (!lanes.isEmpty()) writeStringField(fields, 29, laneText(lanes));
         geometry.writeTo(fields);
-        return new Prepared(fields.toByteArray(), maneuverMode, nativeManeuver,
+        return new Prepared(fields.toByteArray(), maneuverMode,
+                diagnostic && !nativeManeuverEnabled ? 0 : nativeManeuver,
                 distanceMeters, displayText, lanes.size(), lanePng.length,
                 maneuverPng, displayTextStart, displayTextEnd, hasStreetEta,
                 safeOptions.etaOutputMode == HudPrefs.ETA_OUTPUT_NATIVE
@@ -611,11 +628,12 @@ public final class DirectTbtPayload {
 
         String geometryDiagnostics() { return geometryDiagnostics; }
 
-        /** HUD Check resets optional probe fields before the actual live fields override them. */
-        Prepared withHudCheckBaseline(byte[] baseline) {
-            byte[] combined = new byte[baseline.length + fields.length];
+        /** Reset old probes, preserve Basic output, then apply only the selected stage fields. */
+        Prepared withHudCheckBaseline(byte[] baseline, byte[] overrides) {
+            byte[] combined = new byte[baseline.length + fields.length + overrides.length];
             System.arraycopy(baseline, 0, combined, 0, baseline.length);
             System.arraycopy(fields, 0, combined, baseline.length, fields.length);
+            System.arraycopy(overrides, 0, combined, baseline.length + fields.length, overrides.length);
             return new Prepared(combined, maneuverMode, nativeManeuver, distanceMeters,
                     displayText, laneCount, lanePngBytes, maneuverPngBytes, maneuverPngSha,
                     maneuverPngWidth, maneuverPngHeight,

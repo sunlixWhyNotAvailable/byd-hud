@@ -143,11 +143,11 @@ public class NativeRoadInfoTest {
         assertEquals("straight", DirectTbtPayload.describe(alerted, separate, NOW).geometry().name);
     }
 
-    @Test public void hudCheckTransitionsReachLiveInputsAndPreserveTheNativeCodeControl() {
+    @Test public void hudCheckTransitionsReachLiveInputsAndPreserveTheNativeCodeControl() throws Exception {
         HudCheckState state = new HudCheckState().selectMode(HudCheckState.Mode.EXTENDED)
-                .withAutomatic(false).stepExtended(33);
+                .withAutomatic(false).stepExtended(31);
         assertTrue(state.isGeometryCheck());
-        assertNull(state.liveFrame());
+        assertEquals(state.distance(), state.liveFrame().getDistanceMeters());
         state = state.stepExtended(1).withAutomatic(true).toggleRun();
         String controlLine = null;
         int[] controlCodes = {99, 11, 99};
@@ -172,7 +172,8 @@ public class NativeRoadInfoTest {
         }
         assertEquals(3, controlIndex);
         assertEquals(0, state.extendedIndex);
-        assertNull(state.liveFrame());
+        assertEquals(state.maneuverIndex, 0);
+        assertEquals(state.distance(), state.liveFrame().getDistanceMeters());
         assertEquals(state.stop(), state.stop().tick());
         HudCheckState basic = state.selectMode(HudCheckState.Mode.BASIC)
                 .step(HudCheckState.Field.MANEUVER, 8);
@@ -180,9 +181,27 @@ public class NativeRoadInfoTest {
         assertEquals(RoundaboutExit.Direction.RIGHT, basic.liveFrame().getRoundaboutExit().getDirection());
         assertEquals(2, basic.liveFrame().getRoundaboutExitNumber());
         assertEquals(basic.liveGeometry().line, basic.withManeuverBitmap(true).liveGeometry().line);
+
+        // Persisted selections must still restore the same geometry/scenario after removing two probes.
+        HudCheckState extended = basic.selectMode(HudCheckState.Mode.EXTENDED).withAutomatic(false);
+        for (int index = 0; index < HudCheckState.extendedCount(); index++) {
+            HudCheckState selected = extended.stepExtended(index);
+            assertEquals(selected, HudCheckState.restore(selected.checkpoint()));
+            org.json.JSONObject old = selected.checkpoint();
+            old.remove("extendedCount");
+            old.put("extended", index >= 23 ? index + 2 : index);
+            assertEquals(selected, HudCheckState.restore(old));
+        }
+        for (int removed : new int[] {23, 24}) {
+            org.json.JSONObject old = extended.checkpoint().put("extended", removed);
+            old.remove("extendedCount");
+            HudCheckState restored = HudCheckState.restore(old);
+            assertTrue(restored.isGeometryCheck());
+            assertEquals(HudCheckGeometry.line(23), HudCheckGeometry.line(restored.extendedIndex));
+        }
     }
 
-    @Test public void basicFormatSwitchStopsOutputWithoutLosingSelectionsOrLeakingIntoExtended() {
+    @Test public void basicFormatSwitchStopsOutputAndExtendedRetainsSelections() {
         HudCheckState current = new HudCheckState().step(HudCheckState.Field.MANEUVER, 8)
                 .withManeuverBitmap(true).toggleRun();
         assertFalse(current.legacyBasic);
@@ -191,49 +210,194 @@ public class NativeRoadInfoTest {
         assertFalse(legacy.running);
         assertEquals(current.maneuverIndex, legacy.maneuverIndex);
         assertTrue(legacy.maneuverBitmap);
-        assertFalse(legacy.isLiveCheck());
-        assertNull(legacy.liveFrame());
+        assertTrue(legacy.isLiveCheck());
+        assertEquals(current.liveFrame().getBydManeuver(), legacy.liveFrame().getBydManeuver());
+        assertEquals(current.liveGeometry().line, legacy.liveGeometry().line);
         assertFalse(HudOutputCoordinator.sameHudCheckPayload(current, legacy));
         assertTrue(legacy.toggleRun().legacyBasic);
         assertTrue(legacy.toggleRun().stop().legacyBasic);
         HudCheckState extended = legacy.selectMode(HudCheckState.Mode.EXTENDED);
-        assertFalse(extended.legacyBasic);
+        assertTrue(extended.legacyBasic);
         assertSame(extended, extended.selectBasicFormat(true));
+        assertEquals(legacy, extended.selectMode(HudCheckState.Mode.BASIC));
+        assertTrue(extended.stop().legacyBasic);
+        assertFalse(HudOutputCoordinator.sameHudCheckPayload(extended, extended.withManeuverBitmap(false)));
+        assertFalse(HudOutputCoordinator.sameHudCheckPayload(extended, extended.withLaneBitmap(true)));
         assertEquals(current.stop(), legacy.selectBasicFormat(false));
         assertEquals(99, legacy.selectBasicFormat(false).liveFrame().getBydManeuver());
     }
 
-    @Test public void noPngBasicOmitsImageFieldAndKeepsLegacyFieldsAndCompanionManeuvers() {
-        HudCheckState initial = new HudCheckState().selectBasicFormat(true);
-        // Images are explicit encoder inputs; Android rendering is not exercised here.
+    @Test public void noPngSwitchChangesOnlyManeuverFieldsAgainstUnchangedCurrent() {
+        // Real encoders consume image bytes; Android rasterization is outside this check.
         byte[] image = java.util.Base64.getDecoder().decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEakAAAAASUVORK5CYII=");
-        for (int[] sample : new int[][] {{0, 11, 9}, {1, 1, 2}, {2, 2, 3},
-                {5, 1, 2}, {6, 7, 6}, {7, 8, 7}, {8, 11, 9}}) {
-            HudCheckState state = initial.step(HudCheckState.Field.MANEUVER, sample[0]);
-            byte[] packet = HudCheckPayload.buildIsolatedRoadInfo(state, image, image);
-            Map<Integer, Object> fields = road(packet);
-            assertFalse(fields.containsKey(8));
-            assertArrayEquals(image, (byte[]) fields.get(7));
-            assertArrayEquals(packet, HudCheckPayload.buildIsolatedRoadInfo(
-                    state.withManeuverBitmap(true), image, image));
-            assertEquals(2L, fields.get(2));
-            assertEquals(6L, fields.get(6));
-            assertEquals((long) sample[1], fields.get(28));
-            assertEquals((long) state.distance(), fields.get(9));
-            assertEquals(state.effectiveStreet(), text(fields, 10));
-            assertGeometryCleared(fields);
-            HudState hud = state.toHudState();
-            VehicleTbtPublisher.ManualMapping mapping = VehicleTbtPublisher.manualMappingForTest(
-                    hud.turnBitmapId, hud.maneuverId);
-            assertEquals(sample[1], mapping.instrumentId);
-            assertEquals(sample[2], mapping.amapManeuver);
-            assertEquals(0, mapping.roundaboutExit);
+        for (int index = 0; index < 11; index++) {
+            HudCheckState current = new HudCheckState().step(HudCheckState.Field.MANEUVER, index);
+            HudCheckState comparison = current.selectBasicFormat(true);
+            byte[] controlPacket = HudCheckPayload.prepareLive(current, image, image).build(0);
+            Map<Integer, Object> control = road(controlPacket);
+            assertArrayEquals(image, (byte[]) control.get(8));
+            assertEquals((long) current.liveFrame().getBydManeuver(), control.get(28));
+            assertEquals(0L, control.get(2));
+            // With identical artwork input Current still writes both fields in either selection.
+            assertArrayEquals(controlPacket, HudCheckPayload.prepareLive(
+                    current.withManeuverBitmap(true), image, image).build(0));
+
+            Map<Integer, Object> nativeFields = road(HudCheckPayload.prepareLive(
+                    comparison, image, new byte[0]).build(0));
+            assertFalse(nativeFields.containsKey(8));
+            Map<Integer, Object> expectedNative = new HashMap<>(control);
+            expectedNative.remove(8);
+            assertFieldsEqual(expectedNative, nativeFields);
+
+            Map<Integer, Object> bitmapFields = road(HudCheckPayload.prepareLive(
+                    comparison.withManeuverBitmap(true), image, image).build(0));
+            assertFalse(bitmapFields.containsKey(28));
+            Map<Integer, Object> expectedBitmap = new HashMap<>(control);
+            expectedBitmap.remove(28);
+            assertFieldsEqual(expectedBitmap, bitmapFields);
+            assertEquals(current.toHudState().maneuverId, comparison.toHudState().maneuverId);
+            assertEquals(current.toHudState().turnBitmapId, comparison.toHudState().turnBitmapId);
+            assertEquals(current.liveFrame().getAmapBroadcastManeuver(),
+                    comparison.liveFrame().getAmapBroadcastManeuver());
+            assertEquals(current.liveFrame().getRoundaboutExitNumber(),
+                    comparison.liveFrame().getRoundaboutExitNumber());
         }
-        assertEquals(23, initial.step(HudCheckState.Field.MANEUVER, 8).toHudState().turnBitmapId);
-        Map<Integer, Object> extended = road(HudCheckPayload.buildIsolatedRoadInfo(
-                initial.selectMode(HudCheckState.Mode.EXTENDED), image, image));
-        assertArrayEquals(image, (byte[]) extended.get(8));
+    }
+
+    @Test public void extendedInheritsBasicPacketAndOverridesOnlySelectedStageFields() {
+        byte[] image = java.util.Base64.getDecoder().decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEakAAAAASUVORK5CYII=");
+        // Expected wire values of the existing scalar probes, independent of the encoder.
+        Object[][] probes = {
+                {26, "12:34"}, {3, 12345L, 4, 1200L, 27, "20 min"}, {3, 12345L}, {11, 60L},
+                {12, 25L, 13, 300L, 14, 120L, 15, 40L, 21, 25L}, {17, 1L, 18, 120L}, {23, 1L},
+                {24, "[{\"id\":\"diag\",\"lat\":31.2304,\"lon\":121.4737,\"name\":\"TEST\",\"type\":\"0101\"}]"},
+                {25, "121.4737,31.2304"}, {19, 121.4737d, 20, 31.2304d}, {22, 12L},
+                {30, "[[121.4737,31.2304,0],[121.4740,31.2307,0]]"},
+                {31, "121.4740,31.2307,0"}, {32, 90.0d}, {33, 0.42d}
+        };
+        for (boolean comparison : new boolean[] {false, true}) {
+            for (boolean bitmap : new boolean[] {false, true}) {
+                for (boolean laneBitmap : new boolean[] {false, true}) {
+                    HudCheckState basic = new HudCheckState().withAutomatic(false)
+                            .step(HudCheckState.Field.MANEUVER, 1).step(HudCheckState.Field.LANES, 1)
+                            .step(HudCheckState.Field.DISTANCE, 4).step(HudCheckState.Field.STREET, 1)
+                            .step(HudCheckState.Field.TRAFFIC_LIGHT, 1).withTransliterate(true)
+                            .selectBasicFormat(comparison).withManeuverBitmap(bitmap).withLaneBitmap(laneBitmap);
+                    byte[] lanes = laneBitmap ? image : new byte[0];
+                    byte[] maneuver = bitmap || !comparison ? image : new byte[0];
+                    Map<Integer, Object> baseline = road(HudCheckPayload.prepareLive(basic, lanes, maneuver).build(0));
+                    HudCheckState extended = basic.selectMode(HudCheckState.Mode.EXTENDED);
+                    for (int index = 0; index < HudCheckState.extendedCount(); index++) {
+                        HudCheckState sample = extended.stepExtended(index);
+                        assertEquals(index, sample.extendedIndex);
+                        assertEquals(basic.trafficLightIndex, sample.trafficLightIndex);
+                        assertEquals(basic.toHudState().laneString, sample.toHudState().laneString);
+                        assertEquals(basic.toHudState().roadName, sample.toHudState().roadName);
+                        Map<Integer, Object> fields = road(HudCheckPayload.prepareLive(sample, lanes, maneuver).build(0));
+                        assertEquals(!comparison || bitmap, fields.containsKey(8));
+                        assertEquals(!comparison || !bitmap, fields.containsKey(28));
+                        assertArrayEquals(lanes, (byte[]) fields.get(7));
+                        Map<Integer, Object> expected = new HashMap<>(baseline);
+                        if (index < probes.length) {
+                            Object[] values = probes[index];
+                            for (int entry = 0; entry < values.length; entry += 2) {
+                                Object value = values[entry + 1];
+                                expected.put((Integer) values[entry], value instanceof String
+                                        ? ((String) value).getBytes(StandardCharsets.UTF_8) : value);
+                            }
+                        } else if (sample.isGeometryCheck()) {
+                            assertEquals(HudCheckGeometry.line(index), text(fields, 30));
+                            assertEquals(HudCheckGeometry.LONGITUDE, fields.get(19));
+                            assertEquals(HudCheckGeometry.LATITUDE, fields.get(20));
+                            assertEquals(HudCheckGeometry.heading(index), fields.get(32));
+                            for (int field : new int[] {19, 20, 30, 32}) {
+                                expected.remove(field);
+                                fields.remove(field);
+                            }
+                        } else if (sample.isLivePipelineCheck()) {
+                            assertEquals((long) sample.liveFrame().getDistanceMeters(), fields.get(9));
+                            if (fields.containsKey(28)) assertEquals((long) sample.liveFrame().getBydManeuver(), fields.get(28));
+                            assertEquals(sample.liveGeometry().line, text(fields, 30));
+                            for (int field : new int[] {9, 28, 19, 20, 30, 31, 32}) {
+                                expected.remove(field);
+                                fields.remove(field);
+                            }
+                        }
+                        assertFieldsEqual(expected, fields);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test public void bitmapToNativeClearTargetsOnlyTheOldImageAndIgnoresNativeStageChanges() {
+        HudCheckState bitmap = new HudCheckState().selectBasicFormat(true)
+                .withAutomatic(false).withManeuverBitmap(true);
+        HudCheckState nativeState = bitmap.withManeuverBitmap(false);
+        assertFalse(HudCheckPayload.needsManeuverClear(null, nativeState));
+        assertTrue(HudCheckPayload.needsManeuverClear(bitmap, nativeState));
+        assertTrue(HudCheckPayload.needsManeuverClear(bitmap,
+                nativeState.selectMode(HudCheckState.Mode.EXTENDED)));
+        assertFalse(HudCheckPayload.needsManeuverClear(nativeState, nativeState));
+        assertFalse(HudCheckPayload.needsManeuverClear(nativeState,
+                nativeState.step(HudCheckState.Field.MANEUVER, 1)));
+        assertFalse(HudCheckPayload.needsManeuverClear(nativeState,
+                nativeState.selectMode(HudCheckState.Mode.EXTENDED).stepExtended(23)));
+        assertFalse(HudCheckPayload.needsManeuverClear(bitmap,
+                bitmap.selectMode(HudCheckState.Mode.EXTENDED)));
+        assertFalse(HudCheckPayload.needsManeuverClear(nativeState, bitmap));
+        assertFalse(HudCheckPayload.needsManeuverClear(bitmap, nativeState.selectBasicFormat(false)));
+
+        // Encoder input only: Android PNG rendering and transport acknowledgements are not simulated.
+        byte[] blank = java.util.Base64.getDecoder().decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEakAAAAASUVORK5CYII=");
+        assertThrows(IllegalArgumentException.class, () -> HudCheckPayload.buildManeuverClear(
+                nativeState, new byte[0], new byte[0]));
+        for (HudCheckState selected : new HudCheckState[] {nativeState,
+                nativeState.selectMode(HudCheckState.Mode.EXTENDED).stepExtended(23)}) {
+            Map<Integer, Object> clear = road(HudCheckPayload.buildManeuverClear(selected, blank, blank));
+            assertArrayEquals(blank, (byte[]) clear.remove(8));
+            Map<Integer, Object> nativePacket = road(HudCheckPayload.prepareLive(
+                    selected, blank, new byte[0]).build(0));
+            assertFalse(nativePacket.containsKey(8));
+            assertEquals((long) selected.liveFrame().getBydManeuver(), nativePacket.get(28));
+            assertFieldsEqual(nativePacket, clear);
+        }
+    }
+
+    @Test public void mapLiveChannelSelectionOmitsDisabledFieldsWithoutChangingTheRest() {
+        byte[] image = java.util.Base64.getDecoder().decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEakAAAAASUVORK5CYII=");
+        DirectTbtFrame input = navigation(3, 2).withManeuverPng(image);
+        for (boolean png : new boolean[] {false, true}) {
+            for (boolean nativeCode : new boolean[] {false, true}) {
+                DirectTbtPayload.Options options = new DirectTbtPayload.Options(
+                        png, nativeCode, true, true, true);
+                Map<Integer, Object> previous = road(DirectTbtPayload.prepare(input, options).build(0));
+                Map<Integer, Object> selected = road(DirectTbtPayload.prepareDiagnostic(
+                        input, options, png, nativeCode).build(0));
+                assertEquals(png, selected.containsKey(8));
+                assertEquals(nativeCode, selected.containsKey(28));
+                if (png) assertArrayEquals(image, (byte[]) selected.get(8));
+                if (nativeCode) assertEquals(2L, selected.get(28));
+                previous.remove(8);
+                previous.remove(28);
+                selected.remove(8);
+                selected.remove(28);
+                assertFieldsEqual(previous, selected);
+            }
+        }
+    }
+
+    private static void assertFieldsEqual(Map<Integer, Object> expected, Map<Integer, Object> actual) {
+        assertEquals(expected.keySet(), actual.keySet());
+        for (int field : expected.keySet()) {
+            if (expected.get(field) instanceof byte[]) {
+                assertArrayEquals("field " + field, (byte[]) expected.get(field), (byte[]) actual.get(field));
+            } else assertEquals("field " + field, expected.get(field), actual.get(field));
+        }
     }
 
     private static DirectTbtFrame navigation(int amap, int nativeId) {

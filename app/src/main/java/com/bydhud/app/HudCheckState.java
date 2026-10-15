@@ -8,10 +8,8 @@ public final class HudCheckState {
 
     public enum Field { MANEUVER, LANES, DISTANCE, STREET, TRAFFIC_LIGHT }
 
-    private static final int EXTENDED_BASELINE_DISTANCE = 77;
-    private static final int LEGACY_GEOMETRY_FIRST_INDEX = 25;
+    private static final int LEGACY_GEOMETRY_FIRST_INDEX = HudCheckGeometry.FIRST_EXTENDED_INDEX;
     private static final int LEGACY_GEOMETRY_END_INDEX = HudCheckLiveScenario.FIRST_EXTENDED_INDEX;
-    private static final String EXTENDED_BASELINE_STREET = "Continue straight";
     private static final String EXTENDED_BASELINE_LANES = "S* | S | S* | S | S*";
 
     private static final Maneuver[] MANEUVERS = {
@@ -73,7 +71,7 @@ public final class HudCheckState {
             new ExtendedSample("Points of interest", "Об’єкти на маршруті", "RoadInfo · f24", "[{name: TEST, type: 0101}]"),
             new ExtendedSample("Destination", "Місце призначення", "RoadInfo · f25", "121.4737, 31.2304"),
             new ExtendedSample("Position", "Положення", "RoadInfo · f19–20", "121.4737, 31.2304"),
-            new ExtendedSample("Road data", "Дані дороги", "RoadInfo · f5–6, f22", "5 · 6 · 12"),
+            new ExtendedSample("Road data", "Дані дороги", "RoadInfo · f22", "12"),
             new ExtendedSample("Guide line", "Лінія маршруту", "RoadInfo · f30", "121.4737,31.2304 → 121.4740,31.2307"),
             new ExtendedSample("Guide point", "Точка маршруту", "RoadInfo · f31", "121.4740,31.2307,0"),
             new ExtendedSample("Heading", "Курс", "RoadInfo · f32", "90°"),
@@ -86,12 +84,6 @@ public final class HudCheckState {
             new ExtendedSample("Camera guidance", "Підказка про камеру", "Matrix · navigation action / camera", "11 · 77 m · 1 · 120 m"),
             new ExtendedSample("Route lanes", "Смуги маршруту", "RouteSession · lane data", EXTENDED_BASELINE_LANES),
             new ExtendedSample("Route traffic light", "Світлофор маршруту", "Matrix · traffic-light data", "direction=4 · state=4 · countdown=8"),
-            new ExtendedSample("Route segments", "Сегменти маршруту",
-                    "Statistic · f1, f5, f12–13",
-                    "markers=0xD619A0F8,0xE38A6876 · f12=5.0 · f13=2.2 · second marker-only"),
-            new ExtendedSample("Route summary", "Підсумок маршруту",
-                    "RouteMetadata · f1, f3–4",
-                    "routeId=1 · active=1 · f4=epoch ms × 1000"),
             new ExtendedSample("Straight", "Прямо", "RoadInfo · f30", ""),
             new ExtendedSample("Slight left", "Плавно ліворуч", "RoadInfo · f30", ""),
             new ExtendedSample("Slight right", "Плавно праворуч", "RoadInfo · f30", ""),
@@ -115,7 +107,7 @@ public final class HudCheckState {
     public final boolean laneBitmap;
     public final boolean transliterate;
     public final int extendedIndex;
-    // Retained checkpoint key: the historical Basic format now runs as No PNG.
+    // Retained checkpoint key for the separate maneuver-channel comparison.
     public final boolean legacyBasic;
 
     public HudCheckState() {
@@ -139,7 +131,7 @@ public final class HudCheckState {
         this.laneBitmap = laneBitmap;
         this.transliterate = transliterate;
         this.extendedIndex = wrap(extendedIndex, extendedCount());
-        this.legacyBasic = this.mode == Mode.BASIC && legacyBasic;
+        this.legacyBasic = legacyBasic;
     }
 
     public HudCheckState selectMode(Mode value) {
@@ -148,7 +140,7 @@ public final class HudCheckState {
                 ? this
                 : new HudCheckState(selected, false, automatic, maneuverIndex, laneIndex,
                         distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
-                        laneBitmap, transliterate, extendedIndex, false);
+                        laneBitmap, transliterate, extendedIndex, legacyBasic);
     }
 
     public HudCheckState selectBasicFormat(boolean legacy) {
@@ -164,16 +156,21 @@ public final class HudCheckState {
                 .put("distance", distanceIndex).put("street", streetIndex).put("light", trafficLightIndex)
                 .put("maneuverBitmap", maneuverBitmap).put("laneBitmap", laneBitmap)
                 .put("transliterate", transliterate).put("extended", extendedIndex)
-                .put("legacyBasic", legacyBasic);
+                .put("legacyBasic", legacyBasic).put("extendedCount", extendedCount());
     }
 
     static HudCheckState restore(org.json.JSONObject state) {
+        int extended = state.optInt("extended");
+        // Older checkpoints include the removed segment/summary probes at indices 23 and 24.
+        if (state.optInt("extendedCount", 54) == 54 && extended >= 23) {
+            extended = Math.max(23, extended - 2);
+        }
         return new HudCheckState(Mode.valueOf(state.optString("mode", "BASIC")),
                 state.optBoolean("running"), state.optBoolean("automatic", true),
                 state.optInt("maneuver"), state.optInt("lane"), state.optInt("distance"),
                 state.optInt("street"), state.optInt("light"), state.optBoolean("maneuverBitmap"),
-                state.optBoolean("laneBitmap"), state.optBoolean("transliterate"), state.optInt("extended"),
-                state.optBoolean("running") && state.optBoolean("legacyBasic"));
+                state.optBoolean("laneBitmap"), state.optBoolean("transliterate"), extended,
+                state.optBoolean("legacyBasic"));
     }
 
     public HudCheckState toggleRun() {
@@ -302,20 +299,17 @@ public final class HudCheckState {
         return mode == Mode.EXTENDED && liveScenario() != null;
     }
 
-    /** Current Basic and appended live cases share the production Direct TBT input model. */
+    /** Extended adds its selected probe to the same Basic input and channel choices. */
     public boolean isLiveCheck() {
-        return (mode == Mode.BASIC && !legacyBasic) || isLivePipelineCheck();
+        return mode == Mode.BASIC || mode == Mode.EXTENDED;
     }
 
-    /** Returns null for No PNG Basic, isolated Extended cases and Shanghai. */
+    /** Shanghai owns its stock navigator input separately. */
     public DirectTbtFrame liveFrame() {
-        if (legacyBasic) return null;
-        if (mode == Mode.BASIC) {
-            Maneuver maneuver = MANEUVERS[maneuverIndex];
-            return maneuver.frame(distance(), effectiveStreet());
-        }
+        if (!isLiveCheck()) return null;
         HudCheckLiveScenario live = liveScenario();
-        return live == null ? null : live.frame();
+        return live == null ? MANEUVERS[maneuverIndex].frame(distance(), effectiveStreet())
+                : live.frame().withNavigationText(effectiveStreet(), "");
     }
 
     HudManeuverGeometry.Selection liveGeometry() {
@@ -372,24 +366,18 @@ public final class HudCheckState {
     public HudState toHudState() {
         HudState state = new HudState();
         HudCheckLiveScenario live = liveScenario();
-        boolean baseline = mode == Mode.EXTENDED && live == null;
-        Maneuver maneuver = baseline ? MANEUVERS[0] : MANEUVERS[maneuverIndex];
-        String laneText = baseline || live != null ? EXTENDED_BASELINE_LANES : lanes();
-        int meters = live != null ? live.distanceMeters
-                : isGeometryCheck() ? 9 : baseline ? EXTENDED_BASELINE_DISTANCE : distance();
-        String street = baseline || live != null ? EXTENDED_BASELINE_STREET : effectiveStreet();
+        Maneuver maneuver = MANEUVERS[maneuverIndex];
+        String laneText = lanes();
+        int meters = live != null ? live.distanceMeters : distance();
+        String street = effectiveStreet();
 
         state.hudCheck = this;
         state.distanceToIntersection = meters;
         state.maneuverId = live == null ? maneuver.nativeId : live.nativeManeuver;
         // Keep the semantic source ID available to manual mapping even when
-        // Stock suppresses artwork. HudCheckPayload selects blank S72 for f8
+        // the selected channel omits artwork. HudCheckPayload selects the channel
         // independently; source identity must not be lost with the PNG.
         state.turnBitmapId = live == null ? maneuver.pngId : live.bitmapId;
-        if (legacyBasic && maneuverIndex == 8) {
-            state.maneuverId = 11;
-            state.turnBitmapId = 23;
-        }
         state.turnBitmapMode = HudState.TURN_BITMAP_OEM;
         state.navigationStatus = 2;
         state.crossStatus = 2;
@@ -404,7 +392,7 @@ public final class HudCheckState {
         state.guidePoint = "";
         state.navigationRatio = 0.0d;
         state.includeNativeArrow = true;
-        state.includeLaneBitmap = mode == Mode.BASIC && laneBitmap;
+        state.includeLaneBitmap = laneBitmap;
         state.turnBitmapHiddenLocked = false;
         return state;
     }

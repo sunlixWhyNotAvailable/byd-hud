@@ -527,7 +527,6 @@ private data class Copy(
     val extendedOutputHint: String,
     val checkManeuvers: String,
     val checkManeuversHint: String,
-    val checkManeuversChannels: String,
     val checkLanes: String,
     val checkLanesHint: String,
     val distanceMeters: String,
@@ -7835,7 +7834,7 @@ private fun HudCheckTab(
             } else localizeHudCheckLabel(state.extendedLabel(ukrainian), language)
             val liveFrameForBaseline = if (livePipeline) state.liveFrame() else null
             val liveExitForBaseline = liveFrameForBaseline?.roundaboutExit
-            val baselineManeuverLabel = if (!livePipeline) language.choose("Прямо", "Straight", "Прямо") else when {
+            val baselineManeuverLabel = if (!livePipeline) localizeHudCheckLabel(state.maneuverLabel(ukrainian), language) else when {
                 liveExitForBaseline != null && liveExitForBaseline.hasDirection() -> {
                     val direction = when (liveExitForBaseline.direction.name) {
                         "LEFT" -> language.choose("ліворуч", "left", "налево")
@@ -7849,10 +7848,16 @@ private fun HudCheckTab(
                 liveFrameForBaseline?.amapManeuver == 3 -> language.choose("Праворуч", "Right", "Направо")
                 else -> language.choose("Прямо", "Straight", "Прямо")
             }
-            val nativeWord = language.choose("штатний", "native", "штатный")
-            val sourcePngId = if (livePipeline) extendedHud.turnBitmapId
-                else HudState.TURN_BITMAP_BLANK_SOURCE_ID
-            val baselineManeuver = "$baselineManeuverLabel · ${copy.stockImage} PNG $sourcePngId · $nativeWord ${extendedHud.maneuverId}"
+            val maneuverChannel = if (state.maneuverBitmap) copy.bitmapImage else copy.stockImage
+            val pngSource = when {
+                state.maneuverBitmap -> "PNG ${extendedHud.turnBitmapId}"
+                !state.legacyBasic -> "PNG ${HudState.TURN_BITMAP_BLANK_SOURCE_ID}"
+                else -> "—"
+            }
+            val nativeCode = if (state.legacyBasic && state.maneuverBitmap) "—" else extendedHud.maneuverId.toString()
+            val baselineManeuver = "$baselineManeuverLabel · $maneuverChannel"
+            val inheritedFormat = if (state.legacyBasic) language.choose("Без PNG", "No PNG", "Без PNG")
+                else language.choose("Поточний", "Current", "Текущий")
             val geometryHeading = liveGeometry?.heading
                 ?: if (legacyGeometry) HudCheckGeometry.heading(state.extendedIndex) else 0.0
             val geometryName = liveGeometry?.name ?: "straight"
@@ -7874,27 +7879,26 @@ private fun HudCheckTab(
                     language.choose(" · виїзд $direction", " · exit $direction", " · съезд $direction")
                 } else ""
                 language.choose(
-                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: ${frame?.bydManeuver ?: extendedHud.maneuverId} · f31: [] · f32: ${liveGeometry.heading}° · геометрія: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · піктограма TBT: ${frame?.amapBroadcastManeuver} · PNG ID: ${extendedHud.turnBitmapId} · джерело HUD_CHECK$exitLabel",
-                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: ${frame?.bydManeuver ?: extendedHud.maneuverId} · f31: [] · f32: ${liveGeometry.heading}° · geometry: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · TBT broadcast icon: ${frame?.amapBroadcastManeuver} · PNG ID: ${extendedHud.turnBitmapId} · source HUD_CHECK$exitLabel",
-                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: ${frame?.bydManeuver ?: extendedHud.maneuverId} · f31: [] · f32: ${liveGeometry.heading}° · геометрия: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · значок TBT: ${frame?.amapBroadcastManeuver} · PNG ID: ${extendedHud.turnBitmapId} · источник HUD_CHECK$exitLabel"
+                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: $nativeCode · f31: [] · f32: ${liveGeometry.heading}° · геометрія: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · піктограма TBT: ${frame?.amapBroadcastManeuver} · f8: $pngSource · джерело HUD_CHECK$exitLabel",
+                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: $nativeCode · f31: [] · f32: ${liveGeometry.heading}° · geometry: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · TBT broadcast icon: ${frame?.amapBroadcastManeuver} · f8: $pngSource · source HUD_CHECK$exitLabel",
+                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: $nativeCode · f31: [] · f32: ${liveGeometry.heading}° · геометрия: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · значок TBT: ${frame?.amapBroadcastManeuver} · f8: $pngSource · источник HUD_CHECK$exitLabel"
                 )
             } else if (legacyGeometry) {
                 language.choose(
-                    "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: ${extendedHud.maneuverId} · f31: [] · f32: $geometryHeading°",
-                    "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: ${extendedHud.maneuverId} · f31: [] · f32: $geometryHeading°",
-                    "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: ${extendedHud.maneuverId} · f31: [] · f32: $geometryHeading°"
+                    "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: $nativeCode · f8: $pngSource · f31: [] · f32: $geometryHeading°",
+                    "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: $nativeCode · f8: $pngSource · f31: [] · f32: $geometryHeading°",
+                    "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: $nativeCode · f8: $pngSource · f31: [] · f32: $geometryHeading°"
                 )
             } else ""
             item(key = "hud-check-baseline") {
-                Section(copy.checkBaseline, palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
+                Section("${copy.checkBaseline} · $inheritedFormat", palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
                     val baseline = listOf(
-                        "${copy.checkManeuvers} · ${copy.checkManeuversChannels}" to
+                        copy.checkManeuvers to
                             baselineManeuver,
-                        copy.checkLanes to "S* | S | S* | S | S* · ${copy.stockImage}",
+                        copy.checkLanes to "${state.lanes()} · ${if (state.laneBitmap) copy.bitmapImage else copy.stockImage}",
                         copy.distanceMeters to extendedHud.distanceToIntersection.toString(),
-                        copy.streetText to if (livePipeline) language.choose(
-                            "Продовжуйте прямо", "Continue straight", "Продолжайте прямо"
-                        ) else "Continue straight"
+                        copy.streetText to extendedHud.roadName,
+                        copy.checkTrafficLight to localizeHudCheckLabel(state.trafficLightLabel(ukrainian), language)
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
                         baseline.forEach { (title, value) ->
@@ -11152,7 +11156,6 @@ private fun enCopy() = Copy(
     extendedOutputHint = "Constant basic packet · automatic or manual cycle",
     checkManeuvers = "Maneuvers",
     checkManeuversHint = "PNG and native follow the same maneuver",
-    checkManeuversChannels = "OEM + native",
     checkLanes = "Lanes",
     checkLanesHint = "Recommended and combined lane directions",
     distanceMeters = "Distance, m",
@@ -11398,7 +11401,6 @@ private fun uaCopy() = enCopy().copy(
     extendedOutputHint = "Постійний базовий пакет · цикл авто або ручний",
     checkManeuvers = "Маневри",
     checkManeuversHint = "PNG і native відповідають одному маневру",
-    checkManeuversChannels = "OEM + native",
     checkLanes = "Смуги",
     checkLanesHint = "Рекомендовані та суміщені напрямки",
     distanceMeters = "Дистанція, м",
@@ -11645,7 +11647,6 @@ private fun ruCopy() = enCopy().copy(
     extendedOutputHint = "Постоянный базовый пакет · автоматический или ручной цикл",
     checkManeuvers = "Манёвры",
     checkManeuversHint = "PNG и штатный вывод соответствуют одному манёвру",
-    checkManeuversChannels = "OEM + native",
     checkLanes = "Полосы",
     checkLanesHint = "Рекомендуемые и совмещённые направления",
     distanceMeters = "Дистанция, м",

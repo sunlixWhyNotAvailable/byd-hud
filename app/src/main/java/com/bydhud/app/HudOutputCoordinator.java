@@ -156,6 +156,7 @@ final class HudOutputCoordinator {
     private long lastMapLivePublishSession;
     private boolean mapLivePublishScheduled;
     private HudCheckState preparedHudCheck;
+    private HudCheckState lastSentHudCheck;
     private byte[] preparedHudCheckPayload;
     private List<HudCheckPayload.Packet> hudCheckPackets = Collections.emptyList();
     private final Set<Long> hudCheckReadyServices = new LinkedHashSet<>();
@@ -1193,6 +1194,21 @@ final class HudOutputCoordinator {
                 directAlertClearPending = false;
             }
             byte[] payload = buildPayload(source);
+            HudCheckState hudCheck = source == Source.MANUAL && manualMapLiveSession == 0L
+                    && manualState != null ? manualState.hudCheck : null;
+            if (HudCheckPayload.needsManeuverClear(lastSentHudCheck, hudCheck)) {
+                byte[] clear = HudCheckPayload.buildManeuverClear(context, hudCheck);
+                int clearResult = sendPayload(source, channelFor(source),
+                        "maneuver_bitmap_clear", reason, clear, clear);
+                log("hud_check maneuver_bitmap_clear case=" + HudCheckDiagnostics.sampleKey(hudCheck)
+                        + " f8=blank_s72 result=" + clearResult);
+                if (!isPayloadSuccessResult(clearResult)) {
+                    handleProtocolResult("maneuver-bitmap-clear", clearResult);
+                    return;
+                }
+                // A successful clear is not repeated if the following native send needs a retry.
+                lastSentHudCheck = null;
+            }
             byte[] semanticPayload = source == Source.DIRECT
                     ? preparedDirectSemanticPayload : payload;
             int result = sendPayload(source, channelFor(source), "payload", reason,
@@ -1209,6 +1225,7 @@ final class HudOutputCoordinator {
                 return;
             }
             recordPayloadSuccess();
+            lastSentHudCheck = hudCheck;
             publishNativeMap(reason);
             if (source == Source.MANUAL && manualMapLiveSession != 0L) {
                 nativeSpeed.refreshMapLive(manualMapLiveSession,
@@ -1515,7 +1532,8 @@ final class HudOutputCoordinator {
                     .withMapPng(mapProfileCalibrationSession == manualMapLiveSession
                             && HudPrefs.mapSettings(context).mode == HudMapSettings.EXPERIMENTAL
                             ? navigatorMapPng : null);
-            DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(manualMapLiveFrame, options);
+            DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepareDiagnostic(
+                    manualMapLiveFrame, options, options.png, options.nativeManeuver);
             logManeuverGeometry("map-live", manualMapLiveSession, prepared);
             return prepared.build(0);
         }
@@ -1528,7 +1546,7 @@ final class HudOutputCoordinator {
                 if (preparedHudCheck.isLiveCheck()) {
                     DirectTbtPayload.Prepared prepared = HudCheckPayload.prepareLive(context, preparedHudCheck);
                     preparedHudCheckPayload = prepared.build(0);
-                    logManeuverGeometry("hud-check:" + preparedHudCheck.liveScenarioKey(), generation, prepared);
+                    logManeuverGeometry("hud-check-baseline:" + preparedHudCheck.liveScenarioKey(), generation, prepared);
                 } else {
                     preparedHudCheckPayload = HudCheckPayload.buildRoadInfo(context, preparedHudCheck);
                 }
@@ -1569,10 +1587,8 @@ final class HudOutputCoordinator {
 
     static boolean sameHudCheckPayload(HudCheckState first, HudCheckState second) {
         if (first == null || second == null || first.mode != second.mode) return false;
-        if (first.mode == HudCheckState.Mode.EXTENDED) {
-            return first.extendedIndex == second.extendedIndex;
-        }
-        return first.legacyBasic == second.legacyBasic
+        return (first.mode != HudCheckState.Mode.EXTENDED || first.extendedIndex == second.extendedIndex)
+                && first.legacyBasic == second.legacyBasic
                 && first.maneuverIndex == second.maneuverIndex
                 && first.laneIndex == second.laneIndex
                 && first.distanceIndex == second.distanceIndex
@@ -1998,6 +2014,7 @@ final class HudOutputCoordinator {
             return false;
         }
         recordPayloadSuccess();
+        lastSentHudCheck = null;
         return true;
     }
 
@@ -2013,6 +2030,7 @@ final class HudOutputCoordinator {
             long completedAtMs = SystemClock.elapsedRealtime();
             logAsync("clear result=" + result + " reason=" + reason);
             maneuverGeometryDiagnostic = "";
+            if (isPayloadSuccessResult(result)) lastSentHudCheck = null;
             return result == 0 ? completedAtMs : -1L;
         } catch (RemoteException | RuntimeException e) {
             logAsync("clear failed reason=" + reason + " error=" + safe(e.getMessage()));
