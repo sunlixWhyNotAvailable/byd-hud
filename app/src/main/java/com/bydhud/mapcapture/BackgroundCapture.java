@@ -190,7 +190,70 @@ public final class BackgroundCapture {
         if (target == null) releaseFollowing(null,"no_offscreen_target");
     }
 
+
+    static void captureWaze(android.os.Bundle request) {
+        MAIN.post(() -> {
+            try {
+                if (!active()) { CaptureBridge.wazeUnavailable(request, "capture_inactive"); return; }
+                Target t = target;
+                if (t != null && isWaze(t)) {
+                    CaptureBridge.wazeSurfaceFrame(request, t.frameSource, t.surface, t.width, t.height,
+                            () -> active() && target == t && !t.yielding);
+                    return;
+                }
+                Object view = waze.get();
+                if (!wazeStopped && view instanceof SurfaceView && ((View)view).isAttachedToWindow()) {
+                    SurfaceView visible = (SurfaceView)view;
+                    Surface surface = visible.getHolder().getSurface();
+                    Object manager = get(view, WVIEW, "b");
+                    if (manager != null && surface.isValid()) {
+                        Object renderer = get(manager, null, "a");
+                        CaptureBridge.wazeSurfaceFrame(request, renderer, surface,
+                                visible.getWidth(), visible.getHeight(),
+                                () -> active() && waze.get() == view && !wazeStopped
+                                        && visible.getHolder().getSurface() == surface
+                                        && sameManager(view, WVIEW, "b", manager));
+                        return;
+                    }
+                }
+                for (int i = cars.size() - 1; i >= 0; i--) {
+                    Object owner = cars.get(i).get();
+                    if (owner == null) continue;
+                    Object holder = get(owner, null, "a"), container = get(holder, null, "c");
+                    if (container == null) continue;
+                    Surface surface = (Surface)call(container, "getSurface");
+                    Object carRenderer = get(owner, null, "k");
+                    Object presenter = carRenderer == null ? null : carPresenter(owner, carRenderer);
+                    Object manager = presenter == null ? null : get(presenter, "com.waze.car_lib.i.a.t", "f");
+                    if (manager == null || !surface.isValid()) continue;
+                    Object renderer = get(manager, null, "a");
+                    CaptureBridge.wazeSurfaceFrame(request, renderer, surface,
+                            (Integer)call(container, "getWidth"), (Integer)call(container, "getHeight"),
+                            () -> active() && sameManager(holder, null, "c", container)
+                                    && sameManager(presenter, "com.waze.car_lib.i.a.t", "f", manager)
+                                    && sameManager(owner, null, "k", carRenderer));
+                    return;
+                }
+                CaptureBridge.wazeUnavailable(request, "no_output_surface");
+            } catch (Throwable error) {
+                failure("surface_capture_select", error);
+                CaptureBridge.wazeUnavailable(request, "surface_selection_" + error.getClass().getSimpleName());
+            }
+        });
+    }
+    private static boolean sameManager(Object object, String owner, String field, Object expected) {
+        try { return get(object, owner, field) == expected; }
+        catch (Throwable ignored) { return false; }
+    }
+
     public static void wazeStopped(Object view) {
+        if (CaptureBridge.waze525()) {
+            Object current = waze.get();
+            if (current != null && current != view) {
+                event("waze_stopped_non_owner", view, "active=" + identity(current));
+                return;
+            }
+        }
         waze = new WeakReference<>(view); wazeStopped = true;
         event("waze_stopped", view, ""); drive();
     }
@@ -271,7 +334,7 @@ public final class BackgroundCapture {
         try {
             // Only the two inspected SurfaceView controllers have the supported ownership path.
             String type = view.getClass().getName();
-            if (!type.equals("com.waze.map.gt") && !type.equals("com.waze.map.gg")) return;
+            if (!type.equals((CaptureBridge.waze525() ? "com.waze.map.gp" : "com.waze.map.gt")) && !type.equals((CaptureBridge.waze525() ? "com.waze.map.ga" : "com.waze.map.gg"))) return;
             createReader(t);
             BYPASS.set(true);
             call(view, "k"); // Reuses the controller's retained renderer/map ID.
@@ -364,11 +427,21 @@ public final class BackgroundCapture {
         if (width > 0 && height > 0) carSizes.put(holder,new int[]{width,height});
     }
     public static void wazeRendererReady(Object view) {
-        try { registerWazeSource(get(view,WVIEW,"b"),"waze"); }
+        try {
+            Object manager = get(view,WVIEW,"b");
+            registerWazeSource(manager,"waze");
+            // Reattach can recreate the renderer without another lifecycle onStart.
+            if (CaptureBridge.waze525() && !BYPASS.get() && manager != null && waze.get() == null
+                    && view instanceof View && ((View)view).isAttachedToWindow()
+                    && Boolean.TRUE.equals(get(view,"com.waze.map.isolated.v","f"))) {
+                wazeStarted(view);
+                event("waze_reattached", view, "renderer_ready");
+            }
+        }
         catch (Throwable e) { failure("waze_source",e); }
     }
     public static void carRendererReady(Object presenter) {
-        try { registerWazeSource(get(presenter,"com.waze.car_lib.i.a.s","f"),"waze_surface"); }
+        try { registerWazeSource(get(presenter,(CaptureBridge.waze525() ? "com.waze.car_lib.i.a.t" : "com.waze.car_lib.i.a.s"),"f"),"waze_surface"); }
         catch (Throwable e) { failure("car_source",e); }
     }
     private static void registerWazeSource(Object manager, String mode) throws Exception {
@@ -385,8 +458,8 @@ public final class BackgroundCapture {
     }
     private static Object carPresenter(Object owner, Object renderer) throws Exception {
         String type=renderer.getClass().getName();
-        if (!type.equals("com.waze.car_lib.i.b.p") && !type.equals("com.waze.car_lib.i.b.q")) return null;
-        return get(get(owner,null,"b"),null,type.endsWith(".q") ? "b" : "a");
+        if (!type.equals((CaptureBridge.waze525() ? "com.waze.car_lib.i.b.m" : "com.waze.car_lib.i.b.p")) && !type.equals((CaptureBridge.waze525() ? "com.waze.car_lib.i.b.n" : "com.waze.car_lib.i.b.q"))) return null;
+        return get(get(owner,null,"b"),null,type.endsWith(CaptureBridge.waze525() ? ".n" : ".q") ? "b" : "a");
     }
     private static Surface carSurface(Object holder) throws Exception {
         Object container=get(holder,null,"c");
@@ -397,7 +470,7 @@ public final class BackgroundCapture {
             Object renderer=get(owner,null,"k"), holder=get(owner,null,"a");
             rememberCarSize(holder,get(holder,null,"c"));
             Object presenter=renderer==null ? null : carPresenter(owner,renderer);
-            Object manager=presenter==null ? null : get(presenter,"com.waze.car_lib.i.a.s","f");
+            Object manager=presenter==null ? null : get(presenter,(CaptureBridge.waze525() ? "com.waze.car_lib.i.a.t" : "com.waze.car_lib.i.a.s"),"f");
             Surface surface=carSurface(holder);
             boolean valid=surface!=null && surface.isValid(), resumed=(Boolean)get(owner,null,"d");
             status.append(identity(owner)).append(" holder=").append(identity(holder))
@@ -418,7 +491,7 @@ public final class BackgroundCapture {
             Object dimensions = call(get(t.surfaceOwner,null,"d"),"d");
             int width = (Integer)call(dimensions,"g"), height = (Integer)call(dimensions,"c");
             int[] size = CarCapturePolicy.size(width,height,carSizes.get(t.surfaceOwner));
-            t.driver = get(presenter,"com.waze.car_lib.i.a.s","f");
+            t.driver = get(presenter,(CaptureBridge.waze525() ? "com.waze.car_lib.i.a.t" : "com.waze.car_lib.i.a.s"),"f");
             String sizeSource="holder";
             if (size==null && t.driver!=null) {
                 android.util.Size current=(android.util.Size)get(t.driver,null,"i");
@@ -438,14 +511,14 @@ public final class BackgroundCapture {
             BYPASS.set(true);
             if (t.driver==null) {
                 t.ownsPresenter=true;
-                String[] names = {"com.waze.car_lib.screens.d","kotlinx.coroutines.b.bn",
-                        "com.waze.car_lib.i.a.h","com.waze.map.ed","com.waze.car_lib.i.a.f"};
+                String[] names = {(CaptureBridge.waze525() ? "com.waze.car_lib.r.cj" : "com.waze.car_lib.screens.d"),(CaptureBridge.waze525() ? "kotlinx.coroutines.b.bj" : "kotlinx.coroutines.b.bn"),
+                        "com.waze.car_lib.i.a.h",(CaptureBridge.waze525() ? "com.waze.map.ea" : "com.waze.map.ed"),"com.waze.car_lib.i.a.f"};
                 Class<?>[] types = new Class<?>[names.length];
                 for (int i=0;i<names.length;i++) types[i]=Class.forName(names[i],false,owner.getClass().getClassLoader());
                 call(presenters,"c",types,renderer,get(owner,null,"h"),t.surfaceOwner,get(owner,null,"g"),get(owner,null,"i"));
-                t.driver=get(presenter,"com.waze.car_lib.i.a.s","f");
+                t.driver=get(presenter,(CaptureBridge.waze525() ? "com.waze.car_lib.i.a.t" : "com.waze.car_lib.i.a.s"),"f");
             }
-            Thread executor = (Thread)get(presenter,"com.waze.car_lib.i.a.s","e");
+            Thread executor = (Thread)get(presenter,(CaptureBridge.waze525() ? "com.waze.car_lib.i.a.t" : "com.waze.car_lib.i.a.s"),"e");
             if (t.driver == null || executor == null || !executor.isAlive() || (Boolean)get(executor,null,"d")) {
                 if (t.driver != null) call(t.driver,"e");
                 throw new IllegalStateException("car_render_executor_stopped");

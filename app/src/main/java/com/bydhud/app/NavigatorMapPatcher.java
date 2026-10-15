@@ -88,7 +88,7 @@ public final class NavigatorMapPatcher {
             new HashSet<>(Arrays.asList("CaptureBridge", "BackgroundCapture", "CaptureLease",
                     "CapturePollPolicy", "CarCapturePolicy", "MapsFollowing",
                     "MapsNavigationCamera", "PixelMath", "CaptureReadbackBuffer",
-                    "LifecycleJournalBatch", "LifecycleJournalSpool", "WazeRenderScheduler", "WazeRenderPolicy")));
+                    "LifecycleJournalBatch", "LifecycleJournalSpool", "WazeRenderScheduler", "WazeRenderPolicy", "WazeSurfaceCopy")));
     private static final Set<String> REQUIRED_PAYLOAD_CLASSES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(BRIDGE, BACKGROUND,
                     "Lcom/bydhud/mapcapture/CaptureLease;",
@@ -166,7 +166,7 @@ public final class NavigatorMapPatcher {
         boolean scheduled;
     }
 
-    private static final class PatchPlan {
+    private final class PatchPlan {
         final String profile;
         final Map<String, Hook> lifecycle;
         final Map<String, Integer> anchorCounts = new TreeMap<>();
@@ -187,12 +187,23 @@ public final class NavigatorMapPatcher {
         }
     }
 
-    private NavigatorMapPatcher() {
+    private final boolean modernWaze;
+
+    private NavigatorMapPatcher(String profile, String version) {
+        modernWaze = "waze".equals(normalizeProfile(profile)) && "5.25.0.1".equals(version);
+    }
+
+    private String wazeType(String descriptor) {
+        if (!modernWaze) return descriptor;
+        return descriptor.replace("Lcom/waze/bj/", "Lcom/waze/bl/")
+                .replace("Lcom/waze/map/isolated/w;", "Lcom/waze/map/isolated/v;")
+                .replace("Lcom/waze/car_lib/i/a/s;", "Lcom/waze/car_lib/i/a/t;")
+                .replace("Lcom/waze/map/ed;", "Lcom/waze/map/ea;");
     }
 
     public static Inspection inspect(List<File> apks, String profile, String version) {
         try {
-            return inspectInternal(apks, profile, version);
+            return new NavigatorMapPatcher(profile, version).inspectInternal(apks, profile, version);
         } catch (UnsupportedPatchException error) {
             return result(UNSUPPORTED, message(error));
         } catch (IOException | RuntimeException error) {
@@ -202,6 +213,11 @@ public final class NavigatorMapPatcher {
 
     /** Writes a complete candidate set, preserving untouched APK members byte-for-byte. */
     public static Inspection patch(List<File> sourceApks, File outputDir, File payloadDex,
+            String profile, String version) {
+        return new NavigatorMapPatcher(profile, version).patchInternal(sourceApks, outputDir, payloadDex, profile, version);
+    }
+
+    private Inspection patchInternal(List<File> sourceApks, File outputDir, File payloadDex,
             String profile, String version) {
         try {
             String family = normalizeProfile(profile);
@@ -234,7 +250,8 @@ public final class NavigatorMapPatcher {
                 try {
                     Map<File, Map<String, File>> changes = new HashMap<>();
                     changes.computeIfAbsent(previous.apk.getCanonicalFile(), ignored -> new HashMap<>())
-                            .put(previous.name, payloadDex);
+                            .put(previous.name, upgradedPayload(previous.dex, payloadDex,
+                                    new File(staging, "payload.dex")));
                     if ("waze".equals(family)) for (DexUnit unit : source.targetDex) {
                         DexFile changed = renderExtension(unit.dex);
                         verifyDexMethodLimit(unit.dex, changed);
@@ -343,7 +360,7 @@ public final class NavigatorMapPatcher {
         }
     }
 
-    private static Inspection inspectInternal(List<File> apks, String profile, String version)
+    private Inspection inspectInternal(List<File> apks, String profile, String version)
             throws IOException {
         String family = normalizeProfile(profile);
         if (family == null) return result(UNSUPPORTED, "unsupported navigator profile");
@@ -354,7 +371,7 @@ public final class NavigatorMapPatcher {
         return inspectAnalysis(analysis, family, version);
     }
 
-    private static Inspection inspectAnalysis(Analysis analysis, String family, String version)
+    private Inspection inspectAnalysis(Analysis analysis, String family, String version)
             throws IOException {
         if (analysis.duplicateRelevantClass) {
             return result(UNSUPPORTED, "duplicate map-capture or target class across APK members");
@@ -396,13 +413,14 @@ public final class NavigatorMapPatcher {
         }
     }
 
-    private static boolean currentPayload(PayloadInfo payload, String family) {
+    private boolean currentPayload(PayloadInfo payload, String family) {
         return payload != null && payload.bridgeStrings.contains(REVISION)
                 && payload.bridgeStrings.contains("bydhud-map-v2:source-mode,output-edge,frame-timeout,lease")
-                && (!"waze".equals(family) || payload.bridgeStrings.contains("map-probe-r11-render-demand-hud-consumer-v1"));
+                && (!"waze".equals(family) || payload.bridgeStrings.contains("map-probe-r11-render-demand-hud-consumer-v1"))
+                && (!modernWaze || payload.bridgeStrings.contains("bydhud-waze525-embedded-v1"));
     }
 
-    private static Analysis analyze(List<File> apks, String family) throws IOException {
+    private Analysis analyze(List<File> apks, String family) throws IOException {
         if (apks == null || apks.isEmpty()) throw new UnsupportedPatchException("no APK members supplied");
         Analysis result = new Analysis();
         Set<String> canonicalFiles = new HashSet<>();
@@ -475,7 +493,7 @@ public final class NavigatorMapPatcher {
         return result;
     }
 
-    private static void collectCalls(DexUnit unit, String family, Analysis analysis) {
+    private void collectCalls(DexUnit unit, String family, Analysis analysis) {
         Set<String> allowed = targetOwners(family);
         for (ClassDef classDef : unit.dex.getClasses()) {
             for (Method method : classDef.getMethods()) {
@@ -504,7 +522,7 @@ public final class NavigatorMapPatcher {
         }
     }
 
-    private static void requireSupportedTargets(Analysis analysis, String family)
+    private void requireSupportedTargets(Analysis analysis, String family)
             throws UnsupportedPatchException {
         Set<String> required = targetOwners(family);
         if (!analysis.targetOwners.containsAll(required)) {
@@ -517,7 +535,7 @@ public final class NavigatorMapPatcher {
         }
     }
 
-    private static void verifyCaptured(Analysis analysis, String family)
+    private void verifyCaptured(Analysis analysis, String family)
             throws UnsupportedPatchException {
         requireSupportedTargets(analysis, family);
         if (analysis.hasAnyPayloadClass != analysis.hasAnyPayloadReference
@@ -557,7 +575,7 @@ public final class NavigatorMapPatcher {
         }
     }
 
-    private static void verifyHookPlacement(Analysis analysis, String family)
+    private void verifyHookPlacement(Analysis analysis, String family)
             throws UnsupportedPatchException {
         Map<String, Map<String, Integer>> expected = expectedCallsByAnchor(family);
         Map<String, Map<String, Integer>> actual = analysis.callsByTargetMethod;
@@ -939,7 +957,7 @@ public final class NavigatorMapPatcher {
         return -1;
     }
 
-    private static Map<String, Map<String, Integer>> expectedCallsByAnchor(String family) {
+    private Map<String, Map<String, Integer>> expectedCallsByAnchor(String family) {
         Map<String, Map<String, Integer>> result = new TreeMap<>();
         Map<String, Hook> hooks = lifecycle(family);
         for (Map.Entry<String, Hook> entry : hooks.entrySet()) {
@@ -974,18 +992,21 @@ public final class NavigatorMapPatcher {
                 Collections.singletonList("Ljava/lang/Object;"), "V"), 1);
     }
 
-    private static int expectedHookCount(String key) {
-        return "Lcom/waze/map/opengl/z;->s(Lcom/waze/bj/e;Lcom/waze/bj/h;)V".equals(key) ? 2 : 1;
+    private int expectedHookCount(String key) {
+        return wazeType("Lcom/waze/map/opengl/z;->s(Lcom/waze/bj/e;Lcom/waze/bj/h;)V").equals(key) ? 2 : 1;
     }
 
-    private static void verifyPayload(PayloadInfo payload, String family)
+    private void verifyPayload(PayloadInfo payload, String family)
             throws UnsupportedPatchException {
         Set<String> requiredClasses = new HashSet<>(REQUIRED_PAYLOAD_CLASSES);
+        if (modernWaze && currentPayload(payload, family)) {
+            requiredClasses.add(PAYLOAD_PREFIX + "WazeSurfaceCopy;");
+        }
         if ("waze".equals(family)) {
             requiredClasses.remove("Lcom/bydhud/mapcapture/MapsNavigationCamera;");
         }
         if (!payload.classes.containsAll(requiredClasses)
-                || payload.classes.size() < 30 || payload.classes.size() > 56
+                || payload.classes.size() < 30 || payload.classes.size() > 80
                 || payload.implementedMethods < 80 || payload.instructionCount < 2500) {
             Set<String> missing = new HashSet<>(requiredClasses);
             missing.removeAll(payload.classes);
@@ -1057,6 +1078,29 @@ public final class NavigatorMapPatcher {
                 || (method.getAccessFlags() & AccessFlags.STATIC.getValue()) == 0) {
             throw new UnsupportedPatchException("map-capture payload method missing: " + key);
         }
+    }
+
+    private static File upgradedPayload(DexBackedDexFile previous, File replacement, File output)
+            throws IOException {
+        List<ClassDef> classes = new ArrayList<>();
+        try (InputStream input = new BufferedInputStream(new FileInputStream(replacement))) {
+            DexBackedDexFile fresh = DexBackedDexFile.fromInputStream(Opcodes.forApi(35),
+                    new ByteArrayInputStream(readLimited(input, MAX_DEX_BYTES, "capture payload")));
+            for (ClassDef type : fresh.getClasses()) {
+                if (!type.getType().startsWith(PAYLOAD_PREFIX)) {
+                    throw new UnsupportedPatchException("replacement contains non-capture code");
+                }
+                classes.add(type);
+            }
+        }
+        // Desktop assets can share this DEX with RouteStateBridgeV2.
+        for (ClassDef type : previous.getClasses()) {
+            if (!type.getType().startsWith(PAYLOAD_PREFIX)) classes.add(type);
+        }
+        DexFile merged = new org.jf.dexlib2.immutable.ImmutableDexFile(Opcodes.forApi(35), classes);
+        verifyDexMethodLimit(previous, merged);
+        DexPool.writeTo(output.getAbsolutePath(), merged);
+        return output;
     }
 
     private static PayloadInfo inspectPayloadFile(File file) throws IOException {
@@ -1192,7 +1236,7 @@ public final class NavigatorMapPatcher {
         }
     }
 
-    private static Map<String, Hook> lifecycle(String profile) {
+    private Map<String, Hook> lifecycle(String profile) {
         Map<String, Hook> hooks = new LinkedHashMap<>();
         addHook(hooks, "Lbpey;", "D", "mapsStarted", false, false);
         addHook(hooks, "Lbpey;", "E", "mapsStopping", false, false);
@@ -1211,29 +1255,29 @@ public final class NavigatorMapPatcher {
         hooks.put("Lapzr;->b(Lbrha;Lbrha;)V", new Hook("mapsNavigationUiDispatch", true, false,
                 "Ljava/lang/Object;", "Ljava/lang/Object;"));
 
-        addHook(hooks, "Lcom/waze/map/isolated/w;", "o", "wazeStopped", false, true);
-        addHook(hooks, "Lcom/waze/map/isolated/w;", "p", "wazeStarted", false, false);
-        addHook(hooks, "Lcom/waze/map/isolated/w;", "i", "wazeGone", false, false);
-        addHook(hooks, "Lcom/waze/map/isolated/w;", "onDetachedFromWindow", "wazeGone", false, false);
-        addHook(hooks, "Lcom/waze/map/opengl/z;", "t", "wazeReleased", false, true);
-        observeEnd(hooks, "Lcom/waze/map/opengl/z;", "s", "wazeRendererReady",
-                "Lcom/waze/bj/e;", "Lcom/waze/bj/h;");
-        hooks.put("Lcom/waze/car_lib/i/a/s;->d(Lcom/waze/car_lib/i/a/h;Lcom/waze/car_lib/i/a/f;Lcom/waze/map/ed;Lcom/waze/bj/e;Lcom/waze/map/opengl/w;)V",
+        addHook(hooks, wazeType("Lcom/waze/map/isolated/w;"), "o", "wazeStopped", false, true);
+        addHook(hooks, wazeType("Lcom/waze/map/isolated/w;"), "p", "wazeStarted", false, false);
+        addHook(hooks, wazeType("Lcom/waze/map/isolated/w;"), "i", "wazeGone", false, false);
+        addHook(hooks, wazeType("Lcom/waze/map/isolated/w;"), "onDetachedFromWindow", "wazeGone", false, false);
+        addHook(hooks, wazeType("Lcom/waze/map/opengl/z;"), "t", "wazeReleased", false, true);
+        observeEnd(hooks, wazeType("Lcom/waze/map/opengl/z;"), "s", "wazeRendererReady",
+                wazeType("Lcom/waze/bj/e;"), wazeType("Lcom/waze/bj/h;"));
+        hooks.put(wazeType("Lcom/waze/car_lib/i/a/s;->d(Lcom/waze/car_lib/i/a/h;Lcom/waze/car_lib/i/a/f;Lcom/waze/map/ed;Lcom/waze/bj/e;Lcom/waze/map/opengl/w;)V"),
                 new Hook("carRendererReady", false, false));
-        addHook(hooks, "Lcom/waze/bj/q;", "c", "wazeLost", true, false);
-        addHook(hooks, "Lcom/waze/bj/q;", "b", "wazeSurface", true, false,
+        addHook(hooks, wazeType("Lcom/waze/bj/q;"), "c", "wazeLost", true, false);
+        addHook(hooks, wazeType("Lcom/waze/bj/q;"), "b", "wazeSurface", true, false,
                 "Landroid/view/Surface;", "I", "I", "I");
-        addHook(hooks, "Lcom/waze/bj/q;", "a", "wazeSize", true, false, "I", "I", "I");
-        observe(hooks, "Lcom/waze/car_lib/i/a/a;", "onPause", "carPaused",
+        addHook(hooks, wazeType("Lcom/waze/bj/q;"), "a", "wazeSize", true, false, "I", "I", "I");
+        observe(hooks, wazeType("Lcom/waze/car_lib/i/a/a;"), "onPause", "carPaused",
                 "Landroidx/lifecycle/LifecycleOwner;");
-        observe(hooks, "Lcom/waze/car_lib/i/a/a;", "onResume", "carResumed",
+        observe(hooks, wazeType("Lcom/waze/car_lib/i/a/a;"), "onResume", "carResumed",
                 "Landroidx/lifecycle/LifecycleOwner;");
-        observe(hooks, "Lcom/waze/car_lib/i/a/a;", "onDestroy", "carGone",
+        observe(hooks, wazeType("Lcom/waze/car_lib/i/a/a;"), "onDestroy", "carGone",
                 "Landroidx/lifecycle/LifecycleOwner;");
-        observe(hooks, "Lcom/waze/car_lib/i/a/a;", "h", "carReleasing");
-        hooks.put("Lcom/waze/car_lib/i/a/g;->onSurfaceAvailable(Landroidx/car/app/SurfaceContainer;)V",
+        observe(hooks, wazeType("Lcom/waze/car_lib/i/a/a;"), "h", "carReleasing");
+        hooks.put(wazeType("Lcom/waze/car_lib/i/a/g;->onSurfaceAvailable(Landroidx/car/app/SurfaceContainer;)V"),
                 new Hook("carSurfaceAvailable", false, false, "Ljava/lang/Object;"));
-        hooks.put("Lcom/waze/car_lib/i/a/g;->onSurfaceDestroyed(Landroidx/car/app/SurfaceContainer;)V",
+        hooks.put(wazeType("Lcom/waze/car_lib/i/a/g;->onSurfaceDestroyed(Landroidx/car/app/SurfaceContainer;)V"),
                 new Hook("carSurfaceLost", false, false, "Ljava/lang/Object;"));
         addHook(hooks, "Lbqeh;", "m", "mapsLost", true, false);
         addHook(hooks, "Lbqeh;", "l", "mapsSurface", true, false, "Ljava/lang/Object;");
@@ -1271,13 +1315,13 @@ public final class NavigatorMapPatcher {
                 new Hook(hook, false, true));
     }
 
-    private static Set<String> targetOwners(String family) {
+    private Set<String> targetOwners(String family) {
         Set<String> result = new HashSet<>();
         for (String key : lifecycle(family).keySet()) result.add(key.substring(0, key.indexOf("->")));
         if ("gmaps".equals(family)) {
             result.add("Lbpey;");
         } else {
-            result.addAll(WazeRenderPatch.owners());
+            result.addAll(WazeRenderPatch.owners(modernWaze));
             result.add("Lcom/waze/mobile/WazeMobileApplication;");
             result.add("Lcom/waze/map/opengl/w;");
             result.add("Lcom/waze/map/NativeCanvasRenderer;");
@@ -1285,7 +1329,7 @@ public final class NavigatorMapPatcher {
         return result;
     }
 
-    private static Map<String, Integer> expectedAnchorCounts(String family) {
+    private Map<String, Integer> expectedAnchorCounts(String family) {
         Map<String, Integer> expected = new TreeMap<>();
         for (String key : lifecycle(family).keySet()) expected.put(key, expectedHookCount(key));
         if ("gmaps".equals(family)) {
@@ -1300,7 +1344,7 @@ public final class NavigatorMapPatcher {
         return expected;
     }
 
-    private static Map<String, Integer> expectedHookRefs(String family) {
+    private Map<String, Integer> expectedHookRefs(String family) {
         Map<String, Integer> expected = new TreeMap<>();
         for (Map.Entry<String, Hook> entry : lifecycle(family).entrySet()) {
             Hook hook = entry.getValue();
@@ -1329,14 +1373,14 @@ public final class NavigatorMapPatcher {
         return expected;
     }
 
-    private static DexFile rewrite(DexBackedDexFile dex, PatchPlan plan)
+    private DexFile rewrite(DexBackedDexFile dex, PatchPlan plan)
             throws UnsupportedPatchException {
         Map<String, Method> changedMethods = new HashMap<>();
         int matchingMethods = 0;
         for (ClassDef classDef : dex.getClasses()) {
             for (Method method : classDef.getMethods()) {
                 Method changed = patchMethod(method, plan);
-                if ("waze".equals(plan.profile)) changed = WazeRenderPatch.patch(changed);
+                if ("waze".equals(plan.profile)) changed = WazeRenderPatch.patch(changed, modernWaze);
                 if (changed != method) {
                     changedMethods.put(key(method), changed);
                     matchingMethods++;
@@ -1355,21 +1399,21 @@ public final class NavigatorMapPatcher {
         return rewriter.getDexFileRewriter().rewrite(dex);
     }
 
-    private static DexFile renderExtension(DexFile dex) {
+    private DexFile renderExtension(DexFile dex) {
         return new DexRewriter(new RewriterModule() {
             @Override public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
-                return WazeRenderPatch::patch;
+                return method -> WazeRenderPatch.patch(method, modernWaze);
             }
         }).getDexFileRewriter().rewrite(dex);
     }
 
-    private static boolean hasTargetClass(DexBackedDexFile dex, String family) {
+    private boolean hasTargetClass(DexBackedDexFile dex, String family) {
         Set<String> targets = targetOwners(family);
         for (ClassDef classDef : dex.getClasses()) if (targets.contains(classDef.getType())) return true;
         return false;
     }
 
-    private static Method patchMethod(Method method, PatchPlan plan) {
+    private Method patchMethod(Method method, PatchPlan plan) {
         String owner = method.getDefiningClass();
         String name = method.getName();
         if (method.getImplementation() == null) return method;
@@ -1567,13 +1611,13 @@ public final class NavigatorMapPatcher {
         plan.call(reference);
     }
 
-    private static boolean isCarManagerAssignment(Instruction instruction, String owner, int receiver) {
+    private boolean isCarManagerAssignment(Instruction instruction, String owner, int receiver) {
         if (instruction.getOpcode() != Opcode.IPUT_OBJECT || !(instruction instanceof ReferenceInstruction)) return false;
         Object reference = ((ReferenceInstruction) instruction).getReference();
         return reference instanceof FieldReference
                 && ((FieldReference) reference).getDefiningClass().equals(owner)
                 && ((FieldReference) reference).getName().equals("f")
-                && ((FieldReference) reference).getType().equals("Lcom/waze/bj/r;")
+                && ((FieldReference) reference).getType().equals(wazeType("Lcom/waze/bj/r;"))
                 && ((TwoRegisterInstruction) instruction).getRegisterB() == receiver;
     }
 
@@ -1594,11 +1638,11 @@ public final class NavigatorMapPatcher {
         }
     }
 
-    private static void verifyCarRendererHook(Method method) throws UnsupportedPatchException {
+    private void verifyCarRendererHook(Method method) throws UnsupportedPatchException {
         String target = "Lcom/waze/car_lib/i/a/s;->d(Lcom/waze/car_lib/i/a/h;"
                 + "Lcom/waze/car_lib/i/a/f;Lcom/waze/map/ed;Lcom/waze/bj/e;"
                 + "Lcom/waze/map/opengl/w;)V";
-        if (!target.equals(key(method))) return;
+        if (!wazeType(target).equals(key(method))) return;
         String hook = methodKey(BACKGROUND, "carRendererReady",
                 Collections.singletonList("Ljava/lang/Object;"), "V");
         List<Instruction> instructions = new ArrayList<>();
@@ -1818,7 +1862,7 @@ public final class NavigatorMapPatcher {
     private static boolean supportedVersion(String profile, String version) {
         if (version == null) return false;
         String prefix = "gmaps".equals(profile) ? "26.30." : "5.20.";
-        return version.trim().startsWith(prefix);
+        return version.trim().startsWith(prefix) || ("waze".equals(profile) && "5.25.0.1".equals(version.trim()));
     }
 
     private static Inspection result(String state, String reason) {

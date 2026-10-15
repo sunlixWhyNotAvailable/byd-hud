@@ -243,6 +243,20 @@ final class NavigatorAssetManager {
                 "waze-5.20.0.1-direct-v2.apk",
                 NavigatorPatchStore.Profile.WAZE));
         assets.add(new Asset(
+                "waze-direct-5.25.0.1",
+                "Waze patched version",
+                "Waze патчена версія",
+                "Waze патченная версия",
+                "5.25.0.1",
+                1030736L,
+                "com.waze",
+                NavigatorAssetSignerCatalog.WAZE_PROJECT_SIGNER,
+                "70325517002CA0E4653140CFD7F49298C369BB7577C657EA3BCA0FE24BBE2EA1",
+                "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
+                        + "navigator-assets-v2/waze-5.25.0.1-direct-v2.apk",
+                "waze-5.25.0.1-direct-v2.apk",
+                NavigatorPatchStore.Profile.WAZE));
+        assets.add(new Asset(
                 "gmaps-direct-26.30.09.950492155",
                 "Google Maps ReVanced patched version",
                 "Google Maps ReVanced патчена версія",

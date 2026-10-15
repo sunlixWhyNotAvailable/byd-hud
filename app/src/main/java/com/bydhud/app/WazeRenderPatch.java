@@ -24,10 +24,17 @@ public final class WazeRenderPatch {
         return new HashSet<>(Arrays.asList("Lcom/waze/map/opengl/w;", "Lcom/waze/bj/e;",
                 "Lcom/waze/bj/r;", "Lcom/waze/bj/q;", "Lcom/waze/car_lib/WazeCarAppService;"));
     }
+    public static Set<String> owners(boolean modern) {
+        Set<String> result = owners();
+        if (!modern) return result;
+        Set<String> renamed = new HashSet<>();
+        for (String owner : result) renamed.add(owner.replace("Lcom/waze/bj/", "Lcom/waze/bl/"));
+        return renamed;
+    }
     public static String key(MethodReference m) {
         StringBuilder b = new StringBuilder(m.getDefiningClass()).append("->").append(m.getName()).append('(');
         for (CharSequence p : m.getParameterTypes()) b.append(p);
-        return b.append(')').append(m.getReturnType()).toString();
+        return b.append(')').append(m.getReturnType()).toString().replace("Lcom/waze/bl/", "Lcom/waze/bj/");
     }
     public static boolean extension(MethodReference m) {
         return OWNER.equals(m.getDefiningClass()) || key(m).equals(BACKGROUND + "->wazeHostDestroyed(Ljava/lang/Object;)Z");
@@ -52,6 +59,11 @@ public final class WazeRenderPatch {
         for (Label label : labels) { location.getLabels().remove(label); hook.getLocation().getLabels().add(label); }
     }
     public static Method patch(Method method) {
+        return patch(method, false);
+    }
+    public static Method patch(Method method, boolean modern) {
+        String owner = method.getDefiningClass();
+        if (owner.startsWith(modern ? "Lcom/waze/bj/" : "Lcom/waze/bl/")) return method;
         String key = key(method);
         if (!Arrays.asList(WRAPPER, THREAD, SURFACE, CALLBACK, STOP, HOST).contains(key)
                 || method.getImplementation() == null) return method;

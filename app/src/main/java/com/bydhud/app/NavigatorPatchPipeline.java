@@ -1173,7 +1173,7 @@ final class NavigatorPatchPipeline {
         String laneReason = "Waze lane target missing";
         for (NavigatorApkSet.Member member : set.members) {
             checkWorkerInterrupted();
-            WazeApkInspection inspection = inspectWaze(member.file);
+            WazeApkInspection inspection = inspectWaze(member.file, set.versionName);
             if (WazePatchEngine.PATCHABLE_STOCK.equals(inspection.allowlistClassification)) {
                 allowlistStock++;
             } else if (WazePatchEngine.ALREADY_PATCHED.equals(inspection.allowlistClassification)) {
@@ -1438,7 +1438,7 @@ final class NavigatorPatchPipeline {
         int laneCount = 0;
         for (NavigatorApkSet.Member member : sourceSet.members) {
             checkWorkerInterrupted();
-            WazeApkInspection inspection = inspectWaze(member.file);
+            WazeApkInspection inspection = inspectWaze(member.file, sourceSet.versionName);
             inspections.add(inspection);
             if (inspection.allowlistTargetCount == 1) {
                 allowlist = inspection;
@@ -1464,7 +1464,7 @@ final class NavigatorPatchPipeline {
             File rewrittenDex = new File(transaction, "waze-direct.dex");
             reportStage(context, "DIRECT", "IN_PROGRESS", "");
             WazePatchEngine.patchWazeAllowlist(
-                    readEntry(target, allowlist.allowlistDex), rewrittenDex);
+                    readEntry(target, allowlist.allowlistDex), rewrittenDex, input.versionName);
             File rewrittenApk = new File(transaction, "waze-direct-unsigned.apk");
             Map<String, File> replacements = new HashMap<>();
             replacements.put(allowlist.allowlistDex, rewrittenDex);
@@ -1481,7 +1481,7 @@ final class NavigatorPatchPipeline {
             File target = outputMember(outputDirectory, lanes.fileName);
             File rewrittenDex = new File(transaction, "waze-lanes.dex");
             reportStage(context, "LANES", "IN_PROGRESS", "");
-            WazePatchEngine.patchLanes(readEntry(target, lanes.laneDex), rewrittenDex);
+            WazePatchEngine.patchLanes(readEntry(target, lanes.laneDex), rewrittenDex, input.versionName);
             File rewrittenApk = new File(transaction, "waze-lanes-unsigned.apk");
             Map<String, File> replacements = new HashMap<>();
             replacements.put(lanes.laneDex, rewrittenDex);
@@ -1517,7 +1517,7 @@ final class NavigatorPatchPipeline {
                         "lifecycle-" + lifecycleOwner.fileName + "-"
                                 + dexEntry.replace('/', '_'));
                 reportStage(context, "STABLE_SESSION", "IN_PROGRESS", "");
-                WazePatchEngine.patchLifecycle(readEntry(target, dexEntry), rewritten);
+                WazePatchEngine.patchLifecycle(readEntry(target, dexEntry), rewritten, input.versionName);
                 replacements.put(dexEntry, rewritten);
             }
             File lifecycleApk = new File(transaction, "waze-lifecycle-unsigned.apk");
@@ -1554,12 +1554,12 @@ final class NavigatorPatchPipeline {
             File target = outputMember(outputDirectory, alertOwner.fileName);
             String dexEntry = alertOwner.alertDexEntries.get(0);
             byte[] inputDex = readEntry(target, dexEntry);
-            if (!WazePatchEngine.inspectAlertHook(inputDex).patchableComponents()) {
+            if (!WazePatchEngine.inspectAlertHook(inputDex, input.versionName).patchableComponents()) {
                 throw new IOException("Waze alert-hook stock target missing");
             }
             File rewritten = new File(transaction, "waze-alert-hook.dex");
             reportStage(context, "ALERTS", "IN_PROGRESS", "");
-            WazePatchEngine.patchAlertHook(inputDex, rewritten);
+            WazePatchEngine.patchAlertHook(inputDex, rewritten, input.versionName);
             Map<String, File> replacements = new HashMap<>();
             replacements.put(dexEntry, rewritten);
             File alertApk = new File(transaction, "waze-alert-hook-unsigned.apk");
@@ -1643,7 +1643,7 @@ final class NavigatorPatchPipeline {
                 source.mapState, source.mapReason, source.mapRevision);
     }
 
-    private static WazeApkInspection inspectWaze(File apk) throws IOException {
+    private static WazeApkInspection inspectWaze(File apk, String version) throws IOException {
         WazeApkInspection result = new WazeApkInspection();
         result.fileName = apk.getName();
         try (ZipFile zip = new ZipFile(apk)) {
@@ -1655,7 +1655,7 @@ final class NavigatorPatchPipeline {
                 result.dexEntries.add(entry.getName());
                 byte[] bytes = readEntry(zip, entry.getName());
                 WazePatchEngine.CompositeInspection composite =
-                        WazePatchEngine.inspectComposite(bytes);
+                        WazePatchEngine.inspectComposite(bytes, version);
                 WazePatchEngine.WazeInspection allowlist = composite.allowlist;
                 if (allowlist.targetCount > 0) {
                     result.allowlistTargetCount += allowlist.targetCount;

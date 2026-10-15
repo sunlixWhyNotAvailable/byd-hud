@@ -34,6 +34,8 @@ public final class CaptureBridge {
     private static Bundle wazeRequest;
     private static volatile WeakReference<Object> maps = new WeakReference<>(null);
     private static volatile Context app;
+    private static volatile boolean waze525;
+    static boolean waze525() { return waze525; }
     private static Handler worker;
     private static volatile long draws;
     private static volatile String lastError = "";
@@ -57,6 +59,10 @@ public final class CaptureBridge {
             if (app != null || context == null) return;
             if (context.getPackageName().equals("com.waze") && android.os.Build.VERSION.SDK_INT >= 28
                     && !context.getApplicationInfo().processName.equals(android.app.Application.getProcessName())) return;
+            if ("com.waze".equals(context.getPackageName())) {
+                waze525 = "5.25.0.1".equals(context.getPackageManager()
+                        .getPackageInfo(context.getPackageName(), 0).versionName);
+            }
             app = context.getApplicationContext();
             if (app == null) return;
             String newJournalSession = android.os.Process.myPid() + "-" + UUID.randomUUID();
@@ -94,6 +100,7 @@ public final class CaptureBridge {
             hello.putString("lifecycleSessionId", lifecycleSessionId);
             hello.putString("build", app.getPackageName().equals("com.waze")
                     ? "map-probe-r11-render-demand-hud-consumer-v1" : "map-probe-r12-policy-watchdog-hud-consumer-v1");
+            if (waze525) hello.putString("wazeCapture", "bydhud-waze525-embedded-v1");
             hello.putBoolean("fullSourceMemory", true);
             hello.putLong("captureProtocol", 2L);
             hello.putString("captureCapabilities", CapturePollPolicy.CAPABILITIES);
@@ -144,6 +151,7 @@ public final class CaptureBridge {
                 request.putLong("producerRequestNs", SystemClock.elapsedRealtimeNanos());
                 if (app.getPackageName().equals("com.waze")) {
                     setWaze(request);
+                    if (waze525) BackgroundCapture.captureWaze(request);
                     WazeRenderScheduler.request();
                     worker.postDelayed(() -> {
                         if (takeWaze(request)) finish(request, null, "no_gl_frame", "waze", 0, 0);
@@ -215,10 +223,40 @@ public final class CaptureBridge {
         }
     }
 
+
+    static void wazeUnavailable(Bundle request, String status) {
+        if (takeWaze(request)) worker.post(() -> finish(request, null, status, "waze_surface_copy", 0, 0));
+    }
+    static void wazeSurfaceFrame(Bundle request, Object renderer, android.view.Surface surface,
+            int width, int height, java.util.function.BooleanSupplier current) {
+        if (width < 1 || height < 1 || (long)width * height > 12000000) {
+            wazeUnavailable(request, "invalid_surface_dimensions"); return;
+        }
+        if (!takeWaze(request)) return;
+        request.putString("frameSourceMode", BackgroundCapture.wazeSource(renderer));
+        request.putLong("captureStartNs", SystemClock.elapsedRealtimeNanos());
+        int edge = CapturePollPolicy.outputEdge(request.getInt("outputMaxEdge"), request.getBoolean("fullSourceMemory"));
+        int[] size = PixelMath.size(width, height, edge);
+        WazeSurfaceCopy.copy(surface, size[0], size[1],
+                CapturePollPolicy.bounded(request.getLong("frameTimeoutMs"), 2500, 100, 30000),
+                new Handler(Looper.getMainLooper()), current, (bitmap, status) -> {
+                    request.putLong("callbackNs", SystemClock.elapsedRealtimeNanos());
+                    if (bitmap != null) {
+                        draws++;
+                        BackgroundCapture.wazeFrame(renderer);
+                        WazeRenderScheduler.frame(renderer);
+                        WazeRenderScheduler.readback(renderer, request.getLong("callbackNs") - request.getLong("captureStartNs"));
+                    }
+                    worker.post(() -> finish(request, bitmap, status, "waze_surface_copy:" + identity(renderer), width, height));
+                });
+        WazeRenderScheduler.request();
+    }
+
     public static void wazeFrame(Object renderer) {
         draws++;
         BackgroundCapture.wazeFrame(renderer);
         WazeRenderScheduler.frame(renderer);
+        if (waze525) return;
         Bundle request = takeWaze();
         if (request == null) return;
         try {
@@ -288,7 +326,7 @@ public final class CaptureBridge {
     }
 
     static boolean hasWazeRequest() {
-        synchronized (WAZE_LOCK) { return wazeRequest != null; }
+        synchronized (WAZE_LOCK) { return wazeRequest != null || (waze525 && WazeSurfaceCopy.inFlight()); }
     }
 
     private static Bundle takeWaze() {
