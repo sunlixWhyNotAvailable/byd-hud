@@ -213,8 +213,14 @@ public class NativeRoadInfoTest {
         assertFalse(HudOutputCoordinator.sameHudCheckPayload(selected,
                 selected.selectCodeTable(HudCheckState.CodeTable.AMAP)));
         HudCheckState running = selected.toggleRun();
-        assertSame(running, running.selectBasicFormat(HudCheckState.Format.D));
-        assertSame(running, running.selectCodeTable(HudCheckState.CodeTable.BYD));
+        assertEquals(selected.selectBasicFormat(HudCheckState.Format.D).toggleRun(),
+                running.selectBasicFormat(HudCheckState.Format.D));
+        assertEquals(selected.selectCodeTable(HudCheckState.CodeTable.BYD).toggleRun(),
+                running.selectCodeTable(HudCheckState.CodeTable.BYD));
+        assertTrue(running.selectMode(HudCheckState.Mode.EXTENDED).running);
+        assertEquals(running, running.selectMode(HudCheckState.Mode.EXTENDED)
+                .selectMode(HudCheckState.Mode.BASIC));
+        assertFalse(running.selectMode(HudCheckState.Mode.SHANGHAI).running);
         assertSame(running, running.withManeuverBitmap(true));
         assertSame(running, running.withLaneBitmap(true));
         assertEquals(selected, running.stop());
@@ -259,9 +265,8 @@ public class NativeRoadInfoTest {
             assertEquals((long) baseline.liveFrame().getBydManeuver(), nativeFields.get(28));
             Map<Integer, Object> bitmapFields = road(HudCheckPayload.prepareLive(
                     baseline.withManeuverBitmap(true), new byte[0], image).build(0));
-            assertFalse(bitmapFields.containsKey(28));
+            assertEquals(nativeFields.get(28), bitmapFields.get(28));
             Map<Integer, Object> expectedBitmap = new HashMap<>(nativeFields);
-            expectedBitmap.remove(28);
             expectedBitmap.put(8, image);
             assertFieldsEqual(expectedBitmap, bitmapFields);
             for (HudCheckState.Format format : new HudCheckState.Format[]{
@@ -384,7 +389,7 @@ public class NativeRoadInfoTest {
                         Map<Integer, Object> fields = road(HudCheckPayload.prepareLive(sample, lanes, maneuver).build(0));
                         boolean packed = format == HudCheckState.Format.B || format == HudCheckState.Format.C;
                         assertEquals(bitmap || packed, fields.containsKey(8));
-                        assertEquals(!bitmap, fields.containsKey(28));
+                        assertTrue(fields.containsKey(28));
                         if (format == HudCheckState.Format.NO_PNG) assertArrayEquals(lanes, (byte[]) fields.get(7));
                         else if (format == HudCheckState.Format.C) assertArrayEquals(new byte[]{1, 0, 4}, (byte[]) fields.get(7));
                         else assertFalse(fields.containsKey(7));
@@ -427,7 +432,7 @@ public class NativeRoadInfoTest {
         }
     }
 
-    @Test public void bitmapToNativeClearTargetsOnlyTheOldImageAndIgnoresNativeStageChanges() {
+    @Test public void comparisonTransitionsClearPreviousEncodingWithoutChangingTargetPackets() {
         HudCheckState bitmap = new HudCheckState()
                 .withAutomatic(false).withManeuverBitmap(true);
         HudCheckState nativeState = bitmap.withManeuverBitmap(false);
@@ -451,6 +456,43 @@ public class NativeRoadInfoTest {
         // Encoder input only: Android PNG rendering and transport acknowledgements are not simulated.
         byte[] blank = java.util.Base64.getDecoder().decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEakAAAAASUVORK5CYII=");
+        assertFalse(HudCheckPayload.needsComparisonClear(null, nativeState));
+        assertFalse(HudCheckPayload.needsComparisonClear(bitmap, nativeState));
+        assertTrue(HudCheckPayload.needsComparisonClear(bitmap,
+                bitmap.selectMode(HudCheckState.Mode.EXTENDED)));
+        for (HudCheckState.Format from : HudCheckState.Format.values()) {
+            HudCheckState previous = bitmap.withLaneBitmap(true).selectBasicFormat(from).toggleRun();
+            for (HudCheckState.Format to : HudCheckState.Format.values()) {
+                HudCheckState next = previous.selectBasicFormat(to);
+                assertTrue(next.running);
+                assertEquals(from != to, HudCheckPayload.needsComparisonClear(previous, next));
+                if (from == to) continue;
+                Map<Integer, Object> reset = road(HudCheckPayload.buildComparisonClear(previous, blank));
+                assertEquals(1L, reset.get(16));
+                assertArrayEquals(new byte[0], (byte[]) reset.get(7));
+                if (from == HudCheckState.Format.NO_PNG) assertArrayEquals(blank, (byte[]) reset.get(8));
+                else if (from == HudCheckState.Format.B || from == HudCheckState.Format.C) {
+                    assertArrayEquals(new byte[0], (byte[]) reset.get(8));
+                } else assertFalse(reset.containsKey(8));
+                Map<Integer, Object> expectedReset = road(DirectTbtPayload.buildClear());
+                reset.remove(7);
+                reset.remove(8);
+                assertFieldsEqual(expectedReset, reset);
+                Map<Integer, Object> target = road(HudCheckPayload.prepareLive(next, blank, blank).build(0));
+                assertEquals(2L, target.get(16));
+                assertEquals((long) next.liveNativeManeuver(), target.get(28));
+                if (to == HudCheckState.Format.A || to == HudCheckState.Format.D) {
+                    assertFalse(target.containsKey(7));
+                    assertFalse(target.containsKey(8));
+                }
+                assertFalse(HudCheckPayload.needsComparisonClear(null, next));
+                assertFalse(HudCheckPayload.needsComparisonClear(next, next));
+            }
+        }
+        HudCheckState table = nativeState.selectBasicFormat(HudCheckState.Format.B);
+        assertFalse(HudCheckPayload.needsComparisonClear(table,
+                table.selectCodeTable(HudCheckState.CodeTable.HUAWEI)));
+        assertThrows(IllegalArgumentException.class, () -> HudCheckPayload.buildComparisonClear(bitmap, null));
         assertThrows(IllegalArgumentException.class, () -> HudCheckPayload.buildManeuverClear(
                 nativeState, new byte[0], new byte[0]));
         for (HudCheckState selected : new HudCheckState[] {nativeState,

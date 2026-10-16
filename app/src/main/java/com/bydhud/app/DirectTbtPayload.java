@@ -386,10 +386,16 @@ public final class DirectTbtPayload {
     }
 
     public static byte[] buildClear() {
+        return buildClear(null, null);
+    }
+
+    static byte[] buildClear(byte[] laneClear, byte[] maneuverClear) {
         ByteArrayOutputStream inner = new ByteArrayOutputStream();
         writeVarintField(inner, 2, 2);
         writeVarintField(inner, 6, 255);
         writeVarintField(inner, 16, 1);
+        if (laneClear != null) writeBytesField(inner, 7, laneClear);
+        if (maneuverClear != null) writeBytesField(inner, 8, maneuverClear);
         HudManeuverGeometry.CLEAR.writeTo(inner);
         return wrap(inner.toByteArray());
     }

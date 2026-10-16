@@ -7787,7 +7787,6 @@ private fun HudCheckTab(
                         Box(
                             modifier = Modifier
                                 .selectableGroup()
-                                .alpha(if (state.running) 0.5f else 1f)
                                 .height(42.dp)
                                 .clip(RoundedCornerShape(22.dp))
                                 .border(1.dp, palette.borderStrong, RoundedCornerShape(22.dp))
@@ -7816,7 +7815,6 @@ private fun HudCheckTab(
                                         palette = palette,
                                         itemWidth = if (format == HudCheckState.Format.NO_PNG) 76.dp else 144.dp,
                                         onClick = { runAction { activity.composeHudCheckSelectBasicFormat(format) } },
-                                        enabled = !state.running,
                                         fontSize = 12.sp
                                     )
                                 }
@@ -7850,7 +7848,7 @@ private fun HudCheckTab(
                             third = "Huawei",
                             thirdActive = state.effectiveCodeTable() == HudCheckState.CodeTable.HUAWEI,
                             onThird = { runAction { activity.composeHudCheckSelectCodeTable(HudCheckState.CodeTable.HUAWEI) } },
-                            enabled = !state.running && state.allowsCodeTable()
+                            enabled = state.allowsCodeTable()
                         )
                     }
                     Divider(palette)
@@ -7957,7 +7955,7 @@ private fun HudCheckTab(
                 state.format == HudCheckState.Format.B || state.format == HudCheckState.Format.C -> listChannel
                 else -> omittedChannel
             }
-            val nativeCode = if (maneuverBitmap) "—" else state.liveNativeManeuver().toString()
+            val nativeCode = state.liveNativeManeuver().toString()
             val baselineManeuver = "$baselineManeuverLabel · $maneuverChannel"
             val inheritedFormat = hudCheckFormatLabel(state.format, language)
             val inheritedCodeTable = hudCheckCodeTableLabel(state.effectiveCodeTable())

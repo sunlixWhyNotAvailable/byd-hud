@@ -38,6 +38,31 @@ public final class HudCheckPayload {
     private HudCheckPayload() {
     }
 
+    static boolean needsComparisonClear(HudCheckState previous, HudCheckState next) {
+        return previous != null && next != null && previous.isLiveCheck() && next.isLiveCheck()
+                && (previous.format != next.format || previous.mode != next.mode);
+    }
+
+    static byte[] buildComparisonClear(Context context, HudCheckState previous) {
+        if (context != null) HudGraphicPayload.setContext(context);
+        byte[] blank = previous.effectiveManeuverBitmap()
+                ? HudGraphicPayload.buildOemTurnPng(HudState.TURN_BITMAP_BLANK_SOURCE_ID) : null;
+        return buildComparisonClear(previous, blank);
+    }
+
+    static byte[] buildComparisonClear(HudCheckState previous, byte[] blankPng) {
+        byte[] maneuverClear = null;
+        if (previous.effectiveManeuverBitmap()) {
+            if (blankPng == null || blankPng.length == 0) {
+                throw new IllegalArgumentException("Blank maneuver PNG is missing");
+            }
+            maneuverClear = blankPng;
+        } else if (previous.format == HudCheckState.Format.B || previous.format == HudCheckState.Format.C) {
+            maneuverClear = new byte[0];
+        }
+        return DirectTbtPayload.buildClear(new byte[0], maneuverClear);
+    }
+
     static boolean needsManeuverClear(HudCheckState previous, HudCheckState next) {
         return previous != null && previous.format == HudCheckState.Format.NO_PNG
                 && previous.isLiveCheck() && previous.effectiveManeuverBitmap()
@@ -121,8 +146,7 @@ public final class HudCheckPayload {
         }
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepareHudCheck(frame, options,
                 state.format, state.liveNativeManeuver(), state.effectiveLaneCodes(),
-                state.effectiveManeuverBitmap() || clearManeuver,
-                !state.effectiveManeuverBitmap());
+                state.effectiveManeuverBitmap() || clearManeuver, true);
         String geometry = geometryDiagnostics(frame, state);
         return prepared.withHudCheckBaseline(
                 baseline.toByteArray(), overrides.toByteArray(), geometry);

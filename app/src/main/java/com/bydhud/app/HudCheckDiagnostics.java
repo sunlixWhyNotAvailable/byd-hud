@@ -35,7 +35,7 @@ final class HudCheckDiagnostics {
             line += " format=" + sample.format.name()
                     + " code_table=" + sample.effectiveCodeTable().name()
                     + " maneuver=" + frame.getBydManeuver()
-                    + " f28=" + (bitmap ? "omitted" : code)
+                    + " f28=" + code
                     + " f7=" + lanes
                     + " f8=" + (bitmap ? "png" : list ? "packed[" + code + "]" : "omitted")
                     + " distance_m=" + frame.getDistanceMeters()

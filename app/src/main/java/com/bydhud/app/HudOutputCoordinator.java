@@ -1196,17 +1196,22 @@ final class HudOutputCoordinator {
             byte[] payload = buildPayload(source);
             HudCheckState hudCheck = source == Source.MANUAL && manualMapLiveSession == 0L
                     && manualState != null ? manualState.hudCheck : null;
-            if (HudCheckPayload.needsManeuverClear(lastSentHudCheck, hudCheck)) {
-                byte[] clear = HudCheckPayload.buildManeuverClear(context, hudCheck);
+            boolean comparisonClear = HudCheckPayload.needsComparisonClear(lastSentHudCheck, hudCheck);
+            if (comparisonClear || HudCheckPayload.needsManeuverClear(lastSentHudCheck, hudCheck)) {
+                byte[] clear = comparisonClear
+                        ? HudCheckPayload.buildComparisonClear(context, lastSentHudCheck)
+                        : HudCheckPayload.buildManeuverClear(context, hudCheck);
+                String clearAction = comparisonClear ? "comparison_clear" : "maneuver_bitmap_clear";
                 int clearResult = sendPayload(source, channelFor(source),
-                        "maneuver_bitmap_clear", reason, clear, clear);
-                log("hud_check maneuver_bitmap_clear case=" + HudCheckDiagnostics.sampleKey(hudCheck)
-                        + " f8=blank_s72 result=" + clearResult);
+                        clearAction, reason, clear, clear);
+                log("hud_check " + clearAction + " from=" + HudCheckDiagnostics.sampleKey(lastSentHudCheck)
+                        + " to=" + HudCheckDiagnostics.sampleKey(hudCheck)
+                        + " result=" + clearResult);
                 if (!isPayloadSuccessResult(clearResult)) {
-                    handleProtocolResult("maneuver-bitmap-clear", clearResult);
+                    handleProtocolResult(clearAction, clearResult);
                     return;
                 }
-                // A successful clear is not repeated if the following native send needs a retry.
+                // Keep a successful transition clear consumed if the next payload needs a retry.
                 lastSentHudCheck = null;
             }
             byte[] semanticPayload = source == Source.DIRECT

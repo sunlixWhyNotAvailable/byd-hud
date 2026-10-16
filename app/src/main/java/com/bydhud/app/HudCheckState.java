@@ -148,23 +148,23 @@ public final class HudCheckState {
         Mode selected = value == null ? Mode.BASIC : value;
         return mode == selected
                 ? this
-                : new HudCheckState(selected, false, automatic, maneuverIndex, laneIndex,
+                : new HudCheckState(selected, running && selected != Mode.SHANGHAI, automatic, maneuverIndex, laneIndex,
                         distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
                         laneBitmap, transliterate, extendedIndex, format, codeTable);
     }
 
     public HudCheckState selectBasicFormat(Format value) {
         Format selected = value == null ? Format.NO_PNG : value;
-        if (mode != Mode.BASIC || running || format == selected) return this;
-        return new HudCheckState(mode, false, automatic, maneuverIndex, laneIndex,
+        if (mode != Mode.BASIC || format == selected) return this;
+        return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
                 laneBitmap, transliterate, extendedIndex, selected, codeTable);
     }
 
     public HudCheckState selectCodeTable(CodeTable value) {
         CodeTable selected = value == null ? CodeTable.BYD : value;
-        if (mode != Mode.BASIC || running || !allowsCodeTable() || codeTable == selected) return this;
-        return new HudCheckState(mode, false, automatic, maneuverIndex, laneIndex,
+        if (mode != Mode.BASIC || !allowsCodeTable() || codeTable == selected) return this;
+        return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
                 laneBitmap, transliterate, extendedIndex, format, selected);
     }
@@ -349,8 +349,7 @@ public final class HudCheckState {
 
     public String extendedField() {
         if (isLivePipelineCheck()) {
-            String fields = "RoadInfo · f9";
-            if (!effectiveManeuverBitmap()) fields += ", f28";
+            String fields = "RoadInfo · f9, f28";
             if (format == Format.B || format == Format.C) fields += ", f8";
             if (format != Format.D) fields += ", f19–20, f30–32";
             return fields;
