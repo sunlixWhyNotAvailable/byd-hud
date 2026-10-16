@@ -2635,7 +2635,8 @@ private fun OptionsTab(
                         "If the car's native arrow gets stuck or points the wrong way, try Baidu instead of AMap.\nThe change takes effect the next time you start output or a HUD test.",
                         "Если штатная стрелка зависает или показывает неверное направление, попробуйте Baidu вместо AMap.\nИзменение применится при следующем запуске вывода или теста HUD."
                     ),
-                    palette
+                    palette,
+                    rowFill = featureMaturityFill(palette, tested = true)
                 ) {
                     Segmented(
                         "AMap",
@@ -7754,6 +7755,17 @@ private fun HudCheckTab(
         }
         if (state.mode == HudCheckState.Mode.BASIC) {
             item(key = "hud-check-basic") {
+                val formatSelectionOffset by animateDpAsState(
+                    targetValue = when (state.format) {
+                        HudCheckState.Format.NO_PNG -> 0.dp
+                        HudCheckState.Format.A -> 76.dp
+                        HudCheckState.Format.D -> 220.dp
+                        HudCheckState.Format.B -> 364.dp
+                        HudCheckState.Format.C -> 508.dp
+                    },
+                    animationSpec = tween(durationMillis = 140),
+                    label = "hudCheckFormatSelection"
+                )
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -7763,16 +7775,82 @@ private fun HudCheckTab(
                 ) {
                     ActionRow(
                         language.choose("Формат перевірки", "Check format", "Формат проверки"),
-                        "", palette, verticalPadding = 6.dp
+                        language.choose(
+                            "Нові формати потребують перевірки на авто",
+                            "New formats need vehicle testing",
+                            "Новые форматы требуют проверки на авто"
+                        ),
+                        palette,
+                        verticalPadding = 6.dp,
+                        rowFill = featureMaturityFill(palette)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .selectableGroup()
+                                .alpha(if (state.running) 0.5f else 1f)
+                                .height(42.dp)
+                                .clip(RoundedCornerShape(22.dp))
+                                .border(1.dp, palette.borderStrong, RoundedCornerShape(22.dp))
+                                .background(palette.panelAlt)
+                                .padding(5.dp)
+                        ) {
+                            Box(
+                                Modifier
+                                    .offset(x = formatSelectionOffset)
+                                    .width(if (state.format == HudCheckState.Format.NO_PNG) 76.dp else 144.dp)
+                                    .height(32.dp)
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(palette.accent)
+                            )
+                            Row {
+                                listOf(
+                                    HudCheckState.Format.NO_PNG,
+                                    HudCheckState.Format.A,
+                                    HudCheckState.Format.D,
+                                    HudCheckState.Format.B,
+                                    HudCheckState.Format.C
+                                ).forEach { format ->
+                                    SegmentedItem(
+                                        text = hudCheckFormatLabel(format, language),
+                                        active = state.format == format,
+                                        palette = palette,
+                                        itemWidth = if (format == HudCheckState.Format.NO_PNG) 76.dp else 144.dp,
+                                        onClick = { runAction { activity.composeHudCheckSelectBasicFormat(format) } },
+                                        enabled = !state.running,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Divider(palette)
+                    ActionRow(
+                        language.choose(
+                            "Таблиця кодів маневрів",
+                            "Maneuver code table",
+                            "Таблица кодов манёвров"
+                        ),
+                        language.choose(
+                            "Вибір доступний для форматів A та B",
+                            "Selection is available for formats A and B",
+                            "Выбор доступен для форматов A и B"
+                        ),
+                        palette,
+                        verticalPadding = 6.dp,
+                        rowFill = featureMaturityFill(palette)
                     ) {
                         Segmented(
-                            left = language.choose("Поточний", "Current", "Текущий"),
-                            right = language.choose("Без PNG", "No PNG", "Без PNG"),
-                            leftActive = !state.legacyBasic,
+                            left = "BYD / Denza",
+                            right = "AMap",
+                            leftActive = state.effectiveCodeTable() == HudCheckState.CodeTable.BYD,
                             palette = palette,
                             itemWidth = 110.dp,
-                            onLeft = { runAction { activity.composeHudCheckSelectBasicFormat(false) } },
-                            onRight = { runAction { activity.composeHudCheckSelectBasicFormat(true) } }
+                            onLeft = { runAction { activity.composeHudCheckSelectCodeTable(HudCheckState.CodeTable.BYD) } },
+                            onRight = { runAction { activity.composeHudCheckSelectCodeTable(HudCheckState.CodeTable.AMAP) } },
+                            third = "Huawei",
+                            thirdActive = state.effectiveCodeTable() == HudCheckState.CodeTable.HUAWEI,
+                            onThird = { runAction { activity.composeHudCheckSelectCodeTable(HudCheckState.CodeTable.HUAWEI) } },
+                            enabled = !state.running && state.allowsCodeTable()
                         )
                     }
                     Divider(palette)
@@ -7782,10 +7860,11 @@ private fun HudCheckTab(
                         onNext = { step(HudCheckState.Field.MANEUVER, 1) },
                         option = {
                             OutputImageChoice(
-                                bitmap = state.maneuverBitmap,
+                                bitmap = state.effectiveManeuverBitmap(),
                                 stockText = copy.stockImage,
                                 bitmapText = copy.bitmapImage,
-                                palette = palette
+                                palette = palette,
+                                enabled = state.format == HudCheckState.Format.NO_PNG
                             ) { runAction { activity.composeHudCheckSetManeuverBitmap(it) } }
                         })
                     Divider(palette)
@@ -7794,10 +7873,11 @@ private fun HudCheckTab(
                         onNext = { step(HudCheckState.Field.LANES, 1) },
                         option = {
                             OutputImageChoice(
-                                bitmap = state.laneBitmap,
+                                bitmap = state.effectiveLaneBitmap(),
                                 stockText = copy.stockImage,
                                 bitmapText = copy.bitmapImage,
-                                palette = palette
+                                palette = palette,
+                                enabled = state.format == HudCheckState.Format.NO_PNG
                             ) { runAction { activity.composeHudCheckSetLaneBitmap(it) } }
                         })
                     Divider(palette)
@@ -7827,7 +7907,7 @@ private fun HudCheckTab(
             val extendedHud = state.toHudState()
             val livePipeline = state.isLivePipelineCheck()
             val legacyGeometry = state.isGeometryCheck()
-            val geometryCard = livePipeline || legacyGeometry
+            val geometryCard = (livePipeline && state.format != HudCheckState.Format.D) || legacyGeometry
             val liveGeometry = if (livePipeline) state.liveGeometry() else null
             val selectedLabel = if (livePipeline && language == Language.Ru) {
                 state.extendedLabelRussian()
@@ -7848,16 +7928,39 @@ private fun HudCheckTab(
                 liveFrameForBaseline?.amapManeuver == 3 -> language.choose("Праворуч", "Right", "Направо")
                 else -> language.choose("Прямо", "Straight", "Прямо")
             }
-            val maneuverChannel = if (state.maneuverBitmap) copy.bitmapImage else copy.stockImage
-            val pngSource = when {
-                state.maneuverBitmap -> "PNG ${extendedHud.turnBitmapId}"
-                !state.legacyBasic -> "PNG ${HudState.TURN_BITMAP_BLANK_SOURCE_ID}"
-                else -> "—"
+            val listChannel = language.choose("список", "list", "список")
+            val omittedChannel = language.choose("відсутнє", "omitted", "отсутствует")
+            val roadInfoLaneOmitted = if (state.format == HudCheckState.Format.D) language.choose(
+                "RoadInfo: поля смуг відсутні",
+                "RoadInfo: lane fields omitted",
+                "RoadInfo: поля полос отсутствуют"
+            ) else language.choose(
+                "RoadInfo: f7 відсутнє",
+                "RoadInfo: f7 omitted",
+                "RoadInfo: f7 отсутствует"
+            )
+            val maneuverBitmap = state.effectiveManeuverBitmap()
+            val laneBitmap = state.effectiveLaneBitmap()
+            val maneuverChannel = when {
+                maneuverBitmap -> copy.bitmapImage
+                state.format == HudCheckState.Format.B || state.format == HudCheckState.Format.C -> listChannel
+                else -> copy.stockImage
             }
-            val nativeCode = if (state.legacyBasic && state.maneuverBitmap) "—" else extendedHud.maneuverId.toString()
+            val laneChannel = when {
+                laneBitmap -> copy.bitmapImage
+                state.format == HudCheckState.Format.C -> listChannel
+                state.format != HudCheckState.Format.NO_PNG -> roadInfoLaneOmitted
+                else -> copy.stockImage
+            }
+            val pngSource = when {
+                maneuverBitmap -> "PNG ${extendedHud.turnBitmapId}"
+                state.format == HudCheckState.Format.B || state.format == HudCheckState.Format.C -> listChannel
+                else -> omittedChannel
+            }
+            val nativeCode = if (maneuverBitmap) "—" else state.liveNativeManeuver().toString()
             val baselineManeuver = "$baselineManeuverLabel · $maneuverChannel"
-            val inheritedFormat = if (state.legacyBasic) language.choose("Без PNG", "No PNG", "Без PNG")
-                else language.choose("Поточний", "Current", "Текущий")
+            val inheritedFormat = hudCheckFormatLabel(state.format, language)
+            val inheritedCodeTable = hudCheckCodeTableLabel(state.effectiveCodeTable())
             val geometryHeading = liveGeometry?.heading
                 ?: if (legacyGeometry) HudCheckGeometry.heading(state.extendedIndex) else 0.0
             val geometryName = liveGeometry?.name ?: "straight"
@@ -7878,11 +7981,19 @@ private fun HudCheckTab(
                     }
                     language.choose(" · виїзд $direction", " · exit $direction", " · съезд $direction")
                 } else ""
-                language.choose(
-                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: $nativeCode · f31: [] · f32: ${liveGeometry.heading}° · геометрія: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · піктограма TBT: ${frame?.amapBroadcastManeuver} · f8: $pngSource · джерело HUD_CHECK$exitLabel",
-                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: $nativeCode · f31: [] · f32: ${liveGeometry.heading}° · geometry: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · TBT broadcast icon: ${frame?.amapBroadcastManeuver} · f8: $pngSource · source HUD_CHECK$exitLabel",
-                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: $nativeCode · f31: [] · f32: ${liveGeometry.heading}° · геометрия: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · значок TBT: ${frame?.amapBroadcastManeuver} · f8: $pngSource · источник HUD_CHECK$exitLabel"
-                )
+                if (state.format == HudCheckState.Format.D) {
+                    language.choose(
+                        "RoadInfo: базовий кадр без AR-полів · f28: $nativeCode\nAMap: ${frame?.amapManeuver} · піктограма TBT: ${frame?.amapBroadcastManeuver} · f8: $pngSource · джерело HUD_CHECK$exitLabel",
+                        "RoadInfo: base frame omits AR fields · f28: $nativeCode\nAMap: ${frame?.amapManeuver} · TBT broadcast icon: ${frame?.amapBroadcastManeuver} · f8: $pngSource · source HUD_CHECK$exitLabel",
+                        "RoadInfo: базовый кадр без AR-полей · f28: $nativeCode\nAMap: ${frame?.amapManeuver} · значок TBT: ${frame?.amapBroadcastManeuver} · f8: $pngSource · источник HUD_CHECK$exitLabel"
+                    )
+                } else {
+                    language.choose(
+                        "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: $nativeCode · f31: [] · f32: ${liveGeometry.heading}° · геометрія: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · піктограма TBT: ${frame?.amapBroadcastManeuver} · f8: $pngSource · джерело HUD_CHECK$exitLabel",
+                        "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: $nativeCode · f31: [] · f32: ${liveGeometry.heading}° · geometry: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · TBT broadcast icon: ${frame?.amapBroadcastManeuver} · f8: $pngSource · source HUD_CHECK$exitLabel",
+                        "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: $nativeCode · f31: [] · f32: ${liveGeometry.heading}° · геометрия: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · значок TBT: ${frame?.amapBroadcastManeuver} · f8: $pngSource · источник HUD_CHECK$exitLabel"
+                    )
+                }
             } else if (legacyGeometry) {
                 language.choose(
                     "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: $nativeCode · f8: $pngSource · f31: [] · f32: $geometryHeading°",
@@ -7891,11 +8002,15 @@ private fun HudCheckTab(
                 )
             } else ""
             item(key = "hud-check-baseline") {
-                Section("${copy.checkBaseline} · $inheritedFormat", palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
+                Section(
+                    "${copy.checkBaseline} · $inheritedFormat · $inheritedCodeTable",
+                    palette,
+                    bodyPadding = 10.dp,
+                    headerVerticalPadding = 6.dp
+                ) {
                     val baseline = listOf(
-                        copy.checkManeuvers to
-                            baselineManeuver,
-                        copy.checkLanes to "${state.lanes()} · ${if (state.laneBitmap) copy.bitmapImage else copy.stockImage}",
+                        copy.checkManeuvers to "$baselineManeuver · f28 $nativeCode",
+                        copy.checkLanes to "${state.lanes()} · $laneChannel",
                         copy.distanceMeters to extendedHud.distanceToIntersection.toString(),
                         copy.streetText to extendedHud.roadName,
                         copy.checkTrafficLight to localizeHudCheckLabel(state.trafficLightLabel(ukrainian), language)
@@ -7959,7 +8074,7 @@ private fun HudCheckTab(
                                         }
                                     }
                                 } else {
-                                Text(localizeHudCheckLabel(state.extendedLabel(ukrainian), language), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                                Text(selectedLabel, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
                                 Text(state.extendedField(), color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
                                 Spacer(Modifier.height(8.dp))
                                 Text(state.extendedValue(), color = palette.accent, fontFamily = FontFamily.Monospace, fontSize = 20.sp)
@@ -8380,6 +8495,7 @@ private fun OutputImageChoice(
     stockText: String,
     bitmapText: String,
     palette: Palette,
+    enabled: Boolean = true,
     onChange: (Boolean) -> Unit
 ) {
     val selectedOffset by animateDpAsState(
@@ -8391,6 +8507,7 @@ private fun OutputImageChoice(
         modifier = Modifier
             .width(230.dp)
             .height(42.dp)
+            .alpha(if (enabled) 1f else 0.5f)
             .clip(RoundedCornerShape(22.dp))
             .border(1.dp, palette.borderStrong, RoundedCornerShape(22.dp))
             .background(palette.panelAlt)
@@ -8407,8 +8524,8 @@ private fun OutputImageChoice(
             modifier = Modifier.fillMaxSize().padding(5.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            OutputImageChoiceItem(stockText, !bitmap, palette, Modifier.weight(1f)) { onChange(false) }
-            OutputImageChoiceItem(bitmapText, bitmap, palette, Modifier.weight(1f)) { onChange(true) }
+            OutputImageChoiceItem(stockText, !bitmap, palette, Modifier.weight(1f), enabled) { onChange(false) }
+            OutputImageChoiceItem(bitmapText, bitmap, palette, Modifier.weight(1f), enabled) { onChange(true) }
         }
     }
 }
@@ -8419,9 +8536,10 @@ private fun OutputImageChoiceItem(
     active: Boolean,
     palette: Palette,
     modifier: Modifier,
+    enabled: Boolean,
     onClick: () -> Unit
 ) {
-    val press = rememberPressFeedback(releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
+    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Box(
         modifier = modifier
             .fillMaxHeight()
@@ -8429,6 +8547,7 @@ private fun OutputImageChoiceItem(
             .background(pressBackground(Color.Transparent, palette, press.pressed))
             .then(press.modifier)
             .clickable(
+                enabled = enabled,
                 interactionSource = press.interactionSource,
                 indication = null,
                 onClick = onClick
@@ -9023,11 +9142,13 @@ private fun SettingRow(
     palette: Palette,
     enabled: Boolean = true,
     onHelp: (() -> Unit)? = null,
+    rowFill: Color = Color.Transparent,
     action: @Composable () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(rowFill)
             .padding(horizontal = 14.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -9052,6 +9173,11 @@ private fun SettingRow(
         }
         action()
     }
+}
+
+private fun featureMaturityFill(palette: Palette, tested: Boolean = false): Color {
+    if (!BuildConfig.VERSION_NAME.contains("beta", ignoreCase = true)) return Color.Transparent
+    return if (tested) palette.greenSoft else if (palette.dark) Color(0xFF47311F) else Color(0xFFFFEAD6)
 }
 
 private fun localizedColorTitle(slot: HudTextColorSlot, language: Language): String = when (slot) {
@@ -9103,6 +9229,20 @@ private fun localizeHudCheckLabel(value: String, language: Language): String {
             .replace("U-turn", "разворот").replace("Pass", "Проезд")
             .replace("Wait", "Ожидание").replace("Caution", "Внимание")
     }
+}
+
+private fun hudCheckFormatLabel(format: HudCheckState.Format, language: Language): String = when (format) {
+    HudCheckState.Format.NO_PNG -> language.choose("Без PNG", "No PNG", "Без PNG")
+    HudCheckState.Format.A -> language.choose("A — Без полів 7/8", "A — No fields 7/8", "A — Без полей 7/8")
+    HudCheckState.Format.D -> language.choose("D — Denza без AR", "D — Denza without AR", "D — Denza без AR")
+    HudCheckState.Format.B -> language.choose("B — Поле 8 списком", "B — Field 8 as a list", "B — Поле 8 списком")
+    HudCheckState.Format.C -> language.choose("C — Поля 7/8 списками", "C — Fields 7/8 as lists", "C — Поля 7/8 списками")
+}
+
+private fun hudCheckCodeTableLabel(table: HudCheckState.CodeTable): String = when (table) {
+    HudCheckState.CodeTable.BYD -> "BYD / Denza"
+    HudCheckState.CodeTable.AMAP -> "AMap"
+    HudCheckState.CodeTable.HUAWEI -> "Huawei"
 }
 
 private fun steeringButtonLabel(keyCode: Int, language: Language): String {
@@ -10232,11 +10372,13 @@ private fun ActionRow(
     verticalPadding: Dp = 12.dp,
     enabled: Boolean = true,
     onHelp: (() -> Unit)? = null,
+    rowFill: Color = Color.Transparent,
     action: @Composable () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(rowFill)
             .padding(horizontal = 14.dp, vertical = verticalPadding),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -10658,7 +10800,8 @@ private fun SegmentedItem(
     palette: Palette,
     itemWidth: Dp,
     onClick: () -> Unit,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    fontSize: TextUnit = 14.sp
 ) {
     val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Box(
@@ -10678,7 +10821,7 @@ private fun SegmentedItem(
             ),
         contentAlignment = Alignment.Center
     ) {
-        Text(text, color = if (active) Color.White else palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        Text(text, color = if (active) Color.White else palette.muted, fontWeight = FontWeight.SemiBold, fontSize = fontSize)
     }
 }
 

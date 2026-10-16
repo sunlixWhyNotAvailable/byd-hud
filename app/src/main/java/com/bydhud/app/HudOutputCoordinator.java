@@ -1588,7 +1588,8 @@ final class HudOutputCoordinator {
     static boolean sameHudCheckPayload(HudCheckState first, HudCheckState second) {
         if (first == null || second == null || first.mode != second.mode) return false;
         return (first.mode != HudCheckState.Mode.EXTENDED || first.extendedIndex == second.extendedIndex)
-                && first.legacyBasic == second.legacyBasic
+                && first.format == second.format
+                && first.codeTable == second.codeTable
                 && first.maneuverIndex == second.maneuverIndex
                 && first.laneIndex == second.laneIndex
                 && first.distanceIndex == second.distanceIndex

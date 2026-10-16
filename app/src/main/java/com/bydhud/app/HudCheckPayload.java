@@ -39,19 +39,29 @@ public final class HudCheckPayload {
     }
 
     static boolean needsManeuverClear(HudCheckState previous, HudCheckState next) {
-        // Current remains the original comparison packet, including its recurring blank PNG.
-        return previous != null && previous.isLiveCheck() && previous.maneuverBitmap
-                && next != null && next.isLiveCheck() && next.legacyBasic && !next.maneuverBitmap;
+        return previous != null && previous.format == HudCheckState.Format.NO_PNG
+                && previous.isLiveCheck() && previous.effectiveManeuverBitmap()
+                && next != null && next.format == HudCheckState.Format.NO_PNG
+                && next.isLiveCheck() && !next.effectiveManeuverBitmap();
     }
 
     static byte[] buildManeuverClear(Context context, HudCheckState state) {
+        if (state == null || state.format != HudCheckState.Format.NO_PNG
+                || state.effectiveManeuverBitmap()) {
+            throw new IllegalArgumentException("Bitmap-to-native clear requires No PNG Native state");
+        }
         if (context != null) HudGraphicPayload.setContext(context);
-        byte[] lanes = state.laneBitmap ? buildLanePngSafely(context, state.toHudState()) : new byte[0];
+        byte[] lanes = state.effectiveLaneBitmap()
+                ? buildLanePngSafely(context, state.toHudState()) : new byte[0];
         return buildManeuverClear(state, lanes,
                 HudGraphicPayload.buildOemTurnPng(HudState.TURN_BITMAP_BLANK_SOURCE_ID));
     }
 
     static byte[] buildManeuverClear(HudCheckState state, byte[] lanePng, byte[] blankPng) {
+        if (state == null || state.format != HudCheckState.Format.NO_PNG
+                || state.effectiveManeuverBitmap()) {
+            throw new IllegalArgumentException("Bitmap-to-native clear requires No PNG Native state");
+        }
         if (blankPng == null || blankPng.length == 0) {
             throw new IllegalArgumentException("Blank maneuver PNG is missing");
         }
@@ -72,12 +82,9 @@ public final class HudCheckPayload {
         if (context != null) HudGraphicPayload.setContext(context);
 
         HudState hud = state.toHudState();
-        byte[] maneuverPng = state.maneuverBitmap
-                ? HudGraphicPayload.buildTurnPng(hud)
-                : !state.legacyBasic
-                ? HudGraphicPayload.buildOemTurnPng(HudState.TURN_BITMAP_BLANK_SOURCE_ID)
-                : new byte[0];
-        byte[] lanePng = state.laneBitmap
+        byte[] maneuverPng = state.effectiveManeuverBitmap()
+                ? HudGraphicPayload.buildTurnPng(hud) : new byte[0];
+        byte[] lanePng = state.effectiveLaneBitmap()
                 ? buildLanePngSafely(context, hud) : new byte[0];
         return prepareLive(state, lanePng, maneuverPng);
     }
@@ -97,23 +104,58 @@ public final class HudCheckPayload {
             lanes.add(new DirectTbtFrame.Lane(
                     lane.instrumentCode(), lane.recommendationCode(), lane.label));
         }
+        byte[] selectedLanePng = state.effectiveLaneBitmap() ? lanePng : new byte[0];
+        byte[] selectedManeuverPng = state.effectiveManeuverBitmap() || clearManeuver
+                ? maneuverPng : new byte[0];
         DirectTbtFrame laneGuidance = new DirectTbtFrame(-1, 0, 0, 0,
-                "", "", "", null, lanePng, lanes,
+                "", "", "", null, selectedLanePng, lanes,
                 DirectTbtFrame.AlertOverlay.inactive());
-        frame = frame.withManeuverPng(maneuverPng).withLanesFrom(laneGuidance);
+        frame = frame.withManeuverPng(selectedManeuverPng).withLanesFrom(laneGuidance);
         DirectTbtPayload.Options options =
                 new DirectTbtPayload.Options(true, true, true, true, true);
         ByteArrayOutputStream baseline = new ByteArrayOutputStream();
-        writeExtendedNeutralFields(baseline, "");
+        if (state.format != HudCheckState.Format.D) writeExtendedNeutralFields(baseline, "");
         ByteArrayOutputStream overrides = new ByteArrayOutputStream();
         if (state.mode == HudCheckState.Mode.EXTENDED) {
             writeExtendedFields(overrides, state.extendedIndex);
         }
-        DirectTbtPayload.Prepared prepared = !state.legacyBasic
-                ? DirectTbtPayload.prepare(frame, options)
-                : DirectTbtPayload.prepareDiagnostic(frame, options,
-                        state.maneuverBitmap || clearManeuver, !state.maneuverBitmap);
-        return prepared.withHudCheckBaseline(baseline.toByteArray(), overrides.toByteArray());
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepareHudCheck(frame, options,
+                state.format, state.liveNativeManeuver(), state.effectiveLaneCodes(),
+                state.effectiveManeuverBitmap() || clearManeuver,
+                !state.effectiveManeuverBitmap());
+        String geometry = geometryDiagnostics(frame, state);
+        return prepared.withHudCheckBaseline(
+                baseline.toByteArray(), overrides.toByteArray(), geometry);
+    }
+
+    private static String geometryDiagnostics(DirectTbtFrame frame, HudCheckState state) {
+        if (state.mode != HudCheckState.Mode.EXTENDED) return null;
+        String fields;
+        if (state.isGeometryCheck()) {
+            fields = "f19=" + HudCheckGeometry.LONGITUDE + " f20=" + HudCheckGeometry.LATITUDE
+                    + " f30=" + HudCheckGeometry.line(state.extendedIndex)
+                    + " f32=" + HudCheckGeometry.heading(state.extendedIndex);
+        } else {
+            switch (state.extendedIndex) {
+                case 9:
+                    fields = "f19=121.4737 f20=31.2304";
+                    break;
+                case 11:
+                    fields = "f30=" + DIAGNOSTIC_GUIDE_LINE;
+                    break;
+                case 12:
+                    fields = "f31=121.4740,31.2307,0";
+                    break;
+                case 13:
+                    fields = "f32=90.0";
+                    break;
+                default:
+                    return null;
+            }
+        }
+        return "maneuverType=" + frame.getRawManeuverType() + " "
+                + frame.getRoundaboutExit().diagnostics()
+                + " geometry=hud_check " + fields;
     }
 
     /** Returns auxiliary events for the current extended case; Basic has none. */

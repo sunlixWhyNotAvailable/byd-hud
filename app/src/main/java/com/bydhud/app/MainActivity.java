@@ -392,7 +392,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onStop() {
         super.onStop();
-        NavHudLiveSender.resetLegacyHudCheckOnBackground();
+        NavHudLiveSender.stopBasicHudCheckOnBackground();
         if (exitRequested || isFinishing()) {
             appendStatus("onStop after explicit exit");
             return;
@@ -2663,10 +2663,16 @@ public final class MainActivity extends ComponentActivity {
                 current -> current.step(field, delta), "hud-check-step");
     }
 
-    public void composeHudCheckSelectBasicFormat(boolean legacy) {
+    public void composeHudCheckSelectBasicFormat(HudCheckState.Format format) {
         if (!activityResumed || destroyed || exitRequested || ShanghaiTestController.snapshot().isBusy()) return;
         NavHudLiveSender.get(this).updateHudCheck(
-                current -> current.selectBasicFormat(legacy), "hud-check-format");
+                current -> current.selectBasicFormat(format), "hud-check-format");
+    }
+
+    public void composeHudCheckSelectCodeTable(HudCheckState.CodeTable table) {
+        if (!activityResumed || destroyed || exitRequested || ShanghaiTestController.snapshot().isBusy()) return;
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.selectCodeTable(table), "hud-check-code-table");
     }
 
     public void composeHudCheckToggleRunning() {

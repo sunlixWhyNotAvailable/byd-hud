@@ -1,5 +1,8 @@
 package com.bydhud.app;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 
 /** Immutable, bounded HUD output-check selections shared by Compose and senders. */
@@ -7,6 +10,10 @@ public final class HudCheckState {
     public enum Mode { BASIC, EXTENDED, SHANGHAI }
 
     public enum Field { MANEUVER, LANES, DISTANCE, STREET, TRAFFIC_LIGHT }
+
+    public enum Format { NO_PNG, A, D, B, C }
+
+    public enum CodeTable { BYD, AMAP, HUAWEI }
 
     private static final int LEGACY_GEOMETRY_FIRST_INDEX = HudCheckGeometry.FIRST_EXTENDED_INDEX;
     private static final int LEGACY_GEOMETRY_END_INDEX = HudCheckLiveScenario.FIRST_EXTENDED_INDEX;
@@ -107,18 +114,20 @@ public final class HudCheckState {
     public final boolean laneBitmap;
     public final boolean transliterate;
     public final int extendedIndex;
-    // Retained checkpoint key for the separate maneuver-channel comparison.
-    public final boolean legacyBasic;
+    public final Format format;
+    public final CodeTable codeTable;
 
     public HudCheckState() {
-        this(Mode.BASIC, false, true, 0, 0, 0, 0, 0, false, false, false, 0, false);
+        this(Mode.BASIC, false, true, 0, 0, 0, 0, 0, false, false, false, 0,
+                Format.NO_PNG, CodeTable.BYD);
     }
 
     private HudCheckState(Mode mode, boolean running, boolean automatic,
                           int maneuverIndex, int laneIndex, int distanceIndex,
                           int streetIndex, int trafficLightIndex,
                           boolean maneuverBitmap, boolean laneBitmap,
-                          boolean transliterate, int extendedIndex, boolean legacyBasic) {
+                          boolean transliterate, int extendedIndex, Format format,
+                          CodeTable codeTable) {
         this.mode = mode == null ? Mode.BASIC : mode;
         this.running = running;
         this.automatic = automatic;
@@ -131,7 +140,8 @@ public final class HudCheckState {
         this.laneBitmap = laneBitmap;
         this.transliterate = transliterate;
         this.extendedIndex = wrap(extendedIndex, extendedCount());
-        this.legacyBasic = legacyBasic;
+        this.format = format == null ? Format.NO_PNG : format;
+        this.codeTable = codeTable == null ? CodeTable.BYD : codeTable;
     }
 
     public HudCheckState selectMode(Mode value) {
@@ -140,14 +150,51 @@ public final class HudCheckState {
                 ? this
                 : new HudCheckState(selected, false, automatic, maneuverIndex, laneIndex,
                         distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
-                        laneBitmap, transliterate, extendedIndex, legacyBasic);
+                        laneBitmap, transliterate, extendedIndex, format, codeTable);
     }
 
-    public HudCheckState selectBasicFormat(boolean legacy) {
-        if (mode != Mode.BASIC || legacyBasic == legacy) return this;
+    public HudCheckState selectBasicFormat(Format value) {
+        Format selected = value == null ? Format.NO_PNG : value;
+        if (mode != Mode.BASIC || running || format == selected) return this;
         return new HudCheckState(mode, false, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
-                laneBitmap, transliterate, extendedIndex, legacy);
+                laneBitmap, transliterate, extendedIndex, selected, codeTable);
+    }
+
+    public HudCheckState selectCodeTable(CodeTable value) {
+        CodeTable selected = value == null ? CodeTable.BYD : value;
+        if (mode != Mode.BASIC || running || !allowsCodeTable() || codeTable == selected) return this;
+        return new HudCheckState(mode, false, automatic, maneuverIndex, laneIndex,
+                distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
+                laneBitmap, transliterate, extendedIndex, format, selected);
+    }
+
+    public CodeTable effectiveCodeTable() {
+        return allowsCodeTable() ? codeTable : CodeTable.BYD;
+    }
+
+    public boolean allowsCodeTable() {
+        return format == Format.A || format == Format.B;
+    }
+
+    public boolean effectiveManeuverBitmap() {
+        return format == Format.NO_PNG && maneuverBitmap;
+    }
+
+    public boolean effectiveLaneBitmap() {
+        return format == Format.NO_PNG && laneBitmap;
+    }
+
+    /** Candidate C reuses the bounded Instrument lane-code mapping. */
+    public List<Integer> effectiveLaneCodes() {
+        if (format != Format.C) return Collections.emptyList();
+        List<Integer> codes = new ArrayList<>();
+        for (HudLaneModel.LaneSpec lane : laneSpecs(effectiveLaneIndex())) {
+            int code = lane.instrumentCode();
+            if (code < 0) throw new IllegalStateException("HUD Check lane pattern is not representable");
+            codes.add(code);
+        }
+        return Collections.unmodifiableList(codes);
     }
 
     org.json.JSONObject checkpoint() throws org.json.JSONException {
@@ -156,7 +203,8 @@ public final class HudCheckState {
                 .put("distance", distanceIndex).put("street", streetIndex).put("light", trafficLightIndex)
                 .put("maneuverBitmap", maneuverBitmap).put("laneBitmap", laneBitmap)
                 .put("transliterate", transliterate).put("extended", extendedIndex)
-                .put("legacyBasic", legacyBasic).put("extendedCount", extendedCount());
+                .put("format", format.name()).put("codeTable", codeTable.name())
+                .put("extendedCount", extendedCount());
     }
 
     static HudCheckState restore(org.json.JSONObject state) {
@@ -165,25 +213,37 @@ public final class HudCheckState {
         if (state.optInt("extendedCount", 54) == 54 && extended >= 23) {
             extended = Math.max(23, extended - 2);
         }
+        Format format = Format.NO_PNG;
+        CodeTable codeTable = CodeTable.BYD;
+        try {
+            format = Format.valueOf(state.optString("format", Format.NO_PNG.name()));
+        } catch (IllegalArgumentException ignored) {
+            // Legacy checkpoints stored only legacyBasic; both values migrate to No PNG.
+        }
+        try {
+            codeTable = CodeTable.valueOf(state.optString("codeTable", CodeTable.BYD.name()));
+        } catch (IllegalArgumentException ignored) {
+            // Keep older or unknown profiles on the established BYD mapping.
+        }
         return new HudCheckState(Mode.valueOf(state.optString("mode", "BASIC")),
                 state.optBoolean("running"), state.optBoolean("automatic", true),
                 state.optInt("maneuver"), state.optInt("lane"), state.optInt("distance"),
                 state.optInt("street"), state.optInt("light"), state.optBoolean("maneuverBitmap"),
                 state.optBoolean("laneBitmap"), state.optBoolean("transliterate"), extended,
-                state.optBoolean("legacyBasic"));
+                format, codeTable);
     }
 
     public HudCheckState toggleRun() {
         if (mode == Mode.SHANGHAI) return this;
         return new HudCheckState(mode, !running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap,
-                transliterate, extendedIndex, legacyBasic);
+                transliterate, extendedIndex, format, codeTable);
     }
 
     public HudCheckState stop() {
         return running ? new HudCheckState(mode, false, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap,
-                transliterate, extendedIndex, legacyBasic) : this;
+                transliterate, extendedIndex, format, codeTable) : this;
     }
 
     public HudCheckState step(Field field, int delta) {
@@ -193,7 +253,7 @@ public final class HudCheckState {
                 return replace(maneuverIndex + delta, laneIndex, distanceIndex, streetIndex,
                         trafficLightIndex, extendedIndex);
             case LANES:
-                return replace(maneuverIndex, laneIndex + delta, distanceIndex, streetIndex,
+                return replace(maneuverIndex, nextLaneIndex(laneIndex, delta), distanceIndex, streetIndex,
                         trafficLightIndex, extendedIndex);
             case DISTANCE:
                 return replace(maneuverIndex, laneIndex, distanceIndex + delta, streetIndex,
@@ -224,25 +284,27 @@ public final class HudCheckState {
     public HudCheckState withAutomatic(boolean value) {
         return automatic == value ? this : new HudCheckState(mode, running, value,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                maneuverBitmap, laneBitmap, transliterate, extendedIndex, legacyBasic);
+                maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable);
     }
 
     public HudCheckState withManeuverBitmap(boolean value) {
-        return maneuverBitmap == value ? this : new HudCheckState(mode, running, automatic,
+        return format != Format.NO_PNG || maneuverBitmap == value ? this
+                : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                value, laneBitmap, transliterate, extendedIndex, legacyBasic);
+                value, laneBitmap, transliterate, extendedIndex, format, codeTable);
     }
 
     public HudCheckState withLaneBitmap(boolean value) {
-        return laneBitmap == value ? this : new HudCheckState(mode, running, automatic,
+        return format != Format.NO_PNG || laneBitmap == value ? this
+                : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                maneuverBitmap, value, transliterate, extendedIndex, legacyBasic);
+                maneuverBitmap, value, transliterate, extendedIndex, format, codeTable);
     }
 
     public HudCheckState withTransliterate(boolean value) {
         return transliterate == value ? this : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                maneuverBitmap, laneBitmap, value, extendedIndex, legacyBasic);
+                maneuverBitmap, laneBitmap, value, extendedIndex, format, codeTable);
     }
 
     public String maneuverLabel(boolean ukrainian) {
@@ -251,7 +313,7 @@ public final class HudCheckState {
     }
 
     public String lanes() {
-        return LANES[laneIndex];
+        return LANES[effectiveLaneIndex()];
     }
 
     public int distance() {
@@ -286,7 +348,13 @@ public final class HudCheckState {
     }
 
     public String extendedField() {
-        if (isLivePipelineCheck()) return "RoadInfo · f9, f19–20, f28, f30–32";
+        if (isLivePipelineCheck()) {
+            String fields = "RoadInfo · f9";
+            if (!effectiveManeuverBitmap()) fields += ", f28";
+            if (format == Format.B || format == Format.C) fields += ", f8";
+            if (format != Format.D) fields += ", f19–20, f30–32";
+            return fields;
+        }
         return EXTENDED[extendedIndex].field;
     }
 
@@ -319,18 +387,28 @@ public final class HudCheckState {
 
     String liveGeometrySummary() {
         DirectTbtFrame frame = liveFrame();
+        if (frame == null) return "";
+        int code = liveNativeManeuver();
+        if (format == Format.D) {
+            return "f28=" + code + " geometry=omitted source=HUD_CHECK"
+                    + (frame.getRoundaboutExit().hasDirection()
+                    ? " " + frame.getRoundaboutExit().diagnostics() : "");
+        }
         HudManeuverGeometry.Selection geometry = liveGeometry();
-        if (frame == null || geometry == null) return "";
+        if (geometry == null) return "";
         return "f19=" + geometry.longitude + " f20=" + geometry.latitude
-                + " f28=" + frame.getBydManeuver() + " f32=" + geometry.heading
+                + " f28=" + code + " f32=" + geometry.heading
                 + " geometry=" + geometry.name + " source=HUD_CHECK"
                 + (frame.getRoundaboutExit().hasDirection()
                 ? " " + frame.getRoundaboutExit().diagnostics() : "");
     }
 
     int liveNativeManeuver() {
-        DirectTbtFrame frame = liveFrame();
-        return frame == null ? -1 : frame.getBydManeuver();
+        if (!isLiveCheck()) return -1;
+        HudCheckLiveScenario live = liveScenario();
+        return live == null
+                ? HudCheckManeuverTable.basic(effectiveCodeTable(), maneuverIndex)
+                : HudCheckManeuverTable.live(effectiveCodeTable(), live);
     }
 
     int liveDistanceMeters() {
@@ -345,6 +423,9 @@ public final class HudCheckState {
 
     public String extendedValue() {
         HudCheckLiveScenario live = liveScenario();
+        if (live != null && format == Format.D) {
+            return "f9=" + live.distanceMeters + " · f28=" + liveNativeManeuver();
+        }
         return live != null ? live.value()
                 : isGeometryCheck() ? HudCheckGeometry.display(extendedIndex)
                 : EXTENDED[extendedIndex].value;
@@ -392,7 +473,7 @@ public final class HudCheckState {
         state.guidePoint = "";
         state.navigationRatio = 0.0d;
         state.includeNativeArrow = true;
-        state.includeLaneBitmap = laneBitmap;
+        state.includeLaneBitmap = effectiveLaneBitmap();
         state.turnBitmapHiddenLocked = false;
         return state;
     }
@@ -400,7 +481,56 @@ public final class HudCheckState {
     private HudCheckState replace(int maneuver, int lanes, int distance, int street,
                                   int trafficLight, int extended) {
         return new HudCheckState(mode, running, automatic, maneuver, lanes, distance, street,
-                trafficLight, maneuverBitmap, laneBitmap, transliterate, extended, legacyBasic);
+                trafficLight, maneuverBitmap, laneBitmap, transliterate, extended, format, codeTable);
+    }
+
+    private int nextLaneIndex(int current, int delta) {
+        if (format != Format.C) {
+            return wrap(wrap(current, LANES.length) + Math.floorMod(delta, LANES.length), LANES.length);
+        }
+        int[] valid = representableLaneIndexes();
+        if (valid.length == 0) return wrap(current, LANES.length);
+        int position = 0;
+        int effective = effectiveLaneIndex();
+        while (position < valid.length && valid[position] != effective) position++;
+        if (position == valid.length) position = 0;
+        return valid[wrap(position + Math.floorMod(delta, valid.length), valid.length)];
+    }
+
+    private int effectiveLaneIndex() {
+        if (format != Format.C || lanePatternRepresentable(laneIndex)) return laneIndex;
+        int[] valid = representableLaneIndexes();
+        return valid.length == 0 ? laneIndex : valid[0];
+    }
+
+    private static int[] representableLaneIndexes() {
+        int count = 0;
+        for (int index = 0; index < LANES.length; index++) {
+            if (lanePatternRepresentable(index)) count++;
+        }
+        int[] indexes = new int[count];
+        int next = 0;
+        for (int index = 0; index < LANES.length; index++) {
+            if (lanePatternRepresentable(index)) indexes[next++] = index;
+        }
+        return indexes;
+    }
+
+    private static boolean lanePatternRepresentable(int index) {
+        HudLaneModel.LaneSpec[] lanes = laneSpecs(index);
+        if (lanes.length == 0) return false;
+        for (HudLaneModel.LaneSpec lane : lanes) {
+            if (lane.instrumentCode() < 0) return false;
+        }
+        return true;
+    }
+
+    private static HudLaneModel.LaneSpec[] laneSpecs(int index) {
+        String pattern = LANES[wrap(index, LANES.length)];
+        HudState state = new HudState();
+        state.numOfLanes = laneCount(pattern);
+        state.laneString = pattern.replace(" ", "");
+        return HudLaneModel.parse(state);
     }
 
     private HudCheckLiveScenario liveScenario() {
@@ -430,14 +560,14 @@ public final class HudCheckState {
                 && trafficLightIndex == that.trafficLightIndex
                 && maneuverBitmap == that.maneuverBitmap && laneBitmap == that.laneBitmap
                 && transliterate == that.transliterate && extendedIndex == that.extendedIndex
-                && mode == that.mode && legacyBasic == that.legacyBasic;
+                && mode == that.mode && format == that.format && codeTable == that.codeTable;
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(mode, running, automatic, maneuverIndex, laneIndex, distanceIndex,
                 streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap, transliterate,
-                extendedIndex, legacyBasic);
+                extendedIndex, format, codeTable);
     }
 
     private static class Label {

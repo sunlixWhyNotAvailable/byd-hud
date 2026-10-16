@@ -617,14 +617,14 @@ final class NavHudLiveSender {
                 HudCheckState::stop, reason);
     }
 
-    static void resetLegacyHudCheckOnBackground() {
+    static void stopBasicHudCheckOnBackground() {
         // Keep the Basic background stop, but retain its format for the next diagnostic mode.
         NavHudLiveSender current;
         synchronized (NavHudLiveSender.class) {
             current = instance;
         }
         if (current != null) current.updateHudCheck(state -> state.mode == HudCheckState.Mode.BASIC
-                && state.legacyBasic ? state.stop() : state, "hud-check-background");
+                ? state.stop() : state, "hud-check-background");
     }
 
     static boolean isCurrentMapLiveSessionForTest(HudMapLiveState state, long session) {
