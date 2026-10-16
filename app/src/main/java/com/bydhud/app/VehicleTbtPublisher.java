@@ -382,15 +382,31 @@ final class VehicleTbtPublisher {
             DirectTbtFrame frame, String reason) {
         if (frame == null) return;
         if (!matches(packageName, generation)) {
+            if (!frame.hasGuidance()) return;
             if (routeActive) return;
             beginRoute(packageName, generation, false, false);
         }
         if (!routeActive || !matches(packageName, generation)) return;
-        handoffPendingInstrumentRecovery = false;
+        boolean hasGuidance = frame.hasGuidance();
+        if (hasGuidance) handoffPendingInstrumentRecovery = false;
         Trace trace = trace(packageName, generation, reason, frame, null);
         lastGuidanceHasAmapFallback = true;
-        sendInstrumentFrame(frame, trace);
+        if (hasGuidance) sendInstrumentFrame(frame, trace);
         NativeEtaSnapshot etaSnapshot = updateNativeEta(frame, trace, reason);
+        dispatchNativeEtaSnapshot(etaSnapshot, frame, trace, reason, false, true);
+    }
+
+    void clearGuidance(String packageName, long generation, String reason) {
+        if (!routeActive || !matches(packageName, generation)) return;
+        ++routeToken;
+        resetGuidanceDedup();
+        resetNativeEtaCaches("guidance-unavailable:" + safe(reason));
+        DirectTbtFrame frame = latestNativeEtaFrame == null
+                ? DirectTbtFrame.empty() : latestNativeEtaFrame.withoutGuidance();
+        Trace trace = trace(packageName, generation, reason, frame, null);
+        sendInstrumentGuidance(0, -1, "", LanePayload.EMPTY, trace, true);
+        NativeEtaSnapshot etaSnapshot = updateNativeEta(frame, trace, reason);
+        lastGuidanceHasAmapFallback = true;
         dispatchNativeEtaSnapshot(etaSnapshot, frame, trace, reason, false, true);
     }
 
@@ -1270,8 +1286,11 @@ final class VehicleTbtPublisher {
 
     private void sendAmapFrame(DirectTbtFrame frame, Trace trace,
             NativeEtaSnapshot etaSnapshot, boolean deduplicate) {
-        sendAmapFrame(frame.getAmapBroadcastManeuver(), frame.getRoundaboutExitNumber(),
-                frame.getDistanceMeters(), roadTextForTest(frame),
+        boolean hasGuidance = frame.hasGuidance();
+        sendAmapFrame(hasGuidance ? frame.getAmapBroadcastManeuver() : 0,
+                hasGuidance ? frame.getRoundaboutExitNumber() : 0,
+                hasGuidance ? frame.getDistanceMeters() : -1,
+                hasGuidance ? roadTextForTest(frame) : "",
                 selectMetrics(frame), trace, deduplicate, etaSnapshot);
     }
 

@@ -167,6 +167,30 @@ public final class DirectTbtFrame {
 
     SourceDistance getSourceDistance() { return sourceDistance; }
 
+    /** True when this frame has any current instruction evidence, including unknown source enums. */
+    boolean hasGuidance() {
+        return rawManeuverType >= 0
+                || amapManeuver > 0
+                || amapBroadcastManeuver > 0
+                || (bydManeuver > 0 && bydManeuver != 99)
+                || roundaboutExitNumber > 0
+                || sourceDistance != null
+                || distanceMeters > 0
+                || !roadText.trim().isEmpty()
+                || !cueText.trim().isEmpty()
+                || !displayText.trim().isEmpty()
+                || maneuverPng.length > 0
+                || lanePng.length > 0
+                || !lanes.isEmpty();
+    }
+
+    /** Clears only current-instruction fields; route metrics, warnings and speed remain independent. */
+    DirectTbtFrame withoutGuidance() {
+        return new DirectTbtFrame(-1, 0, 0, 0, "", "", "", null, null,
+                Collections.emptyList(), alertOverlay.withRouteFrame(false), tripMetrics, speedLimit,
+                0, 0, RoundaboutExit.unknown(), null);
+    }
+
     /** Original numeric measurement; UI rounding and partial frames must not renew its age. */
     static final class SourceDistance {
         final int meters;

@@ -239,6 +239,7 @@ final class HudOutputCoordinator {
     private boolean directLossClearSent;
     private String directOwnerPackage = "";
     private long directOwnerSessionGeneration = Long.MIN_VALUE;
+    private long directGuidanceClearAtMs = Long.MIN_VALUE;
     private long directLeaseDeadlineMs;
     private long pendingDirectReceivedAtMs;
     private String pendingDirectReason = "";
@@ -595,15 +596,32 @@ final class HudOutputCoordinator {
             String ownerPackage, long ownerSessionGeneration, String sourceRoad) {
         worker.post(() -> {
             if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) return;
-            directFrame = frame;
-            directSourceRoad = sourceRoad == null ? "" : sourceRoad;
+            if (directGuidanceClearAtMs != Long.MIN_VALUE
+                    && (receivedAtMs <= 0L || receivedAtMs < directGuidanceClearAtMs)) {
+                log("direct stale frame rejected owner=" + safe(ownerPackage)
+                        + " session=" + ownerSessionGeneration
+                        + " receivedAtElapsedMs=" + receivedAtMs
+                        + " guidanceClearAtElapsedMs=" + directGuidanceClearAtMs);
+                return;
+            }
+            directFrame = frame == null ? DirectTbtFrame.empty()
+                    : frame.hasGuidance() ? frame : frame.withoutGuidance();
+            directSourceRoad = directFrame.hasGuidance() && sourceRoad != null
+                    ? sourceRoad : "";
             preparedDirectFrame = null;
+            preparedOutputFrame = null;
+            preparedSpatialResult = null;
+            preparedSpatialUsable = false;
+            preparedSpatialReset = false;
             preparedDirectPayload = null;
             preparedDirectSemanticPayload = null;
-            directBitmapSelection = bitmapSelection;
-            directBitmapTxLogger = bitmapTxLogger;
-            directChannel = bitmapTxLogger == null ? "waze_direct" : "gmaps_direct";
-            if (bitmapSelection == null) lastBitmapTxDiagnosticKey = "";
+            preparedDirectBitmapSelection = null;
+            preparedDirectBitmapTxLogger = null;
+            directBitmapSelection = directFrame.hasGuidance() ? bitmapSelection : null;
+            directBitmapTxLogger = directFrame.hasGuidance() ? bitmapTxLogger : null;
+            directChannel = GMapsDirectChannel.OWNER_PACKAGE.equals(safe(ownerPackage))
+                    ? "gmaps_direct" : "waze_direct";
+            if (directBitmapSelection == null) lastBitmapTxDiagnosticKey = "";
             pendingDirectReceivedAtMs = receivedAtMs;
             pendingDirectReason = safe(reason);
             if (directFirstFrameAtMs <= 0L) {
@@ -614,6 +632,64 @@ final class HudOutputCoordinator {
             renewDirectLeaseOnWorker(ownerPackage, ownerSessionGeneration, reason);
             if (activeSource == Source.DIRECT && !sendScheduled) {
                 scheduleSend(0L);
+            }
+        });
+    }
+
+    void clearDirectGuidance(String ownerPackage, long ownerSessionGeneration,
+            String reason, long nowMs) {
+        worker.post(() -> {
+            if (!matchesDirectOwner(ownerPackage, ownerSessionGeneration)
+                    || !directSelectedOnWorker()) {
+                log("direct guidance clear rejected owner=" + safe(ownerPackage)
+                        + " session=" + ownerSessionGeneration
+                        + " reason=" + safe(reason));
+                return;
+            }
+            long clearedAtMs = nowMs > 0L ? nowMs : SystemClock.elapsedRealtime();
+            if (directGuidanceClearAtMs != Long.MIN_VALUE
+                    && clearedAtMs < directGuidanceClearAtMs) {
+                log("direct guidance clear stale owner=" + safe(ownerPackage)
+                        + " session=" + ownerSessionGeneration
+                        + " clearedAtElapsedMs=" + clearedAtMs
+                        + " currentClearAtElapsedMs=" + directGuidanceClearAtMs);
+                return;
+            }
+            directGuidanceClearAtMs = clearedAtMs;
+            directFrame = directFrame == null
+                    ? DirectTbtFrame.empty() : directFrame.withoutGuidance();
+            directSourceRoad = "";
+            preparedDirectFrame = null;
+            preparedOutputFrame = null;
+            preparedSpatialResult = null;
+            preparedSpatialUsable = false;
+            preparedSpatialReset = false;
+            preparedDirectPayload = null;
+            candidateDirectPayload = null;
+            preparedDirectSemanticPayload = null;
+            preparedDirectOptions = null;
+            preparedDirectOptionsRevision = -1;
+            preparedEtaContext = "";
+            preparedEtaWallMinute = Long.MIN_VALUE;
+            preparedEtaCacheKey = "";
+            preparedDirectBitmapSelection = null;
+            preparedDirectBitmapTxLogger = null;
+            directBitmapSelection = null;
+            directBitmapTxLogger = null;
+            lastBitmapTxDiagnosticKey = "";
+            maneuverGeometryDiagnostic = "";
+            liveSpatialTxDiagnostic = "";
+            resetEtaStreetText("guidance-unavailable:" + safe(reason));
+            pendingDirectReceivedAtMs = clearedAtMs;
+            pendingDirectReason = "guidance-unavailable:" + safe(reason);
+            renewDirectLeaseOnWorker(ownerPackage, ownerSessionGeneration, reason);
+            log("direct guidance unavailable owner=" + safe(ownerPackage)
+                    + " session=" + ownerSessionGeneration
+                    + " reason=" + safe(reason));
+            if (activeSource == Source.DIRECT) {
+                worker.removeCallbacks(sendLoop);
+                sendScheduled = false;
+                scheduleImmediate("guidance-unavailable:" + safe(reason));
             }
         });
     }
@@ -2347,6 +2423,7 @@ final class HudOutputCoordinator {
             pendingDirectReason = "";
             directOwnerPackage = owner;
             directOwnerSessionGeneration = ownerSessionGeneration;
+            directGuidanceClearAtMs = Long.MIN_VALUE;
             resetDirectTransportTiming();
             log("direct owner advanced owner=" + owner
                     + " session=" + ownerSessionGeneration);
@@ -2557,6 +2634,7 @@ final class HudOutputCoordinator {
         directLeaseDeadlineMs = 0L;
         directOwnerPackage = "";
         directOwnerSessionGeneration = Long.MIN_VALUE;
+        directGuidanceClearAtMs = Long.MIN_VALUE;
         directLossClearPending = false;
         directLossClearSent = false;
         resetDirectTransportTiming();

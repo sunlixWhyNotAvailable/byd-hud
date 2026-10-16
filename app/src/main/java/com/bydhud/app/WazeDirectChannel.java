@@ -159,6 +159,11 @@ public final class WazeDirectChannel {
     private int alertRevision;
     private int lastKnownRawManeuverType = -1;
     private boolean navigationDistanceKnown;
+    private boolean guidanceUnavailable = true;
+    private long latestGuidanceIngressSequence = -1L;
+    private long latestGuidanceControlSequence = -1L;
+    private String guidanceUnavailableReason = "";
+    private int repeatedGuidanceUnavailableCount;
     private Runnable frameSilenceCheck;
     private Runnable healthProbeTimeout;
     private long lastDirectActivityMs;
@@ -193,6 +198,10 @@ public final class WazeDirectChannel {
                 terminalBridgeGeneration = bridgeGeneration;
             }
             rearmRouteTerminal("accepted_fresh_route:" + safeText(reason));
+            // A new accepted route can leave a cached listener frame even when this
+            // channel already considers guidance unavailable from the prior route.
+            guidanceUnavailableReason = "";
+            invalidateGuidance(ingress, "accepted_fresh_route:" + safeText(reason));
         });
     }
 
@@ -244,6 +253,12 @@ public final class WazeDirectChannel {
         return sessionGeneration;
     }
 
+    long latestIngressSequence() {
+        synchronized (tripStateLock) {
+            return navigationIngressSequence;
+        }
+    }
+
     /** Creates the real Binder hosts with a current process permit for Robolectric tests. */
     IngressTestHosts ingressHostsForTest(Mode requestedMode) {
         long now = SystemClock.elapsedRealtime();
@@ -261,6 +276,7 @@ public final class WazeDirectChannel {
         terminalRouteLatched = false;
         acceptedRouteFrame = false;
         navigationFrame = DirectTbtFrame.empty();
+        guidanceUnavailable = true;
         navigationActive = false;
         mode = requestedMode == null ? Mode.CLUSTER : requestedMode;
         CarHost host = new CarHost(generation);
@@ -300,8 +316,10 @@ public final class WazeDirectChannel {
             clearAlert(false, "alerts_disabled");
             DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
             int callbackGeneration = sessionGeneration;
+            long guidanceSequence = latestGuidanceIngressSequence;
             callback(() -> listener.onAlertCleared(
-                    OWNER_PACKAGE, callbackGeneration, frame, "alerts_disabled"));
+                    OWNER_PACKAGE, callbackGeneration, frame, guidanceSequence,
+                    "alerts_disabled"));
         });
     }
 
@@ -404,6 +422,9 @@ public final class WazeDirectChannel {
         navigationFrame = DirectTbtFrame.empty();
         lastKnownRawManeuverType = -1;
         navigationDistanceKnown = false;
+        guidanceUnavailable = true;
+        guidanceUnavailableReason = "";
+        repeatedGuidanceUnavailableCount = 0;
         alert = DirectTbtFrame.AlertOverlay.inactive();
         maneuverIcons.clear();
     }
@@ -758,27 +779,33 @@ public final class WazeDirectChannel {
         if (!(info instanceof RoutingInfo)) {
             log("navigation info=" + typeName(info));
             if (info == null) {
-                if (acceptedRouteFrame) {
-                    handleNavigationEndHint("navigation_info_null", ingress.sequence);
-                } else {
-                    log("navigation info null ignored before first route frame");
-                }
+                invalidateGuidance(ingress, "navigation_info_missing");
             }
             return;
         }
         RoutingInfo routing = (RoutingInfo) info;
         int sequence = ++routingSequence;
+        if (routing.isLoading()) {
+            invalidateGuidance(ingress, "routing_info_loading");
+            return;
+        }
         Step current = routing.getCurrentStep();
         log("routing sequence=" + sequence + " current=" + (current != null)
                 + " next=" + (routing.getNextStep() != null));
-        if (current != null) {
+        if (current == null) {
+            invalidateGuidance(ingress, "routing_current_step_missing");
+        } else {
+            Distance distance = routing.getCurrentDistance();
+            if (distance == null) {
+                invalidateGuidance(ingress, "routing_current_distance_missing");
+                return;
+            }
             WazeStepData step = WazeStepData.from(current);
             ingress.diagnostic.normalized(SystemClock.elapsedRealtime());
             mergeTripUpdate(expectedGeneration, connectionPermit,
                     new WazeTripStateQueue.Update<>(ingress.sequence,
-                            ingress.elapsedTimeMs, true, step,
-                            routing.getCurrentDistance() != null,
-                            meters(routing.getCurrentDistance()), true,
+                            ingress.elapsedTimeMs, true, step, true,
+                            meters(distance), true,
                             step.rawType, step.lanes.hasGuidance, false, null));
         }
         logNextStep(routing.getNextStep(), "routing_next:" + sequence);
@@ -895,6 +922,9 @@ public final class WazeDirectChannel {
         navigationFrame = DirectTbtFrame.empty();
         lastKnownRawManeuverType = -1;
         navigationDistanceKnown = false;
+        guidanceUnavailable = true;
+        guidanceUnavailableReason = "";
+        repeatedGuidanceUnavailableCount = 0;
         alert = DirectTbtFrame.AlertOverlay.inactive();
         alertRevision++;
         cancelAlertWatchdog();
@@ -986,6 +1016,9 @@ public final class WazeDirectChannel {
         navigationFrame = DirectTbtFrame.empty();
         lastKnownRawManeuverType = -1;
         navigationDistanceKnown = false;
+        guidanceUnavailable = true;
+        guidanceUnavailableReason = "";
+        repeatedGuidanceUnavailableCount = 0;
         maneuverIcons.clear();
         if (!navigationActive) return;
         int routeGeneration = sessionGeneration;
@@ -996,6 +1029,47 @@ public final class WazeDirectChannel {
                     OWNER_PACKAGE, routeGeneration, callbackGeneration, reason));
         } else {
             log("navigation session cleared without route end reason=" + reason);
+        }
+    }
+
+    private void invalidateGuidance(IngressStamp ingress, String reason) {
+        if (ingress == null || !active || suspended || shutdown
+                || ingress.sessionGeneration != sessionGeneration) return;
+        discardTripStateThrough(ingress.sequence);
+        if (ingress.sequence < latestGuidanceControlSequence) return;
+        latestGuidanceControlSequence = ingress.sequence;
+        if (ingress.sequence < latestGuidanceIngressSequence) {
+            log("stale guidance invalidation ignored sequence=" + ingress.sequence
+                    + " current=" + latestGuidanceIngressSequence
+                    + " reason=" + safeText(reason));
+            return;
+        }
+
+        boolean notifyListener = !guidanceUnavailable || guidanceUnavailableReason.isEmpty();
+        String safeReason = safeText(reason);
+        if (!guidanceUnavailable || guidanceUnavailableReason.isEmpty()) {
+            log("guidance unavailable sequence=" + ingress.sequence
+                    + " reason=" + safeReason);
+            guidanceUnavailableReason = safeReason;
+            repeatedGuidanceUnavailableCount = 0;
+        } else if (safeReason.equals(guidanceUnavailableReason)) {
+            repeatedGuidanceUnavailableCount++;
+        } else {
+            log("guidance remains unavailable sequence=" + ingress.sequence
+                    + " reason=" + safeReason + " previous=" + guidanceUnavailableReason
+                    + " repeated=" + repeatedGuidanceUnavailableCount);
+            guidanceUnavailableReason = safeReason;
+            repeatedGuidanceUnavailableCount = 0;
+        }
+        guidanceUnavailable = true;
+        navigationFrame = navigationFrame.withoutGuidance();
+        lastKnownRawManeuverType = -1;
+        navigationDistanceKnown = false;
+        maneuverIcons.clear();
+        if (notifyListener) {
+            int callbackGeneration = sessionGeneration;
+            callback(() -> listener.onGuidanceUnavailable(
+                    OWNER_PACKAGE, callbackGeneration, ingress.sequence, safeReason));
         }
     }
 
@@ -1020,6 +1094,17 @@ public final class WazeDirectChannel {
                                 snapshot.distanceElapsedMs) : null);
         navigationDistanceKnown = snapshot.distanceKnown;
         acceptedRouteFrame = true;
+        latestGuidanceIngressSequence = Math.max(
+                latestGuidanceIngressSequence, snapshot.guidanceSequence);
+        if (guidanceUnavailable) {
+            log("guidance restored sequence=" + snapshot.guidanceSequence
+                    + (guidanceUnavailableReason.isEmpty() ? ""
+                            : " after=" + guidanceUnavailableReason
+                                    + " repeated=" + repeatedGuidanceUnavailableCount));
+        }
+        guidanceUnavailable = false;
+        guidanceUnavailableReason = "";
+        repeatedGuidanceUnavailableCount = 0;
         int nextRaw = snapshot.step.rawType;
         if (nextRaw >= 0) lastKnownRawManeuverType = nextRaw;
         if (snapshot.laneDisposition == WazeTripStateQueue.LANES_PRESERVE
@@ -1084,12 +1169,13 @@ public final class WazeDirectChannel {
         }
         DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
         int callbackGeneration = sessionGeneration;
+        long guidanceSequence = latestGuidanceIngressSequence;
         WazeRouteTiming.Frame timing = suppliedTiming != null ? suppliedTiming
                 : routeTiming == null || !routeFrame ? null
                 : routeTiming.beginFrame(SystemClock.elapsedRealtime(), reason);
         if (timing != null) timing.markListenerHandoff(SystemClock.elapsedRealtime());
         callback(() -> listener.onFrame(
-                OWNER_PACKAGE, callbackGeneration, frame, reason, timing));
+                OWNER_PACKAGE, callbackGeneration, frame, guidanceSequence, reason, timing));
     }
 
     static boolean shouldUseRouteFrameDuringAlert(
@@ -1262,7 +1348,7 @@ public final class WazeDirectChannel {
         List<DirectTbtFrame.Lane> out = new ArrayList<>();
         for (Lane lane : lanes) {
             List<LaneDirection> directions = lane.getDirections();
-            if (directions == null || directions.isEmpty()) continue;
+            if (directions == null || directions.isEmpty()) return Collections.emptyList();
             int fullMask = 0;
             int selectedMask = 0;
             StringBuilder raw = new StringBuilder();
@@ -1364,7 +1450,8 @@ public final class WazeDirectChannel {
         synchronized (tripStateLock) {
             if (!hasCurrentIngressIdentity(expectedGeneration, expectedPermit)) return null;
             IngressStamp ingress = new IngressStamp(++navigationIngressSequence,
-                    SystemClock.elapsedRealtime(), System.currentTimeMillis(), expectedGeneration, "Trip");
+                    SystemClock.elapsedRealtime(), System.currentTimeMillis(), expectedGeneration,
+                    sessionGeneration, "Trip");
             pendingTripNormalizations.add(ingress.sequence);
             trackIngress(ingress);
             return ingress;
@@ -1382,7 +1469,8 @@ public final class WazeDirectChannel {
             String source, IngressControl action) {
         synchronized (tripStateLock) {
             IngressStamp ingress = new IngressStamp(++navigationIngressSequence,
-                    SystemClock.elapsedRealtime(), System.currentTimeMillis(), expectedGeneration, source);
+                    SystemClock.elapsedRealtime(), System.currentTimeMillis(), expectedGeneration,
+                    sessionGeneration, source);
             pendingTripControls.add(ingress.sequence);
             ingress.diagnostic.handlerPost = SystemClock.elapsedRealtime();
             trackIngress(ingress);
@@ -1415,6 +1503,35 @@ public final class WazeDirectChannel {
             if (trace != null && !trace.merged) ingressDiagnostics.remove(sequence);
             refreshOldestDiagnostic();
             scheduleTripStateDrainLocked();
+        }
+    }
+
+    private void queueTripGuidanceUnavailable(int expectedGeneration,
+            WazeStartAdmission.Permit expectedPermit, IngressStamp ingress, String reason) {
+        synchronized (tripStateLock) {
+            if (!hasCurrentIngressIdentity(expectedGeneration, expectedPermit)
+                    || suspended || ingress.sessionGeneration != sessionGeneration) return;
+            pendingTripControls.add(ingress.sequence);
+            ingress.diagnostic.handlerPost = SystemClock.elapsedRealtime();
+            boolean posted = channelHandler.post(() -> {
+                ingress.diagnostic.actionStart = SystemClock.elapsedRealtime();
+                ingress.diagnostic.stage = "guidance_control";
+                try {
+                    if (hasCurrentIngressIdentity(expectedGeneration, expectedPermit)
+                            && !suspended
+                            && ingress.sessionGeneration == sessionGeneration) {
+                        invalidateGuidance(ingress, reason);
+                    }
+                } finally {
+                    completeTripControl(ingress.sequence);
+                }
+            });
+            if (!posted) {
+                pendingTripControls.remove(ingress.sequence);
+                ingressDiagnostics.remove(ingress.sequence);
+                refreshOldestDiagnostic();
+                scheduleTripStateDrainLocked();
+            }
         }
     }
 
@@ -1854,10 +1971,14 @@ public final class WazeDirectChannel {
         void onNavigationStarted(String ownerPackage, int sessionGeneration, String reason);
 
         void onFrame(String ownerPackage, int sessionGeneration,
-                DirectTbtFrame frame, String reason, WazeRouteTiming.Frame timing);
+                DirectTbtFrame frame, long guidanceSequence,
+                String reason, WazeRouteTiming.Frame timing);
+
+        void onGuidanceUnavailable(String ownerPackage, int sessionGeneration,
+                long sequence, String reason);
 
         void onAlertCleared(String ownerPackage, int sessionGeneration,
-                DirectTbtFrame frame, String reason);
+                DirectTbtFrame frame, long guidanceSequence, String reason);
 
         void onNavigationEnded(String ownerPackage, int routeGeneration,
                 int callbackGeneration, String reason);
@@ -2298,6 +2419,7 @@ public final class WazeDirectChannel {
         IngressStamp ingress = beginTripIngress(expectedGeneration, expectedPermit);
         if (ingress == null) return;
         WazeTripStateQueue.Update<WazeStepData, DirectTbtFrame.TripMetrics> update = null;
+        String unavailableReason = null;
         ingress.diagnostic.normalizing(SystemClock.elapsedRealtime());
         try {
             Object value = bundle == null ? null : bundle.get();
@@ -2306,29 +2428,42 @@ public final class WazeDirectChannel {
                 return;
             }
             Trip trip = (Trip) value;
-            List<TravelEstimate> destinationEstimates =
-                    trip.getDestinationTravelEstimates();
-            DirectTbtFrame.TripMetrics tripMetrics = destinationMetrics(
-                    destinationEstimates, ingress.wallTimeMs);
-            List<Step> steps = trip.getSteps();
-            WazeStepData step = steps == null || steps.isEmpty()
-                    ? null : WazeStepData.from(steps.get(0));
-            Distance distance = null;
-            if (step != null) {
-                List<TravelEstimate> estimates = trip.getStepTravelEstimates();
-                if (estimates != null && !estimates.isEmpty()) {
-                    distance = estimates.get(0) == null
-                            ? null : estimates.get(0).getRemainingDistance();
+            if (trip.isLoading()) {
+                unavailableReason = "trip_loading";
+            } else {
+                List<TravelEstimate> destinationEstimates =
+                        trip.getDestinationTravelEstimates();
+                DirectTbtFrame.TripMetrics tripMetrics = destinationMetrics(
+                        destinationEstimates, ingress.wallTimeMs);
+                List<Step> steps = trip.getSteps();
+                WazeStepData step = steps == null || steps.isEmpty()
+                        ? null : WazeStepData.from(steps.get(0));
+                Distance distance = null;
+                if (step != null) {
+                    List<TravelEstimate> estimates = trip.getStepTravelEstimates();
+                    if (estimates != null && !estimates.isEmpty()) {
+                        distance = estimates.get(0) == null
+                                ? null : estimates.get(0).getRemainingDistance();
+                    }
+                }
+                if (step != null && distance == null) {
+                    unavailableReason = "trip_current_distance_missing";
+                } else {
+                    update = new WazeTripStateQueue.Update<>(ingress.sequence,
+                            ingress.elapsedTimeMs, step != null, step, distance != null,
+                            meters(distance), step != null && step.lanes.hasLaneData,
+                            step == null ? -1 : step.rawType,
+                            step != null && step.lanes.hasGuidance, true, tripMetrics);
                 }
             }
-            update = new WazeTripStateQueue.Update<>(ingress.sequence,
-                    ingress.elapsedTimeMs, step != null, step, distance != null,
-                    meters(distance), false, step == null ? -1 : step.rawType,
-                    step != null && step.lanes.hasGuidance, true, tripMetrics);
         } catch (Throwable t) {
             log("trip parse failed: " + t);
         } finally {
             ingress.diagnostic.normalized(SystemClock.elapsedRealtime());
+            if (unavailableReason != null) {
+                queueTripGuidanceUnavailable(expectedGeneration, expectedPermit,
+                        ingress, unavailableReason);
+            }
             finishTripIngress(expectedGeneration, expectedPermit, ingress, update);
         }
     }
@@ -2511,12 +2646,15 @@ public final class WazeDirectChannel {
         final long sequence;
         final long elapsedTimeMs;
         final long wallTimeMs;
+        final int sessionGeneration;
         final WazeRouteTiming.Ingress diagnostic;
 
-        IngressStamp(long sequence, long elapsedTimeMs, long wallTimeMs, int generation, String source) {
+        IngressStamp(long sequence, long elapsedTimeMs, long wallTimeMs, int generation,
+                int sessionGeneration, String source) {
             this.sequence = sequence;
             this.elapsedTimeMs = elapsedTimeMs;
             this.wallTimeMs = wallTimeMs;
+            this.sessionGeneration = sessionGeneration;
             diagnostic = new WazeRouteTiming.Ingress(sequence, elapsedTimeMs, generation, source);
         }
     }
@@ -2584,19 +2722,23 @@ public final class WazeDirectChannel {
     private static final class WazeLaneData {
         final CarIcon icon;
         final List<DirectTbtFrame.Lane> mapped;
+        final boolean hasLaneData;
         final boolean hasGuidance;
 
         private WazeLaneData(CarIcon icon, List<DirectTbtFrame.Lane> mapped,
-                boolean hasGuidance) {
+                boolean hasLaneData, boolean hasGuidance) {
             this.icon = icon;
             this.mapped = mapped;
+            this.hasLaneData = hasLaneData;
             this.hasGuidance = hasGuidance;
         }
 
         static WazeLaneData from(Step step) {
             CarIcon icon = step.getLanesImage();
-            List<DirectTbtFrame.Lane> mapped = mapLanes(step.getLanes());
+            List<Lane> sourceLanes = step.getLanes();
+            List<DirectTbtFrame.Lane> mapped = mapLanes(sourceLanes);
             return new WazeLaneData(icon, mapped,
+                    icon != null || sourceLanes != null && !sourceLanes.isEmpty(),
                     icon != null || !mapped.isEmpty());
         }
     }

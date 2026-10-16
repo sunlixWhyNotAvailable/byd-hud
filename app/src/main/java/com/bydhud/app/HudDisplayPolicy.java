@@ -23,7 +23,7 @@ final class HudDisplayPolicy {
 
     static DirectTbtFrame applyActiveFrame(
             DirectTbtFrame rawFrame, boolean clampSmallDistance) {
-        if (rawFrame == null) return null;
+        if (rawFrame == null || !rawFrame.hasGuidance()) return rawFrame;
         return rawFrame.withDistanceMeters(displayDistanceMeters(
                 rawFrame.getDistanceMeters(), clampSmallDistance));
     }

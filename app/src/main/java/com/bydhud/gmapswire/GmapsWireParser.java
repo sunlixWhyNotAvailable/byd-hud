@@ -178,7 +178,7 @@ public final class GmapsWireParser {
         byte[] distance = firstBytes(step, 3);
         if (distance != null) {
             List<Field> value = parse(distance);
-            long meters = firstVarint(value, 1, -1L);
+            long meters = firstVarint(value, 1, 0L);
             if (meters >= 0) result.put("distanceMeters", meters);
             putString(result, "distanceValue", firstString(value, 2));
             putString(result, "distanceDisplay", firstString(value, 5));
@@ -207,17 +207,22 @@ public final class GmapsWireParser {
         long remainingSeconds = routeMetric == null
                 ? -1L : firstVarint(parse(routeMetric), 1, -1L);
         long remainingDistanceMeters = 0L;
-        boolean distanceAvailable = false;
+        boolean distanceAvailable = currentIndex >= 0 && currentIndex < steps.size();
         int firstRemainingStep = Math.max(0, currentIndex);
         if (firstRemainingStep < steps.size()) {
             for (int index = firstRemainingStep; index < steps.size(); index++) {
                 byte[] distance = firstBytes(parse(steps.get(index)), 3);
-                if (distance == null) continue;
-                long meters = firstVarint(parse(distance), 1, -1L);
-                if (meters < 0L) continue;
+                if (distance == null) {
+                    distanceAvailable = false;
+                    continue;
+                }
+                long meters = firstVarint(parse(distance), 1, 0L);
+                if (meters < 0L) {
+                    distanceAvailable = false;
+                    continue;
+                }
                 remainingDistanceMeters = checkedAdd(
                         remainingDistanceMeters, meters, "route distance");
-                distanceAvailable = true;
             }
         }
         return new LegState(steps, currentIndex, remainingSeconds,

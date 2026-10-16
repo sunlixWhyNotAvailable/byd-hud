@@ -17,6 +17,8 @@ final class VehicleRouteRuntime {
     private final Object lock = new Object();
     private long generation;
     private boolean stopped;
+    private String guidanceOwner = "";
+    private boolean guidanceAvailable;
     private String distanceOwner = "";
     private NavigatorRouteData.Header distanceHeader;
     private DirectTbtFrame.SourceDistance distance;
@@ -74,10 +76,19 @@ final class VehicleRouteRuntime {
         if (state == null || !state.outputEnabled(owner) || !state.permissionsGranted
                 || !HudRuntimeService.isVehiclePositionPermissionGranted())
             return HudSpatialGeometry.Result.off();
+        synchronized (state.lock) {
+            if (state.stopped || !state.guidanceAvailable
+                    || !owner.equals(state.guidanceOwner)) {
+                return HudSpatialGeometry.Result.off();
+            }
+        }
         NavigatorRouteStore.CurrentSnapshot source = NavigatorRouteReceiver.snapshot(owner);
         VehiclePositionController.Snapshot location = HudRuntimeService.getVehiclePositionSnapshot();
         synchronized (state.lock) {
-            if (state.stopped) return HudSpatialGeometry.Result.off();
+            if (state.stopped || !state.guidanceAvailable
+                    || !owner.equals(state.guidanceOwner)) {
+                return HudSpatialGeometry.Result.off();
+            }
             if (HudRuntimeService.isVehiclePositionRuntimeSuspended())
                 return state.fallback(source, "runtime_suspended");
             HudSpatialGeometry.Result ready = state.result;
@@ -121,19 +132,68 @@ final class VehicleRouteRuntime {
 
     static void onFrame(String owner, DirectTbtFrame frame) {
         VehicleRouteRuntime state = current;
-        if (state == null || !NavCapturePrefs.isHudEnabled(state.context, owner)) return;
+        if (state == null || frame == null || !frame.hasGuidance()
+                || !NavCapturePrefs.isHudEnabled(state.context, owner)) return;
         NavigatorRouteStore.CurrentSnapshot route = NavigatorRouteReceiver.snapshot(owner);
         synchronized (state.lock) {
             if (state.stopped) return;
+            if (!state.guidanceAvailable || !owner.equals(state.guidanceOwner)) {
+                state.guidanceOwner = owner;
+                state.guidanceAvailable = true;
+                state.generation++;
+                state.result = null;
+                state.fallback = null;
+                state.resetResolver = true;
+                state.loggedKey = "";
+            }
             state.distanceOwner = owner;
             state.distanceHeader = route == null ? null : route.header;
-            state.distance = frame == null ? null : frame.getSourceDistance();
+            state.distance = frame.getSourceDistance();
         }
         state.schedule();
     }
 
+    static void onGuidanceUnavailable(String owner) {
+        VehicleRouteRuntime state = current;
+        if (state == null || owner == null || owner.isEmpty()
+                || !owner.equals(NavCapturePrefs.getHudPackage(state.context))
+                || !NavCapturePrefs.isHudEnabled(state.context, owner)) return;
+        synchronized (state.lock) {
+            if (state.stopped || (!state.guidanceOwner.isEmpty()
+                    && !owner.equals(state.guidanceOwner))) return;
+            if (!state.guidanceAvailable && owner.equals(state.guidanceOwner)) return;
+            state.guidanceOwner = owner;
+            state.guidanceAvailable = false;
+            state.generation++;
+            if (owner.equals(state.distanceOwner)) {
+                state.distanceOwner = "";
+                state.distanceHeader = null;
+                state.distance = null;
+            }
+            state.result = HudSpatialGeometry.Result.off();
+            state.resultOwner = owner;
+            state.fallback = null;
+            state.resetResolver = true;
+            state.loggedKey = "";
+        }
+        state.worker.removeCallbacks(state.drain);
+        state.worker.removeCallbacks(state.expire);
+    }
+
     private void schedule() {
         String owner = NavCapturePrefs.getHudPackage(context);
+        synchronized (lock) {
+            if (stopped) return;
+            if (!guidanceAvailable || !owner.equals(guidanceOwner)) {
+                result = HudSpatialGeometry.Result.off();
+                resultOwner = owner;
+                fallback = null;
+                resetResolver = true;
+                worker.removeCallbacks(drain);
+                worker.removeCallbacks(expire);
+                return;
+            }
+        }
         boolean active = outputEnabled(owner)
                 && !HudRuntimeService.isVehiclePositionRuntimeSuspended();
         NavigatorRouteStore.CurrentSnapshot source = NavigatorRouteReceiver.snapshot(owner);
@@ -162,12 +222,19 @@ final class VehicleRouteRuntime {
     }
 
     private void refresh() {
+        String owner = NavCapturePrefs.getHudPackage(context);
         final long token;
         final String frameOwner;
         final NavigatorRouteData.Header frameHeader;
         final DirectTbtFrame.SourceDistance sample;
         synchronized (lock) {
-            if (stopped) return;
+            if (stopped || !guidanceAvailable || !owner.equals(guidanceOwner)) {
+                result = HudSpatialGeometry.Result.off();
+                resultOwner = owner;
+                fallback = null;
+                resetResolver = true;
+                return;
+            }
             token = generation;
             frameOwner = distanceOwner;
             frameHeader = distanceHeader;
@@ -179,7 +246,6 @@ final class VehicleRouteRuntime {
             }
         }
         worker.removeCallbacks(expire);
-        String owner = NavCapturePrefs.getHudPackage(context);
         NavigatorRouteStore.CurrentSnapshot snapshot = NavigatorRouteReceiver.snapshot(owner);
         permissionsGranted = HudRuntimeService.hasVehiclePositionPermissions(context);
         boolean requested = outputEnabled(owner);
@@ -217,6 +283,10 @@ final class VehicleRouteRuntime {
             }
             record(unavailable, null, null, SystemClock.elapsedRealtime());
             return;
+        }
+        synchronized (lock) {
+            if (stopped || token != generation || !guidanceAvailable
+                    || !owner.equals(guidanceOwner)) return;
         }
         if (route != snapshot.route) {
             route = snapshot.route;
