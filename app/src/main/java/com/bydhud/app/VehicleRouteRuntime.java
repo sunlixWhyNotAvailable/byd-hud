@@ -71,7 +71,8 @@ final class VehicleRouteRuntime {
 
     static HudSpatialGeometry.Result snapshot(String owner, long nowMs) {
         VehicleRouteRuntime state = current;
-        if (state == null || !state.outputEnabled(owner) || !state.permissionsGranted)
+        if (state == null || !state.outputEnabled(owner) || !state.permissionsGranted
+                || !HudRuntimeService.isVehiclePositionPermissionGranted())
             return HudSpatialGeometry.Result.off();
         NavigatorRouteStore.CurrentSnapshot source = NavigatorRouteReceiver.snapshot(owner);
         VehiclePositionController.Snapshot location = HudRuntimeService.getVehiclePositionSnapshot();
@@ -181,15 +182,16 @@ final class VehicleRouteRuntime {
         String owner = NavCapturePrefs.getHudPackage(context);
         NavigatorRouteStore.CurrentSnapshot snapshot = NavigatorRouteReceiver.snapshot(owner);
         permissionsGranted = HudRuntimeService.hasVehiclePositionPermissions(context);
-        boolean enabled = outputEnabled(owner) && permissionsGranted;
+        boolean requested = outputEnabled(owner);
+        boolean enabled = requested && permissionsGranted;
         boolean suspended = HudRuntimeService.isVehiclePositionRuntimeSuspended();
-        boolean eligible = enabled && !suspended
-                && snapshot != null && snapshot.header != null
+        boolean hasRoute = snapshot != null && snapshot.header != null
                 && (snapshot.route != null
                 || snapshot.outcome == NavigatorRouteStore.Outcome.COLLECTING
                 || snapshot.outcome == NavigatorRouteStore.Outcome.READY_TO_DECODE
                 || snapshot.outcome == NavigatorRouteStore.Outcome.REPLAY_REQUIRED);
-        HudRuntimeService.setVehiclePositionRouteSource(eligible ? owner : null);
+        boolean eligible = enabled && !suspended && hasRoute;
+        HudRuntimeService.setVehiclePositionRouteSource(requested && hasRoute ? owner : null);
         if (!enabled) {
             synchronized (lock) {
                 if (stopped || token != generation) return;

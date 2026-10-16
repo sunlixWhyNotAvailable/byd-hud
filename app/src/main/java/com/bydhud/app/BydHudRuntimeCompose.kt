@@ -2327,45 +2327,6 @@ private fun OptionsTab(
     onDeleteMapProfile: (HudMapProfile.Source) -> Unit
 ) {
     val language = copy.language
-    var pendingVehiclePositionEnable by remember { mutableStateOf(false) }
-    val completeVehiclePositionEnable = {
-        val enabled = pendingVehiclePositionEnable
-                && HudRuntimeService.hasVehiclePositionPermissions(activity)
-        pendingVehiclePositionEnable = false
-        activity.composeSetVehiclePositionEnabled(enabled)
-    }
-    val backgroundLocationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) {
-        activity.composeRefreshVehiclePositionPermission()
-        completeVehiclePositionEnable()
-    }
-    val requestBackgroundLocationPermission = {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-            && (!activity.composeHasVehiclePositionBackgroundPermission()
-                    || !HudRuntimeService.hasVehiclePositionPermissions(activity))
-        ) {
-            backgroundLocationPermissionLauncher.launch(
-                android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
-            )
-        } else {
-            completeVehiclePositionEnable()
-        }
-    }
-    val foregroundLocationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        if (pendingVehiclePositionEnable
-            && (permissions[android.Manifest.permission.ACCESS_FINE_LOCATION] == true
-            || permissions[android.Manifest.permission.ACCESS_COARSE_LOCATION] == true
-            )
-        ) {
-            requestBackgroundLocationPermission()
-        } else {
-            pendingVehiclePositionEnable = false
-            activity.composeSetVehiclePositionEnabled(false)
-        }
-    }
     var widgetColorTarget by remember { mutableStateOf<Boolean?>(null) }
     var showSteeringButtonCapture by remember { mutableStateOf(false) }
     var steeringCaptureLearningRevision by remember { mutableStateOf(0L) }
@@ -2761,27 +2722,12 @@ private fun OptionsTab(
                 SwitchRow(
                     copy.vehiclePosition,
                     copy.vehiclePositionHint,
-                    snapshot.vehiclePositionEnabled || pendingVehiclePositionEnable,
+                    snapshot.vehiclePositionEnabled,
                     palette,
                     rowFill = featureMaturityFill(palette),
                     verticalPadding = 8.dp
                 ) { enabled ->
-                    runAction {
-                        if (!enabled) {
-                            pendingVehiclePositionEnable = false
-                            activity.composeSetVehiclePositionEnabled(false)
-                        } else {
-                            pendingVehiclePositionEnable = true
-                            if (activity.composeHasVehiclePositionForegroundPermission()) {
-                                requestBackgroundLocationPermission()
-                            } else {
-                                foregroundLocationPermissionLauncher.launch(arrayOf(
-                                    android.Manifest.permission.ACCESS_FINE_LOCATION,
-                                    android.Manifest.permission.ACCESS_COARSE_LOCATION
-                                ))
-                            }
-                        }
-                    }
+                    runAction { activity.composeSetVehiclePositionEnabled(enabled) }
                 }
             }
         }

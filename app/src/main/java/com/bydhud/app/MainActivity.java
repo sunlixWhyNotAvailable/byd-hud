@@ -232,6 +232,29 @@ public final class MainActivity extends ComponentActivity {
     private boolean overlayPermissionFlow;
     private boolean overlayPermissionManualPending;
     private boolean overlayPermissionAttempted;
+    private boolean vehiclePositionPermissionPending;
+    private boolean vehiclePositionPermissionCancelled;
+    private boolean vehiclePositionPermissionAttempted;
+    private final ActivityResultLauncher<String[]> vehiclePositionPermissionLauncher = registerForActivityResult(
+            new ActivityResultContracts.RequestMultiplePermissions(), permissions -> {
+                boolean acceptResult = vehiclePositionPermissionPending
+                        && !vehiclePositionPermissionCancelled && !this.exitRequested
+                        && !HudPrefs.isUserShutdownActive(this)
+                        && HudPrefs.isVehiclePositionEnabled(this);
+                vehiclePositionPermissionPending = false;
+                vehiclePositionPermissionCancelled = false;
+                if ("vehicle-position-permission".equals(composeBlockingUiFlow)) composeBlockingUiFlow = "";
+                // Passive permission loss is not a denial; only a completed foreground request disables intent.
+                boolean denied = !permissions.isEmpty()
+                        && !Boolean.TRUE.equals(permissions.get(android.Manifest.permission.ACCESS_FINE_LOCATION))
+                        && !Boolean.TRUE.equals(permissions.get(android.Manifest.permission.ACCESS_COARSE_LOCATION));
+                if (acceptResult && denied) HudPrefs.setVehiclePositionEnabled(this, false);
+                AppEventLogger.event(this, "vehicle_position permission_result accepted=" + acceptResult
+                        + " denied=" + denied + " granted=" + HudRuntimeService.hasVehiclePositionPermissions(this));
+                HudRuntimeService.refreshVehiclePosition(this);
+                invalidateComposeSnapshot();
+                maybeStartPendingAdbAuthorization();
+            });
     private final Runnable overlayPermissionRetry = this::maybeRequestOverlayPermission;
     private final ActivityResultLauncher<Intent> overlayPermissionLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -271,6 +294,15 @@ public final class MainActivity extends ComponentActivity {
         mainDisplayGuard.check(this, "create");
         overlayPermissionFlow = savedInstanceState != null
                 && savedInstanceState.getBoolean("overlay-permission-flow", false);
+        if (savedInstanceState != null) {
+            vehiclePositionPermissionPending = savedInstanceState.getBoolean("vehicle-position-permission-pending");
+            vehiclePositionPermissionCancelled = savedInstanceState.getBoolean("vehicle-position-permission-cancelled");
+            vehiclePositionPermissionAttempted = savedInstanceState.getBoolean("vehicle-position-permission-attempted");
+        }
+        if (!vehiclePositionPermissionPending && getIntent() != null
+                && HudRuntimeService.ACTION_VEHICLE_POSITION_ACCESS.equals(getIntent().getAction())) {
+            vehiclePositionPermissionAttempted = false;
+        }
         destroyed = false;
         HudRuntimeUpgradeGuard.recordVersionStart(this, "activity-create");
         if (HudPrefs.isUserShutdownActive(this)) {
@@ -353,6 +385,11 @@ public final class MainActivity extends ComponentActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         mainDisplayGuard.check(this, "new-intent");
+        if (HudRuntimeService.ACTION_VEHICLE_POSITION_ACCESS.equals(intent.getAction())) {
+            vehiclePositionPermissionAttempted = false;
+            HudRuntimeService.refreshVehiclePosition(this);
+            maybeRequestVehiclePositionPermission();
+        }
     }
 
     @Override
@@ -394,6 +431,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onStop() {
         super.onStop();
+        if (!vehiclePositionPermissionPending) vehiclePositionPermissionAttempted = false;
         NavHudLiveSender.stopBasicHudCheckOnBackground();
         if (exitRequested || isFinishing()) {
             appendStatus("onStop after explicit exit");
@@ -1283,7 +1321,8 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeReportMainUiState(String blockingFlow) {
         mainUiReady = true;
-        String normalizedFlow = overlayPermissionFlow ? "overlay-permission" : normalizeBlockingUiFlow(blockingFlow);
+        String normalizedFlow = vehiclePositionPermissionPending ? "vehicle-position-permission"
+                : overlayPermissionFlow ? "overlay-permission" : normalizeBlockingUiFlow(blockingFlow);
         if (!normalizedFlow.equals(composeBlockingUiFlow)) {
             AppEventLogger.event(this, "adb_auto ui_blocker="
                     + (normalizedFlow.isEmpty() ? "none" : normalizedFlow)
@@ -1328,31 +1367,47 @@ public final class MainActivity extends ComponentActivity {
         setBootMode(enabled);
     }
 
-    public boolean composeHasVehiclePositionForegroundPermission() {
-        return HudRuntimeService.hasVehiclePositionForegroundPermission(this);
-    }
-
-    public boolean composeHasVehiclePositionBackgroundPermission() {
-        return android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q
-                || checkSelfPermission(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                        == PackageManager.PERMISSION_GRANTED;
-    }
-
     public void composeSetVehiclePositionEnabled(boolean enabled) {
         boolean requested = enabled && !exitRequested
-                && !HudPrefs.isUserShutdownActive(this)
-                && HudRuntimeService.hasVehiclePositionPermissions(this);
+                && !HudPrefs.isUserShutdownActive(this);
+        if (!requested && vehiclePositionPermissionPending) vehiclePositionPermissionCancelled = true;
+        if (requested) vehiclePositionPermissionAttempted = false;
         if (HudPrefs.isVehiclePositionEnabled(this) != requested) {
             HudPrefs.setVehiclePositionEnabled(this, requested);
             AppEventLogger.event(this, "ui vehicle_position=" + requested);
         }
         HudRuntimeService.refreshVehiclePosition(this);
         invalidateComposeSnapshot();
+        if (requested) maybeRequestVehiclePositionPermission();
     }
 
-    public void composeRefreshVehiclePositionPermission() {
-        HudRuntimeService.refreshVehiclePosition(this);
-        invalidateComposeSnapshot();
+    private void maybeRequestVehiclePositionPermission() {
+        if (destroyed || exitRequested || !mainUiReady || !activityResumed || !activityWindowFocused
+                || vehiclePositionPermissionPending || vehiclePositionPermissionAttempted
+                || overlayPermissionFlow || !composeBlockingUiFlow.isEmpty()
+                || adbGrantInProgress || LocalAdbBridge.isPermissionGrantInProgress()
+                || NavRuntimePermissionRepair.isRunning() || HudPrefs.isUserShutdownActive(this)
+                || !HudPrefs.isVehiclePositionEnabled(this)
+                || HudRuntimeService.hasVehiclePositionPermissions(this)) return;
+        vehiclePositionPermissionPending = true;
+        vehiclePositionPermissionCancelled = false;
+        vehiclePositionPermissionAttempted = true;
+        composeBlockingUiFlow = "vehicle-position-permission";
+        cancelPendingAutoAdbStart();
+        try {
+            // targetSdk29 supports this system choice; accept foreground-only/one-time grants too.
+            vehiclePositionPermissionLauncher.launch(new String[] {
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                    android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            });
+            AppEventLogger.event(this, "vehicle_position permission_request");
+        } catch (RuntimeException error) {
+            vehiclePositionPermissionPending = false;
+            composeBlockingUiFlow = "";
+            AppEventLogger.event(this, "vehicle_position permission_request_failed error="
+                    + error.getClass().getSimpleName());
+        }
     }
 
     static boolean isUiResumed() {
@@ -1644,6 +1699,9 @@ public final class MainActivity extends ComponentActivity {
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         outState.putBoolean("overlay-permission-flow", overlayPermissionFlow);
+        outState.putBoolean("vehicle-position-permission-pending", vehiclePositionPermissionPending);
+        outState.putBoolean("vehicle-position-permission-cancelled", vehiclePositionPermissionCancelled);
+        outState.putBoolean("vehicle-position-permission-attempted", vehiclePositionPermissionAttempted);
         super.onSaveInstanceState(outState);
     }
 
@@ -5064,6 +5122,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void maybeStartPendingAdbAuthorization() {
+        maybeRequestVehiclePositionPermission();
         maybeRequestOverlayPermission();
         boolean grantInProgress = adbGrantInProgress
                 || LocalAdbBridge.isPermissionGrantInProgress()

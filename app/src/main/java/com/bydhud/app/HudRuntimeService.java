@@ -29,6 +29,8 @@ public final class HudRuntimeService extends Service {
     private static final String TAG = "BydHudRuntimeService";
     private static final String CHANNEL_ID = "byd_hud_runtime";
     private static final int NOTIFICATION_ID = 4302;
+    private static final int LOCATION_ACCESS_NOTIFICATION_ID = 4303;
+    static final String ACTION_VEHICLE_POSITION_ACCESS = "com.bydhud.app.action.VEHICLE_POSITION_ACCESS";
 
     private static final String ACTION_START_PERSISTENT =
             "com.bydhud.app.action.START_PERSISTENT_RUNTIME";
@@ -39,6 +41,7 @@ public final class HudRuntimeService extends Service {
     private static final AtomicBoolean START_IN_FLIGHT = new AtomicBoolean(false);
     private static final Handler POSITION_MAIN_HANDLER = new Handler(Looper.getMainLooper());
     private static volatile HudRuntimeService activeService;
+    private static volatile boolean vehiclePositionPermissionGranted;
     private static volatile String requestedVehiclePositionRouteSource;
     private static volatile Runnable vehiclePositionListener;
     private static Handler startGateHandler;
@@ -67,6 +70,7 @@ public final class HudRuntimeService extends Service {
     private VehiclePositionController vehiclePositionController;
     private boolean locationForegroundActive;
     private boolean locationFgsStartedWhileUiVisible;
+    private boolean locationAccessNotificationVisible;
     private AppOpsManager locationAppOpsManager;
     private volatile boolean vehiclePositionSleeping;
     private String lastVehiclePositionState = "";
@@ -74,12 +78,11 @@ public final class HudRuntimeService extends Service {
         if (packageName == null || getPackageName().equals(packageName)) {
             POSITION_MAIN_HANDLER.post(() -> {
                 if (runtimeDestroyed) return;
-                boolean permissionUnavailable =
-                        clearVehiclePositionPreferenceIfUnauthorized(HudRuntimeService.this);
+                vehiclePositionPermissionGranted = hasVehiclePositionPermissions(HudRuntimeService.this);
                 if (vehiclePositionController != null) {
                     vehiclePositionController.setAcquiring(false);
                 }
-                reconcileVehiclePosition(permissionUnavailable);
+                reconcileVehiclePosition();
                 notifyVehiclePositionListener();
             });
         }
@@ -92,13 +95,6 @@ public final class HudRuntimeService extends Service {
                 vehiclePositionSleeping = true;
             } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
                 vehiclePositionSleeping = false;
-            }
-            boolean permissionUnavailable =
-                    clearVehiclePositionPreferenceIfUnauthorized(HudRuntimeService.this);
-            if (permissionUnavailable) {
-                reconcileVehiclePosition(true);
-                notifyVehiclePositionListener();
-                return;
             }
             if (Intent.ACTION_SCREEN_OFF.equals(action)) {
                 reconcileVehiclePosition();
@@ -150,6 +146,10 @@ public final class HudRuntimeService extends Service {
         return service == null || service.runtimeDestroyed || service.vehiclePositionSleeping;
     }
 
+    static boolean isVehiclePositionPermissionGranted() {
+        return vehiclePositionPermissionGranted;
+    }
+
     /** Listener is called on the main thread; consumers should post work to their own worker. */
     public static void setVehiclePositionListener(Runnable listener) {
         vehiclePositionListener = listener;
@@ -165,31 +165,16 @@ public final class HudRuntimeService extends Service {
     }
 
     static void refreshVehiclePosition(Context context) {
-        Context appContext = context == null ? null : context.getApplicationContext();
-        boolean permissionUnavailable = appContext != null
-                && clearVehiclePositionPreferenceIfUnauthorized(appContext);
         POSITION_MAIN_HANDLER.post(() -> {
             HudRuntimeService service = activeService;
             if (service != null && !service.runtimeDestroyed) {
-                service.reconcileVehiclePosition(permissionUnavailable);
+                service.reconcileVehiclePosition();
             }
             notifyVehiclePositionListener();
         });
     }
 
-    private static boolean clearVehiclePositionPreferenceIfUnauthorized(Context context) {
-        if (!HudPrefs.isVehiclePositionEnabled(context)
-                || hasVehiclePositionPermissions(context)) return false;
-        HudPrefs.setVehiclePositionEnabled(context, false);
-        return true;
-    }
-
     static boolean hasVehiclePositionPermissions(Context context) {
-        if (context == null) return false;
-        boolean backgroundAccessRequired = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
-        if (backgroundAccessRequired
-                && context.checkSelfPermission(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                        != PackageManager.PERMISSION_GRANTED) return false;
         return hasVehiclePositionForegroundPermission(context);
     }
 
@@ -369,6 +354,9 @@ public final class HudRuntimeService extends Service {
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
         super.onCreate();
+        vehiclePositionPermissionGranted = false;
+        locationAccessNotificationVisible = true;
+        showLocationAccessNotification(false);
         runtimeStartInitialized = false;
         runtimeActiveWork = false;
         runtimeDestroyed = false;
@@ -529,6 +517,8 @@ public final class HudRuntimeService extends Service {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         runtimeDestroyed = true;
+        vehiclePositionPermissionGranted = false;
+        showLocationAccessNotification(false);
         requestedVehiclePositionRouteSource = null;
         if (activeService == this) activeService = null;
         if (vehiclePositionController != null) vehiclePositionController.clear();
@@ -558,6 +548,8 @@ public final class HudRuntimeService extends Service {
     }
 
     private void stopVehiclePositionRuntime() {
+        vehiclePositionPermissionGranted = false;
+        showLocationAccessNotification(false);
         requestedVehiclePositionRouteSource = null;
         if (vehiclePositionController != null) vehiclePositionController.clear();
         setLocationForegroundActive(false);
@@ -567,66 +559,67 @@ public final class HudRuntimeService extends Service {
     }
 
     private void reconcileVehiclePosition() {
-        reconcileVehiclePosition(false);
-    }
-
-    private void reconcileVehiclePosition(boolean permissionUnavailable) {
         if (runtimeDestroyed) return;
-        if (!permissionUnavailable && HudPrefs.isVehiclePositionEnabled(this)
-                && !hasVehiclePositionPermissions(this)) {
-            HudPrefs.setVehiclePositionEnabled(this, false);
-            permissionUnavailable = true;
-        }
+        vehiclePositionPermissionGranted = hasVehiclePositionPermissions(this);
         VehiclePositionController controller = vehiclePositionController;
         if (controller == null) return;
         String routeSource = requestedVehiclePositionRouteSource;
         controller.setRouteSource(routeSource);
-        if (permissionUnavailable) {
-            suspendVehiclePosition("permission-unavailable");
-            return;
-        }
-        boolean enabled = routeSource != null
-                && HudPrefs.isVehiclePositionEnabled(this)
+        boolean enabled = HudPrefs.isVehiclePositionEnabled(this)
                 && !HudPrefs.isUserShutdownActive(this)
                 && UserRuntimeSession.allowsRuntime(this);
+        boolean uiVisible = MainActivity.isUiResumed();
+        boolean needsUser = enabled && routeSource != null && !vehiclePositionSleeping && !uiVisible;
         if (!enabled) {
+            showLocationAccessNotification(false);
             suspendVehiclePosition("off/no-source");
             return;
         }
-        if (!hasForegroundLocationPermission()) {
+        if (!vehiclePositionPermissionGranted) {
             suspendVehiclePosition("permission-unavailable");
+            showLocationAccessNotification(needsUser);
             return;
         }
         if (vehiclePositionSleeping) {
-            suspendVehiclePosition("sleep");
+            showLocationAccessNotification(false);
+            pauseVehiclePosition("sleep");
             return;
         }
         boolean backgroundPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
                 || checkSelfPermission(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                         == PackageManager.PERMISSION_GRANTED;
-        boolean uiVisible = MainActivity.isUiResumed();
-        if (!locationForegroundActive && !backgroundPermission && !uiVisible) {
+        if (!backgroundPermission && !uiVisible
+                && !(locationForegroundActive && locationFgsStartedWhileUiVisible)) {
             suspendVehiclePosition("background-unavailable");
-            return;
-        }
-        if (!controller.hasEnabledProvider()) {
-            suspendVehiclePosition("provider-unavailable");
+            showLocationAccessNotification(needsUser);
             return;
         }
         if (!locationForegroundActive && !setLocationForegroundActive(true)) {
             suspendVehiclePosition("location-foreground-unavailable");
+            showLocationAccessNotification(needsUser);
             return;
         }
-        if (!backgroundPermission && !uiVisible && !locationFgsStartedWhileUiVisible) {
-            suspendVehiclePosition("background-unavailable");
+        showLocationAccessNotification(false);
+        if (uiVisible) locationFgsStartedWhileUiVisible = true;
+        if (routeSource == null) {
+            pauseVehiclePosition("armed/no-source");
             return;
         }
-        if (uiVisible && !backgroundPermission) locationFgsStartedWhileUiVisible = true;
+        if (!controller.hasEnabledProvider()) {
+            pauseVehiclePosition("provider-unavailable");
+            return;
+        }
         if (!controller.setAcquiring(true)) {
-            suspendVehiclePosition("provider-unavailable");
+            pauseVehiclePosition("provider-unavailable");
             return;
         }
         recordVehiclePositionState("active");
+    }
+
+    private void pauseVehiclePosition(String state) {
+        // Keep the admitted FGS session across sleep/route gaps without subscribing to location.
+        if (vehiclePositionController != null) vehiclePositionController.setAcquiring(false);
+        recordVehiclePositionState(state);
     }
 
     private void suspendVehiclePosition(String state) {
@@ -640,6 +633,34 @@ public final class HudRuntimeService extends Service {
         if (state.equals(lastVehiclePositionState)) return;
         lastVehiclePositionState = state;
         log("vehicle position state=" + state);
+    }
+
+    private void showLocationAccessNotification(boolean needed) {
+        if (needed == locationAccessNotificationVisible) return;
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager == null) return;
+        if (!needed) {
+            manager.cancel(LOCATION_ACCESS_NOTIFICATION_ID);
+            locationAccessNotificationVisible = false;
+            return;
+        }
+        createNotificationChannel();
+        String language = HudPrefs.uiLanguage(this);
+        String text = "uk".equals(language) ? "Відкрийте BYD HUD для доступу до геопозиції"
+                : "ru".equals(language) ? "Откройте BYD HUD для доступа к геопозиции"
+                : "Open BYD HUD to enable location access";
+        Intent intent = new Intent(this, MainActivity.class)
+                .setAction(ACTION_VEHICLE_POSITION_ACCESS)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent open = PendingIntent.getActivity(this, LOCATION_ACCESS_NOTIFICATION_ID, intent,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT,
+                MainActivityDisplayGuard.tabletOptions());
+        manager.notify(LOCATION_ACCESS_NOTIFICATION_ID, new Notification.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_hud_notification).setContentTitle("BYD HUD")
+                .setContentText(text).setContentIntent(open).setAutoCancel(true).setOnlyAlertOnce(true)
+                .build());
+        locationAccessNotificationVisible = true;
+        log("vehicle position access_notification");
     }
 
     private void startWatchingLocationAppOps() {
@@ -662,15 +683,6 @@ public final class HudRuntimeService extends Service {
             log("location permission observer unavailable error="
                     + error.getClass().getSimpleName());
         }
-    }
-
-    private boolean hasForegroundLocationPermission() {
-        return hasLocationPermissionAndAppOp(this,
-                    android.Manifest.permission.ACCESS_FINE_LOCATION,
-                    AppOpsManager.OPSTR_FINE_LOCATION)
-                || hasLocationPermissionAndAppOp(this,
-                    android.Manifest.permission.ACCESS_COARSE_LOCATION,
-                    AppOpsManager.OPSTR_COARSE_LOCATION);
     }
 
     private static boolean hasLocationPermissionAndAppOp(
