@@ -12,6 +12,7 @@ import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.json.JSONException;
@@ -20,6 +21,7 @@ import org.json.JSONObject;
 final class WazeCaptureDebugWriter {
     private static final String TAG = "BydHudWazeDebugWriter";
     private static final int MAX_PENDING_BITMAPS = 4;
+    private static final int MAX_PENDING_ROUTE_ARTIFACTS = 2;
     private static final String SESSION_LOG = "session.jsonl";
     private static final Object INSTANCE_LOCK = new Object();
 
@@ -32,6 +34,9 @@ final class WazeCaptureDebugWriter {
     private final AtomicInteger pendingTasks = new AtomicInteger();
     private final AtomicInteger pendingBitmaps = new AtomicInteger();
     private final AtomicInteger droppedBitmaps = new AtomicInteger();
+    private final AtomicInteger pendingRouteArtifacts = new AtomicInteger();
+    private final AtomicInteger droppedRouteArtifacts = new AtomicInteger();
+    private final Semaphore routeArtifactSlots = new Semaphore(MAX_PENDING_ROUTE_ARTIFACTS);
     private final java.util.concurrent.atomic.AtomicLong completedTasks = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.ConcurrentLinkedQueue<Long> queuedAt = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private final AtomicInteger failures = new AtomicInteger();
@@ -90,6 +95,8 @@ final class WazeCaptureDebugWriter {
                 .put("currentTaskAgeMs", currentTask.isEmpty() ? 0 : Math.max(0L, android.os.SystemClock.elapsedRealtime() - taskStartedElapsedMs))
                 .put("alive", thread.isAlive()).put("pendingTasks", pendingTasks.get())
                 .put("pendingBitmaps", pendingBitmaps.get()).put("droppedBitmaps", droppedBitmaps.get())
+                .put("pendingRouteArtifacts", pendingRouteArtifacts.get())
+                .put("droppedRouteArtifacts", droppedRouteArtifacts.get())
                 .put("failures", failures.get()).put("lastError", lastError)
                 .put("lastSuccessfulWriteAtWallMs", lastSuccessfulWriteAt)
                 .put("lastCompletedTaskAtWallMs", lastCompletedTaskAt)
@@ -100,6 +107,7 @@ final class WazeCaptureDebugWriter {
     static JSONObject healthSnapshot() throws JSONException {
         WazeCaptureDebugWriter journal = get(), images = mapInstance;
         boolean loss = journal.failures.get() > 0 || journal.droppedBitmaps.get() > 0
+                || journal.droppedRouteArtifacts.get() > 0
                 || (images != null && (images.failures.get() > 0 || images.droppedBitmaps.get() > 0));
         return new JSONObject().put("scope", "current_process")
                 .put("incidentPersistenceUncertain", RuntimeIncidentRecorder.persistenceUncertain())
@@ -214,6 +222,68 @@ final class WazeCaptureDebugWriter {
         String targetDay = NavCaptureStore.todayDir(eventWallClockMs);
         return runOrPost("nav_snapshot", () -> NavCaptureStore.writeSnapshot(
                 app, snapshot, eventElapsedMs, eventWallClockMs, targetDay));
+    }
+
+    boolean routeArtifact(Context context, String targetDay, NavigatorRouteData route) {
+        Context app = context == null ? null : context.getApplicationContext();
+        if (app == null || route == null) return false;
+        try {
+            routeArtifactSlots.acquire();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            droppedRouteArtifacts.incrementAndGet();
+            failed("navigator_route_artifact: interrupted");
+            NavigatorRouteData.Header header = route.header();
+            NavigatorRouteLog.artifactCancelled(app, header.navigator,
+                    header.producerEpoch, header.routeRevision);
+            return false;
+        }
+        pendingRouteArtifacts.incrementAndGet();
+        boolean posted;
+        try {
+            posted = post("navigator_route_artifact", () -> {
+                try {
+                    boolean written = NavigationLogStorage.withReadLock(() ->
+                            NavigatorRouteArtifact.write(
+                                    NavigationLogStorage.logsDir(app, targetDay), route));
+                    if (written) {
+                        recordWriteSuccess();
+                    } else {
+                        routeArtifactFailed(app, route);
+                    }
+                } catch (RuntimeException error) {
+                    routeArtifactFailed(app, route);
+                } finally {
+                    pendingRouteArtifacts.decrementAndGet();
+                    routeArtifactSlots.release();
+                }
+            });
+        } catch (RuntimeException error) {
+            pendingRouteArtifacts.decrementAndGet();
+            routeArtifactSlots.release();
+            droppedRouteArtifacts.incrementAndGet();
+            failed("navigator_route_artifact: enqueue_failed");
+            NavigatorRouteData.Header header = route.header();
+            NavigatorRouteLog.artifactError(app, header.navigator,
+                    header.producerEpoch, header.routeRevision);
+            return false;
+        }
+        if (!posted) {
+            pendingRouteArtifacts.decrementAndGet();
+            routeArtifactSlots.release();
+            droppedRouteArtifacts.incrementAndGet();
+            NavigatorRouteData.Header header = route.header();
+            NavigatorRouteLog.artifactError(app, header.navigator,
+                    header.producerEpoch, header.routeRevision);
+        }
+        return posted;
+    }
+
+    private void routeArtifactFailed(Context context, NavigatorRouteData route) {
+        recordWriteFailure("navigator_route_artifact: write_failed");
+        NavigatorRouteData.Header header = route.header();
+        NavigatorRouteLog.artifactError(context, header.navigator,
+                header.producerEpoch, header.routeRevision);
     }
 
     boolean directEvent(Runnable work) {

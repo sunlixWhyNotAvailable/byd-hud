@@ -809,6 +809,7 @@ final class HudPrefs {
 
     static void setTbtWithoutHudOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_TBT_WITHOUT_HUD_OUTPUT, enabled).apply();
+        NavigatorRouteReceiver.refreshEligibility(context);
     }
 
     static boolean isSwitchToTbtOnHudStartEnabled(Context context) {
@@ -893,6 +894,7 @@ final class HudPrefs {
     static void setDetailedDebugArtifactsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_DETAILED_DEBUG_ARTIFACTS, enabled).apply();
         SomeIpTxLog.onDetailedModeChanged(context, enabled);
+        NavigatorRouteReceiver.refreshEligibility(context);
     }
 
     //opens Options once for each installed build, then defaults later launches to Apps.
@@ -944,6 +946,7 @@ final class HudPrefs {
     //records explicit shutdown separately from boot preference so auto-start can be restored on next manual open.
     static void setUserShutdownActive(Context context, boolean active) {
         prefs(context).edit().putBoolean(KEY_USER_SHUTDOWN_ACTIVE, active).apply();
+        if (active) NavigatorRouteReceiver.stop("user-shutdown");
         ShellRuntimeSession.persistShutdown(context, active);
     }
 

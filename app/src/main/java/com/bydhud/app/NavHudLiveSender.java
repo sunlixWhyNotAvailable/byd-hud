@@ -313,6 +313,7 @@ final class NavHudLiveSender {
     }
 
     static void onNavigatorPackageChanged(String packageName) {
+        NavigatorRouteReceiver.packageChanged(packageName);
         if (!NativeEtaTransportPolicy.AMAP_PACKAGE_NAME.equals(packageName)) return;
         NavHudLiveSender current;
         synchronized (NavHudLiveSender.class) {
@@ -1763,6 +1764,8 @@ final class NavHudLiveSender {
                     int sessionGeneration, String reason) {
                 handler.post(() -> {
                     if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)) return;
+                    NavigatorRouteReceiver.sourceConnected(ownerPackage,
+                            "waze-surface:" + sessionGeneration, reason);
                     log("waze surface channel ready reason=" + safeReason(reason));
                 });
             }
@@ -2200,6 +2203,8 @@ final class NavHudLiveSender {
                 isHudOutputOwner(ownerPackage), false, wazeSurfaceSourceSelected)) {
             hudOutput.renewDirectLease(ownerPackage, sessionGeneration, reason);
         }
+        NavigatorRouteReceiver.sourceConnected(ownerPackage,
+                "waze-cluster:" + sessionGeneration, reason);
         log("waze direct handshake available reason=" + safeReason(reason));
     }
 
@@ -2264,6 +2269,8 @@ final class NavHudLiveSender {
         logRouteStartOutputPreferences("waze", sessionGeneration, reason);
         boolean newRoute = !wazeDirectNavigating;
         if (newRoute) {
+            NavigatorRouteReceiver.sourceConnected(ownerPackage,
+                    "waze-route:" + sessionGeneration + ":" + wazeRouteGeneration, reason);
             ++tbtLifecycleToken;
             if (wazeTbtRouteStartedAtMs <= 0L) {
                 wazeTbtRouteStartedAtMs = SystemClock.elapsedRealtime();
@@ -3424,6 +3431,8 @@ final class NavHudLiveSender {
         }
         if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
         gmapsDirectHandshakeAvailable = true;
+        NavigatorRouteReceiver.sourceConnected(ownerPackage,
+                "gmaps:" + sessionGeneration, reason);
         gmapsDirectTimeoutSessionGeneration = sessionGeneration;
         log("gmaps direct handshake available reason=" + safeReason(reason));
     }
@@ -3454,6 +3463,7 @@ final class NavHudLiveSender {
         gmapsDirectStateProducerEpoch = producerEpoch;
         gmapsDirectStateRouteGeneration = routeGeneration;
         if (!routeActive) {
+            NavigatorRouteReceiver.sourceEnded(ownerPackage, "gmaps-inactive:" + reason);
             gmapsDirectState = GMapsDirectState.QUIESCENT;
             gmapsDirectTimedOut = false;
             cancelGMapsDirectTimeout();
@@ -3527,6 +3537,8 @@ final class NavHudLiveSender {
                 "gmaps-route-superseded:" + safeReason(reason),
                 SystemClock.elapsedRealtime());
         if (!currentSession) return;
+        NavigatorRouteReceiver.sourceConnected(ownerPackage,
+                "gmaps-route:" + sessionGeneration, reason);
         ensureGMapsDirectSession("navigation-started:" + safeReason(reason));
         eventGMapsDirectSession("navigation_started", reason);
         logRouteStartOutputPreferences("gmaps", sessionGeneration, reason);
@@ -4077,6 +4089,7 @@ final class NavHudLiveSender {
         if (!acceptsGMapsTeardownForTest(
                 isCurrentGMapsDirectCallback(ownerPackage, callbackGeneration),
                 routeGeneration, callbackGeneration)) return;
+        NavigatorRouteReceiver.sourceEnded(ownerPackage, "gmaps-ended:" + reason);
         if (manualTbtActive) {
             tbtPublisher.recordDeferredLifecycle(
                     ownerPackage, callbackGeneration, "end",
@@ -4248,6 +4261,7 @@ final class NavHudLiveSender {
             log("waze direct terminal ignored; already applied reason=" + safeReason(reason));
             return;
         }
+        NavigatorRouteReceiver.sourceEnded(ownerPackage, "waze-ended:" + reason);
         WazeStartAdmission.PROCESS.invalidate();
         wazeDirectRouteTerminalFence = true;
         if (terminal != null && terminal.snapshot != null
@@ -4324,6 +4338,7 @@ final class NavHudLiveSender {
 
     private void closeWazeForSupersedingInactiveLifecycle(
             long detectedAtMs, String reason) {
+        NavigatorRouteReceiver.sourceEnded(WAZE_PACKAGE, reason);
         invalidatePendingWazeDirectFrames();
         int sessionGeneration = wazeDirectChannel.sessionGeneration();
         if (isCurrentWazeDirectCallback(WAZE_PACKAGE, sessionGeneration)) {
@@ -4389,6 +4404,7 @@ final class NavHudLiveSender {
             cancelWazeSpeedLimitExpiry();
         }
         if (result.terminal) {
+            NavigatorRouteReceiver.sourceEnded(WAZE_PACKAGE, "waze-terminal:" + reason);
             wazeLegacyDirectRearmPending = false;
             wazeLegacyDirectSessionFloor = -1;
             wazeLegacySurfaceRearmPending = false;

@@ -184,6 +184,7 @@ public final class HudRuntimeService extends Service {
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     static void stopPersistent(Context context, String reason) {
         Context appContext = context.getApplicationContext();
+        NavigatorRouteReceiver.stop("runtime-stop:" + reason);
         clearStartRequestGate();
         HudRuntimeState.clearServicePresent(appContext, "stop:" + reason);
         HudRuntimeWatchdog.cancel(appContext);
@@ -262,6 +263,7 @@ public final class HudRuntimeService extends Service {
     private void completeStartAfterBootGate(String reason) {
         if (runtimeDestroyed
                 || !UserRuntimeSession.allowsRuntime(this)) return;
+        NavigatorRouteReceiver.start(this);
         ShellRuntimeSession.armAsync(this);
         AppUpdateManager.onSessionEntry(this);
         HudRuntimeState.publishServicePresent(this, "onStartCommand");
@@ -335,6 +337,7 @@ public final class HudRuntimeService extends Service {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         runtimeDestroyed = true;
+        NavigatorRouteReceiver.stop("runtime-destroyed");
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
         clearStartRequestGate();
         HudRuntimeState.clearServicePresent(this, "destroyed");

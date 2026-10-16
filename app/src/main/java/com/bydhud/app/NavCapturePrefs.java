@@ -129,6 +129,7 @@ final class NavCapturePrefs {
                     prefs(context).getString(KEY_HUD_PACKAGE, "")))) {
                 prefs(context).edit().remove(KEY_HUD_PACKAGE).apply();
                 NavCaptureIngressPolicy.refreshPreferencesAsync(context);
+                NavigatorRouteReceiver.refreshEligibility(context);
             }
             return;
         }
@@ -145,6 +146,7 @@ final class NavCapturePrefs {
         }
         editor.apply();
         NavCaptureIngressPolicy.refreshPreferencesAsync(context);
+        NavigatorRouteReceiver.refreshEligibility(context);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -165,6 +167,7 @@ final class NavCapturePrefs {
         }
         editor.putStringSet(KEY_LOG_ONLY_PACKAGES, packages).apply();
         NavCaptureIngressPolicy.refreshPreferencesAsync(context);
+        NavigatorRouteReceiver.refreshEligibility(context);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -215,6 +218,7 @@ final class NavCapturePrefs {
                 .putStringSet(KEY_LOG_ONLY_PACKAGES, logOnlyPackages)
                 .apply();
         NavCaptureIngressPolicy.refreshPreferencesAsync(context);
+        NavigatorRouteReceiver.refreshEligibility(context);
     }
 
     //normalizes values here so malformed app text cannot leak into HUD payloads.
