@@ -166,13 +166,21 @@ final class VehiclePositionController {
             if (!Float.isFinite(bearing) || bearing < 0f) bearing = null;
             else if (bearing >= 360f) bearing = 0f;
         }
+        Float speed = location.hasSpeed() ? location.getSpeed() : null;
+        if (speed != null && (!Float.isFinite(speed) || speed < 0f)) speed = null;
+        Float bearingAccuracy = location.hasBearingAccuracy()
+                ? location.getBearingAccuracyDegrees() : null;
+        if (bearingAccuracy != null
+                && (!Float.isFinite(bearingAccuracy) || bearingAccuracy < 0f)) {
+            bearingAccuracy = null;
+        }
         float accuracy = location.hasAccuracy() ? location.getAccuracy() : Float.NaN;
         if (!Float.isFinite(accuracy) || accuracy < 0f) accuracy = Float.NaN;
         boolean mock = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                 ? location.isMock() : location.isFromMockProvider();
         return new VehiclePosition(
                 location.getLatitude(), location.getLongitude(), elapsedMs,
-                accuracy, bearing, mock);
+                accuracy, bearing, speed, bearingAccuracy, mock);
     }
 
     private void publish(Snapshot next) {

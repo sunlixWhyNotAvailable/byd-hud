@@ -28,6 +28,26 @@ final class HudOutputCoordinator {
         MANUAL
     }
 
+    static final class SpatialOutputState {
+        private boolean spatialSent;
+
+        boolean resetRequired(HudSpatialGeometry.Result desired) {
+            return spatialSent && desired != null && desired.mode == HudSpatialGeometry.Mode.OFF;
+        }
+
+        void recordSuccessfulPayload(DirectTbtPayload.Prepared payload) {
+            HudSpatialGeometry.Mode mode = payload == null ? null : payload.spatialMode();
+            spatialSent = mode == HudSpatialGeometry.Mode.REAL
+                    || mode == HudSpatialGeometry.Mode.SCHEMATIC;
+        }
+
+        void recordSuccessfulClear() {
+            spatialSent = false;
+        }
+
+        boolean spatialSent() { return spatialSent; }
+    }
+
     private static final String TAG = "BydHudOutput";
     private static final long DIRECT_INTERVAL_MS = 100L;
     private static final long DEFAULT_INTERVAL_MS = 1000L;
@@ -189,6 +209,11 @@ final class HudOutputCoordinator {
     private long lastStatsLogMs;
     private DirectTbtFrame preparedDirectFrame;
     private DirectTbtFrame preparedOutputFrame;
+    private HudSpatialGeometry.Result preparedSpatialResult;
+    private boolean preparedSpatialUsable;
+    private boolean preparedSpatialReset;
+    private final SpatialOutputState spatialOutputState = new SpatialOutputState();
+    private String liveSpatialTxDiagnostic = "";
     private final NativeHudSpeedLimit nativeHudSpeed = new NativeHudSpeedLimit();
     private String nativeHudSpeedDiagnostic = "";
     private String maneuverGeometryDiagnostic = "";
@@ -1231,6 +1256,10 @@ final class HudOutputCoordinator {
             }
             recordPayloadSuccess();
             lastSentHudCheck = hudCheck;
+            if (source == Source.DIRECT) {
+                spatialOutputState.recordSuccessfulPayload(preparedDirectPayload);
+                logLiveSpatialTx(preparedDirectPayload);
+            }
             publishNativeMap(reason);
             if (source == Source.MANUAL && manualMapLiveSession != 0L) {
                 nativeSpeed.refreshMapLive(manualMapLiveSession,
@@ -1485,10 +1514,19 @@ final class HudOutputCoordinator {
         if (source == Source.DIRECT) {
             int optionsRevision = HudPrefs.outputOptionsRevision();
             long nowWallTimeMs = System.currentTimeMillis();
+            long nowElapsedMs = SystemClock.elapsedRealtime();
+            HudSpatialGeometry.Result spatial = VehicleRouteRuntime.snapshot(
+                    directOwnerPackage, nowElapsedMs);
+            if (spatial == null) spatial = HudSpatialGeometry.Result.off();
+            boolean spatialUsable = spatial.usableAt(nowElapsedMs);
+            boolean resetSpatial = spatialOutputState.resetRequired(spatial);
             long wallMinute = HudEtaResolver.epochMinute(nowWallTimeMs);
             boolean sourceChanged = candidateDirectPayload == null
                     || preparedDirectFrame != directFrame
                     || preparedDirectOptionsRevision != optionsRevision;
+            boolean geometryChanged = !sameSpatialResult(preparedSpatialResult,
+                    preparedSpatialUsable, spatial, spatialUsable)
+                    || preparedSpatialReset != resetSpatial;
             if (!sourceChanged && preparedEtaWallMinute != wallMinute) {
                 DirectTbtPayload.Options current = DirectTbtPayload.Options.from(context);
                 sourceChanged = current.nativeEta24Hour != preparedDirectOptions.nativeEta24Hour;
@@ -1503,15 +1541,19 @@ final class HudOutputCoordinator {
                 preparedEtaContext = etaStreetContext(preparedDirectOptions,
                         HudPrefs.transliterationMode(context));
             }
-            if (sourceChanged || preparedEtaWallMinute != wallMinute) {
+            if (sourceChanged || geometryChanged || preparedEtaWallMinute != wallMinute) {
                 String etaCacheKey = DirectTbtPayload.etaCacheKey(
                         preparedOutputFrame, preparedDirectOptions, nowWallTimeMs);
-                if (sourceChanged || !etaCacheKey.equals(preparedEtaCacheKey)) {
-                    candidateDirectPayload = DirectTbtPayload.prepare(
-                            preparedOutputFrame, preparedDirectOptions, nowWallTimeMs);
+                if (sourceChanged || geometryChanged || !etaCacheKey.equals(preparedEtaCacheKey)) {
+                    candidateDirectPayload = DirectTbtPayload.prepareLive(
+                            preparedOutputFrame, preparedDirectOptions, nowWallTimeMs,
+                            nowElapsedMs, spatial, resetSpatial);
                     logManeuverGeometry(directOwnerPackage, directOwnerSessionGeneration,
                             candidateDirectPayload);
                     preparedDirectPayload = null;
+                    preparedSpatialResult = spatial;
+                    preparedSpatialUsable = spatialUsable;
+                    preparedSpatialReset = resetSpatial;
                     preparedDirectBitmapSelection = directBitmapSelection;
                     preparedDirectBitmapTxLogger = directBitmapTxLogger;
                 }
@@ -1569,6 +1611,18 @@ final class HudOutputCoordinator {
         return HudRoadPayload.build(state);
     }
 
+    static boolean sameSpatialResult(HudSpatialGeometry.Result first,
+            boolean firstUsable, HudSpatialGeometry.Result second, boolean secondUsable) {
+        if (first == second) return firstUsable == secondUsable;
+        if (first == null || second == null || firstUsable != secondUsable
+                || first.mode != second.mode || first.identity != second.identity
+                || first.stepSerial != second.stepSerial
+                || !safe(first.reason).equals(safe(second.reason))
+                || first.origin != second.origin) return false;
+        if (first.header == null) return second.header == null;
+        return first.header.sameSnapshot(second.header);
+    }
+
     private void setHudCheckRoadResult(int result, String reason) {
         recordHudCheck("roadinfo", result, reason);
         if (hudCheckRoadResult == result) return;
@@ -1582,6 +1636,16 @@ final class HudOutputCoordinator {
         if (key.equals(maneuverGeometryDiagnostic)) return;
         maneuverGeometryDiagnostic = key;
         log("maneuver_geometry prepared " + key + " distance=" + payload.distanceMeters());
+    }
+
+    private void logLiveSpatialTx(DirectTbtPayload.Prepared payload) {
+        if (payload == null || payload.spatialMode() == null) return;
+        String key = "mode=" + (payload.spatialReset() ? "reset"
+                : payload.spatialMode().name().toLowerCase(java.util.Locale.ROOT))
+                + " " + payload.geometryDiagnostics();
+        if (key.equals(liveSpatialTxDiagnostic)) return;
+        liveSpatialTxDiagnostic = key;
+        log("maneuver_geometry tx " + key);
     }
 
     private void recordHudCheck(String plane, int result, String reason) {
@@ -2020,6 +2084,8 @@ final class HudOutputCoordinator {
             return false;
         }
         recordPayloadSuccess();
+        spatialOutputState.recordSuccessfulClear();
+        liveSpatialTxDiagnostic = "";
         lastSentHudCheck = null;
         return true;
     }
@@ -2036,7 +2102,11 @@ final class HudOutputCoordinator {
             long completedAtMs = SystemClock.elapsedRealtime();
             logAsync("clear result=" + result + " reason=" + reason);
             maneuverGeometryDiagnostic = "";
-            if (isPayloadSuccessResult(result)) lastSentHudCheck = null;
+            if (isPayloadSuccessResult(result)) {
+                spatialOutputState.recordSuccessfulClear();
+                liveSpatialTxDiagnostic = "";
+                lastSentHudCheck = null;
+            }
             return result == 0 ? completedAtMs : -1L;
         } catch (RemoteException | RuntimeException e) {
             logAsync("clear failed reason=" + reason + " error=" + safe(e.getMessage()));

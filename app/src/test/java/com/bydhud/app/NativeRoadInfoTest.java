@@ -90,6 +90,137 @@ public class NativeRoadInfoTest {
         }
     }
 
+    @Test public void liveSpatialModesSerializeAsWholeGroupsAndKeepDiagnosticsExplicit() {
+        final long nowElapsedMs = 100_000L;
+        DirectTbtFrame frame = navigation(3, 2);
+        HudSpatialGeometry.Result real = realSpatialGeometry(nowElapsedMs);
+        assertEquals(HudSpatialGeometry.Mode.REAL, real.mode);
+        assertTrue(real.usableAt(nowElapsedMs));
+
+        Map<Integer, Object> ordinary = road(DirectTbtPayload.prepare(frame, options(), NOW).build(0));
+        DirectTbtPayload.Prepared live = DirectTbtPayload.prepareLive(
+                frame, options(), NOW, nowElapsedMs, real, false);
+        Map<Integer, Object> actual = road(live.build(0));
+        assertEquals(HudSpatialGeometry.Mode.REAL, live.spatialMode());
+        assertFalse(live.spatialReset());
+        assertEquals(real.longitude, (Double) actual.get(19), 0.0);
+        assertEquals(real.latitude, (Double) actual.get(20), 0.0);
+        assertEquals(real.headingDegrees, (Double) actual.get(32), 0.0);
+        assertEquals(real.line, text(actual, 30));
+        assertEquals("", text(actual, 31));
+        assertOrdinaryFieldsEqual(ordinary, actual);
+
+        HudSpatialGeometry.Result fallback = HudSpatialGeometry.Result.fallback(
+                real.header, real.stepSerial, "position_stale");
+        DirectTbtPayload.Prepared schematic = DirectTbtPayload.prepareLive(
+                frame, options(), NOW, nowElapsedMs, fallback, false);
+        Map<Integer, Object> schematicFields = road(schematic.build(0));
+        assertEquals(HudSpatialGeometry.Mode.SCHEMATIC, schematic.spatialMode());
+        assertEquals(HudManeuverGeometry.LONGITUDE, (Double) schematicFields.get(19), 0.0);
+        assertEquals(HudManeuverGeometry.LATITUDE, (Double) schematicFields.get(20), 0.0);
+        assertEquals(HudManeuverGeometry.HEADING, (Double) schematicFields.get(32), 0.0);
+        assertEquals(HudManeuverGeometry.STRAIGHT.line, text(schematicFields, 30));
+        assertEquals("", text(schematicFields, 31));
+        assertFieldsEqual(ordinary, schematicFields);
+
+        DirectTbtPayload.Prepared off = DirectTbtPayload.prepareLive(
+                frame, options(), NOW, nowElapsedMs, HudSpatialGeometry.Result.off(), false);
+        Map<Integer, Object> offFields = road(off.build(0));
+        assertEquals(HudSpatialGeometry.Mode.OFF, off.spatialMode());
+        assertNoSpatialFields(offFields);
+        assertOrdinaryFieldsEqual(ordinary, offFields);
+
+        DirectTbtPayload.Prepared expired = DirectTbtPayload.prepareLive(
+                frame, options(), NOW, real.validUntilElapsedMs, real, false);
+        Map<Integer, Object> expiredFields = road(expired.build(0));
+        assertEquals(HudSpatialGeometry.Mode.SCHEMATIC, expired.spatialMode());
+        assertEquals(HudManeuverGeometry.STRAIGHT.line, text(expiredFields, 30));
+
+        Map<Integer, Object> diagnostic = road(DirectTbtPayload.prepareDiagnostic(
+                frame, options(), false, true).build(0));
+        assertEquals(HudManeuverGeometry.LONGITUDE, (Double) diagnostic.get(19), 0.0);
+        assertEquals(HudManeuverGeometry.LATITUDE, (Double) diagnostic.get(20), 0.0);
+        assertEquals(HudManeuverGeometry.STRAIGHT.line, text(diagnostic, 30));
+        assertEquals("", text(diagnostic, 31));
+
+        DirectTbtFrame alerted = frame.withAlertOverlay(
+                DirectTbtFrame.AlertOverlay.active(7, 25, "Hazard", null));
+        Map<Integer, Object> alertBaseline = road(DirectTbtPayload.prepare(
+                alerted, options(), NOW).build(0));
+        Map<Integer, Object> alertWithSpatial = road(DirectTbtPayload.prepareLive(
+                alerted, options(), NOW, nowElapsedMs, real, false).build(0));
+        assertEquals(HudSpatialGeometry.Mode.OFF, DirectTbtPayload.prepareLive(
+                alerted, options(), NOW, nowElapsedMs, real, false).spatialMode());
+        assertGeometryCleared(alertWithSpatial);
+        assertFieldsEqual(alertBaseline, alertWithSpatial);
+    }
+
+    @Test public void selectiveSpatialResetKeepsOrdinaryFieldsAndWaitsForSuccessfulPayload() {
+        final long nowElapsedMs = 100_000L;
+        DirectTbtFrame frame = navigation(3, 2);
+        HudSpatialGeometry.Result real = realSpatialGeometry(nowElapsedMs);
+        HudOutputCoordinator.SpatialOutputState state = new HudOutputCoordinator.SpatialOutputState();
+        HudSpatialGeometry.Result off = HudSpatialGeometry.Result.off();
+
+        assertFalse(state.resetRequired(off));
+        DirectTbtPayload.Prepared spatial = DirectTbtPayload.prepareLive(
+                frame, options(), NOW, nowElapsedMs, real, false);
+        assertFalse(state.spatialSent()); // Preparing a packet does not record a transmission.
+        state.recordSuccessfulPayload(spatial);
+        assertTrue(state.spatialSent());
+        assertTrue(state.resetRequired(off));
+
+        DirectTbtPayload.Prepared reset = DirectTbtPayload.prepareLive(
+                frame, options(), NOW, nowElapsedMs, off, true);
+        Map<Integer, Object> resetFields = road(reset.build(0));
+        assertTrue(reset.spatialReset());
+        assertEquals(HudSpatialGeometry.Mode.OFF, reset.spatialMode());
+        assertEquals(0.0, (Double) resetFields.get(19), 0.0);
+        assertEquals(0.0, (Double) resetFields.get(20), 0.0);
+        assertEquals("", text(resetFields, 30));
+        assertEquals("", text(resetFields, 31));
+        assertEquals(0.0, (Double) resetFields.get(32), 0.0);
+        Map<Integer, Object> ordinary = road(DirectTbtPayload.prepare(frame, options(), NOW).build(0));
+        assertOrdinaryFieldsEqual(ordinary, resetFields);
+        assertTrue(state.resetRequired(off)); // A prepared reset is still pending until send success.
+
+        state.recordSuccessfulPayload(reset);
+        assertFalse(state.spatialSent());
+        assertFalse(state.resetRequired(off));
+        state.recordSuccessfulPayload(spatial);
+        state.recordSuccessfulClear();
+        assertFalse(state.spatialSent());
+    }
+
+    @Test public void spatialIdentityInvalidatesOnlyWhenGeometryContentChanges() {
+        final long nowElapsedMs = 100_000L;
+        NavigatorRouteData route = spatialTestRoute(nowElapsedMs);
+        NavigatorRouteStore.CurrentStep step = spatialTestStep(route, nowElapsedMs);
+        HudSpatialGeometry resolver = new HudSpatialGeometry(route);
+        VehiclePosition firstPosition = new VehiclePosition(0.00005, 0.0005, nowElapsedMs,
+                5f, 90f, 10f, 5f, false);
+        DirectTbtFrame.SourceDistance distance = new DirectTbtFrame.SourceDistance(150, nowElapsedMs);
+        HudSpatialGeometry.Result first = resolver.resolve(step, firstPosition, distance, nowElapsedMs);
+        assertEquals(HudSpatialGeometry.Mode.REAL, first.mode);
+        HudSpatialGeometry.Result repeated = resolver.resolve(step, firstPosition, distance, nowElapsedMs + 1);
+        assertEquals(HudSpatialGeometry.Mode.REAL, repeated.mode);
+        assertTrue(HudOutputCoordinator.sameSpatialResult(first, true, repeated, true));
+
+        VehiclePosition moved = new VehiclePosition(0.00005, 0.00051, nowElapsedMs + 100,
+                5f, 90f, 10f, 5f, false);
+        HudSpatialGeometry.Result changed = resolver.resolve(step, moved,
+                new DirectTbtFrame.SourceDistance(150, nowElapsedMs + 100), nowElapsedMs + 100);
+        assertEquals(HudSpatialGeometry.Mode.REAL, changed.mode);
+        assertNotEquals(first.identity, changed.identity);
+        assertNotEquals(first.line, changed.line);
+        assertFalse(HudOutputCoordinator.sameSpatialResult(first, true, changed, true));
+        assertTrue(changed.usableAt(nowElapsedMs + 100));
+        assertFalse(changed.usableAt(changed.validUntilElapsedMs));
+        assertFalse(HudOutputCoordinator.sameSpatialResult(
+                changed, changed.usableAt(nowElapsedMs + 100),
+                changed, changed.usableAt(changed.validUntilElapsedMs)));
+    }
+
     @Test public void circleGeometryUsesKnownDirectionAndClearsUnknownWithoutChangingCircleSemantics() {
         DirectTbtFrame circle = navigation(25, 99).withVehicleTbt(11, 2);
         String previous = "";
@@ -545,6 +676,47 @@ public class NativeRoadInfoTest {
                 assertFieldsEqual(previous, selected);
             }
         }
+    }
+
+    private static void assertOrdinaryFieldsEqual(Map<Integer, Object> expected,
+            Map<Integer, Object> actual) {
+        Map<Integer, Object> expectedOrdinary = new HashMap<>(expected);
+        Map<Integer, Object> actualOrdinary = new HashMap<>(actual);
+        for (int field : new int[] {19, 20, 30, 31, 32}) {
+            expectedOrdinary.remove(field);
+            actualOrdinary.remove(field);
+        }
+        assertFieldsEqual(expectedOrdinary, actualOrdinary);
+    }
+
+    private static void assertNoSpatialFields(Map<Integer, Object> fields) {
+        for (int field : new int[] {19, 20, 30, 31, 32}) assertFalse(fields.containsKey(field));
+    }
+
+    private static HudSpatialGeometry.Result realSpatialGeometry(long nowElapsedMs) {
+        NavigatorRouteData route = spatialTestRoute(nowElapsedMs);
+        return new HudSpatialGeometry(route).resolve(spatialTestStep(route, nowElapsedMs),
+                new VehiclePosition(0.00005, 0.0005, nowElapsedMs,
+                        5f, 90f, 10f, 5f, false),
+                new DirectTbtFrame.SourceDistance(150, nowElapsedMs), nowElapsedMs);
+    }
+
+    private static NavigatorRouteData spatialTestRoute(long nowElapsedMs) {
+        NavigatorRouteData.Header header = new NavigatorRouteData.Header(
+                "waze-5.25.0.1", 1, 1, "route", Math.max(0, nowElapsedMs - 1_000));
+        return new NavigatorRouteData(header, true, true,
+                new double[] {0, 0, 0, .001, .001, .001, .001, .002},
+                new NavigatorRouteData.Maneuver[] {
+                        new NavigatorRouteData.Maneuver("0", 0, 0, 0, -1, 11, 12,
+                                "turn", "", Double.NaN, Double.NaN, 0, false)
+                });
+    }
+
+    private static NavigatorRouteStore.CurrentStep spatialTestStep(
+            NavigatorRouteData route, long nowElapsedMs) {
+        return new NavigatorRouteStore.CurrentStep(route.header(), 1,
+                Math.max(0, nowElapsedMs - 500), null, true, "0", 0, -1,
+                "turn", "", null, null, 11, 12, 3, 4, "source_indices");
     }
 
     private static void assertFieldsEqual(Map<Integer, Object> expected, Map<Integer, Object> actual) {

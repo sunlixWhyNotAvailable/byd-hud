@@ -154,7 +154,10 @@ final class HudPrefs {
     }
 
     static void setVehiclePositionEnabled(Context context, boolean enabled) {
-        prefs(context).edit().putBoolean(KEY_VEHICLE_POSITION_ENABLED, enabled).apply();
+        SharedPreferences preferences = prefs(context);
+        if (preferences.getBoolean(KEY_VEHICLE_POSITION_ENABLED, false) == enabled) return;
+        preferences.edit().putBoolean(KEY_VEHICLE_POSITION_ENABLED, enabled).apply();
+        markOutputOptionChanged(KEY_VEHICLE_POSITION_ENABLED);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

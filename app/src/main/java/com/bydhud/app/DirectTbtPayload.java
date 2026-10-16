@@ -122,6 +122,15 @@ public final class DirectTbtPayload {
                 true, maneuverBitmap, nativeManeuver, format, roadInfoCode, codes);
     }
 
+    /** Live Direct output may consume the current optional vehicle/route geometry. */
+    static Prepared prepareLive(DirectTbtFrame frame, Options options,
+            long nowWallTimeMs, long nowElapsedMs, HudSpatialGeometry.Result spatial,
+            boolean resetSpatial) {
+        return prepare(frame, options, true, EXPERIMENTAL, nowWallTimeMs,
+                false, true, true, null, -1, Collections.emptyList(),
+                spatial, nowElapsedMs, resetSpatial);
+    }
+
     private static Prepared prepare(DirectTbtFrame frame, Options options, boolean render,
             HudExperimentalCompositor compositor, long nowWallTimeMs,
             boolean diagnostic, boolean maneuverBitmap, boolean nativeManeuverEnabled) {
@@ -134,6 +143,17 @@ public final class DirectTbtPayload {
             boolean diagnostic, boolean maneuverBitmap, boolean nativeManeuverEnabled,
             HudCheckState.Format hudCheckFormat, int hudCheckRoadInfoCode,
             List<Integer> hudCheckLaneCodes) {
+        return prepare(frame, options, render, compositor, nowWallTimeMs, diagnostic,
+                maneuverBitmap, nativeManeuverEnabled, hudCheckFormat,
+                hudCheckRoadInfoCode, hudCheckLaneCodes, null, 0L, false);
+    }
+
+    private static Prepared prepare(DirectTbtFrame frame, Options options, boolean render,
+            HudExperimentalCompositor compositor, long nowWallTimeMs,
+            boolean diagnostic, boolean maneuverBitmap, boolean nativeManeuverEnabled,
+            HudCheckState.Format hudCheckFormat, int hudCheckRoadInfoCode,
+            List<Integer> hudCheckLaneCodes, HudSpatialGeometry.Result spatial,
+            long nowElapsedMs, boolean resetSpatial) {
         DirectTbtFrame safeFrame = frame == null ? DirectTbtFrame.empty() : frame;
         Options safeOptions = options == null ? Options.ALL : options;
         DirectTbtFrame.AlertOverlay separateWarning = safeOptions.presentation.separateWarning()
@@ -248,8 +268,14 @@ public final class DirectTbtPayload {
                 && safeFrame.getAmapManeuver() != 22 && safeFrame.getAmapManeuver() != 25) {
             geometry = HudManeuverGeometry.LANE_ONLY;
         }
-        String geometryDiagnostics = "maneuverType=" + safeFrame.getRawManeuverType()
-                + " " + safeFrame.getRoundaboutExit().diagnostics() + " " + geometry.diagnostics();
+        if (spatial != null) {
+            geometry = HudManeuverGeometry.withSpatialResult(
+                    geometry, spatial, nowElapsedMs, resetSpatial);
+        }
+        String geometryDiagnostics = spatial == null
+                ? "maneuverType=" + safeFrame.getRawManeuverType()
+                        + " " + safeFrame.getRoundaboutExit().diagnostics() + " " + geometry.diagnostics()
+                : spatialGeometryDiagnostics(geometry, spatial);
 
         if (!render) {
             return new Prepared(new byte[0], maneuverMode, nativeManeuver,
@@ -359,6 +385,24 @@ public final class DirectTbtPayload {
                 maneuverPng, displayTextStart, displayTextEnd, hasStreetEta,
                 safeOptions.etaOutputMode == HudPrefs.ETA_OUTPUT_NATIVE
                         ? nativeMetrics.diagnostics : metrics.diagnostics, geometry, geometryDiagnostics);
+    }
+
+    private static String spatialGeometryDiagnostics(HudManeuverGeometry.Selection geometry,
+            HudSpatialGeometry.Result spatial) {
+        NavigatorRouteData.Header header = spatial.header;
+        String mode = geometry.spatialReset ? "reset"
+                : geometry.spatialMode == null ? "suppressed"
+                : geometry.spatialMode.name().toLowerCase(Locale.ROOT);
+        String source = header == null ? "none" : header.navigator;
+        String route = header == null ? "none"
+                : header.producerEpoch + ":" + header.routeRevision;
+        String origin = spatial.origin == null ? "unavailable"
+                : spatial.origin.name().toLowerCase(Locale.ROOT);
+        String heading = spatial.headingOrigin == null ? "none"
+                : spatial.headingOrigin.name().toLowerCase(Locale.ROOT);
+        return "spatial=" + mode + " reason=" + geometry.spatialReason
+                + " source=" + source + " route=" + route + " step=" + spatial.stepSerial
+                + " origin=" + origin + " heading=" + heading;
     }
 
     private static void writePackedVarintsField(ByteArrayOutputStream out, int field,
@@ -731,6 +775,10 @@ public final class DirectTbtPayload {
         HudManeuverGeometry.Selection geometry() { return geometry; }
 
         String geometryDiagnostics() { return geometryDiagnostics; }
+
+        HudSpatialGeometry.Mode spatialMode() { return geometry.spatialMode; }
+
+        boolean spatialReset() { return geometry.spatialReset; }
 
         /** Reset old probes, preserve Basic output, then apply only the selected stage fields. */
         Prepared withHudCheckBaseline(byte[] baseline, byte[] overrides) {

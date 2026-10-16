@@ -336,7 +336,7 @@ public final class MainActivity extends ComponentActivity {
         }
         activityResumed = true;
         RESUMED_ACTIVITY.set(this);
-        HudRuntimeService.refreshVehiclePosition();
+        HudRuntimeService.refreshVehiclePosition(this);
         DashboardWidgetController.refresh(this);
         maybeStartPendingAdbAuthorization();
         refreshControls();
@@ -371,7 +371,7 @@ public final class MainActivity extends ComponentActivity {
         }
         cancelPendingAutoAdbStart();
         RESUMED_ACTIVITY.compareAndSet(this, null);
-        HudRuntimeService.refreshVehiclePosition();
+        HudRuntimeService.refreshVehiclePosition(this);
         Context app = getApplicationContext();
         ShellRuntimeSession.afterPersistence(() -> {
             if (!HudPrefs.flush(app)) AppEventLogger.event(app, "UI settings persistence failed on pause");
@@ -1329,10 +1329,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public boolean composeHasVehiclePositionForegroundPermission() {
-        return checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
-                        == PackageManager.PERMISSION_GRANTED
-                || checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)
-                        == PackageManager.PERMISSION_GRANTED;
+        return HudRuntimeService.hasVehiclePositionForegroundPermission(this);
     }
 
     public boolean composeHasVehiclePositionBackgroundPermission() {
@@ -1342,15 +1339,19 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public void composeSetVehiclePositionEnabled(boolean enabled) {
-        if (enabled && !composeHasVehiclePositionForegroundPermission()) return;
-        HudPrefs.setVehiclePositionEnabled(this, enabled);
-        AppEventLogger.event(this, "ui vehicle_position=" + enabled);
-        HudRuntimeService.refreshVehiclePosition();
+        boolean requested = enabled && !exitRequested
+                && !HudPrefs.isUserShutdownActive(this)
+                && HudRuntimeService.hasVehiclePositionPermissions(this);
+        if (HudPrefs.isVehiclePositionEnabled(this) != requested) {
+            HudPrefs.setVehiclePositionEnabled(this, requested);
+            AppEventLogger.event(this, "ui vehicle_position=" + requested);
+        }
+        HudRuntimeService.refreshVehiclePosition(this);
         invalidateComposeSnapshot();
     }
 
     public void composeRefreshVehiclePositionPermission() {
-        HudRuntimeService.refreshVehiclePosition();
+        HudRuntimeService.refreshVehiclePosition(this);
         invalidateComposeSnapshot();
     }
 

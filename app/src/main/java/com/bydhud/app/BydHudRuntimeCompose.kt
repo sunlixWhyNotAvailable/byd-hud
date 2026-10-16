@@ -10,7 +10,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
-import android.provider.Settings
 import android.widget.Toast
 import android.graphics.BitmapFactory
 import android.view.MotionEvent
@@ -557,16 +556,16 @@ private data class Copy(
     // Keep new text outside the constructor: copy$default is near DEX's 255-register limit.
     val vehiclePosition: String
         get() = when (language) {
-            Language.Ua -> "Використовувати позицію автомобіля"
-            Language.Ru -> "Использовать положение автомобиля"
-            Language.En -> "Use vehicle position"
+            Language.Ua -> "Використовувати позицію автомобіля та геометрію маршруту"
+            Language.Ru -> "Использовать положение автомобиля и геометрию маршрута"
+            Language.En -> "Use vehicle position and route geometry"
         }
 
     val vehiclePositionHint: String
         get() = when (language) {
-            Language.Ua -> "Використовує місцезнаходження та напрямок руху автомобіля для прив’язки стрілки HUD до маршруту.\nПотрібен дозвіл на місцезнаходження."
-            Language.Ru -> "Использует местоположение и направление движения автомобиля для привязки стрелки HUD к маршруту.\nТребуется разрешение на доступ к местоположению."
-            Language.En -> "Uses the vehicle’s location and direction of travel to align the HUD arrow with the route.\nLocation permission is required."
+            Language.Ua -> "Використовує місцезнаходження та напрямок руху автомобіля для прив’язки стрілки HUD до маршруту.\nДля HUD із підтримкою відображення руху автомобіля."
+            Language.Ru -> "Использует местоположение и направление движения автомобиля для привязки стрелки HUD к маршруту.\nДля HUD с поддержкой отображения движения автомобиля."
+            Language.En -> "Uses the vehicle’s location and direction of travel to align the HUD arrow with the route.\nFor HUDs that support displaying vehicle movement."
         }
 }
 
@@ -2328,43 +2327,42 @@ private fun OptionsTab(
     onDeleteMapProfile: (HudMapProfile.Source) -> Unit
 ) {
     val language = copy.language
+    var pendingVehiclePositionEnable by remember { mutableStateOf(false) }
+    val completeVehiclePositionEnable = {
+        val enabled = pendingVehiclePositionEnable
+                && HudRuntimeService.hasVehiclePositionPermissions(activity)
+        pendingVehiclePositionEnable = false
+        activity.composeSetVehiclePositionEnabled(enabled)
+    }
     val backgroundLocationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { activity.composeRefreshVehiclePositionPermission() }
-    val backgroundLocationSettingsLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { activity.composeRefreshVehiclePositionPermission() }
+    ) {
+        activity.composeRefreshVehiclePositionPermission()
+        completeVehiclePositionEnable()
+    }
     val requestBackgroundLocationPermission = {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-            && !activity.composeHasVehiclePositionBackgroundPermission()
+            && (!activity.composeHasVehiclePositionBackgroundPermission()
+                    || !HudRuntimeService.hasVehiclePositionPermissions(activity))
         ) {
-            if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q) {
-                backgroundLocationPermissionLauncher.launch(
-                    android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
-                )
-            } else {
-                val settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.parse("package:${activity.packageName}")
-                }
-                try {
-                    backgroundLocationSettingsLauncher.launch(settingsIntent)
-                } catch (_: ActivityNotFoundException) {
-                    backgroundLocationPermissionLauncher.launch(
-                        android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
-                    )
-                }
-            }
+            backgroundLocationPermissionLauncher.launch(
+                android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            )
+        } else {
+            completeVehiclePositionEnable()
         }
     }
     val foregroundLocationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        if (permissions[android.Manifest.permission.ACCESS_FINE_LOCATION] == true
+        if (pendingVehiclePositionEnable
+            && (permissions[android.Manifest.permission.ACCESS_FINE_LOCATION] == true
             || permissions[android.Manifest.permission.ACCESS_COARSE_LOCATION] == true
+            )
         ) {
-            activity.composeSetVehiclePositionEnabled(true)
             requestBackgroundLocationPermission()
         } else {
+            pendingVehiclePositionEnable = false
             activity.composeSetVehiclePositionEnabled(false)
         }
     }
@@ -2586,29 +2584,6 @@ private fun OptionsTab(
                     runAction { activity.composeSetBootEnabled(it) }
                 }
             }
-            row("vehicle-position") {
-                SwitchRow(
-                    copy.vehiclePosition,
-                    copy.vehiclePositionHint,
-                    snapshot.vehiclePositionEnabled,
-                    palette,
-                    rowFill = featureMaturityFill(palette)
-                ) { enabled ->
-                    runAction {
-                        if (!enabled) {
-                            activity.composeSetVehiclePositionEnabled(false)
-                        } else if (activity.composeHasVehiclePositionForegroundPermission()) {
-                            activity.composeSetVehiclePositionEnabled(true)
-                            requestBackgroundLocationPermission()
-                        } else {
-                            foregroundLocationPermissionLauncher.launch(arrayOf(
-                                android.Manifest.permission.ACCESS_FINE_LOCATION,
-                                android.Manifest.permission.ACCESS_COARSE_LOCATION
-                            ))
-                        }
-                    }
-                }
-            }
             row("diagnostic-artifacts") {
                 SwitchRow(
                     copy.saveScreenshotsLogs,
@@ -2716,6 +2691,7 @@ private fun OptionsTab(
                         "Если штатная стрелка зависает или показывает неверное направление, попробуйте Baidu вместо AMap.\nИзменение применится при следующем запуске вывода или теста HUD."
                     ),
                     palette,
+                    verticalPadding = 8.dp,
                     rowFill = featureMaturityFill(palette, tested = true)
                 ) {
                     Segmented(
@@ -2780,6 +2756,33 @@ private fun OptionsTab(
                     enabled = snapshot.distanceOutputEnabled,
                     onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.SmallDistanceClamp, copy.smallDistanceClamp, snapshot.smallDistanceClampEnabled) }
                 ) { runAction { activity.composeSetSmallDistanceClamp(it) } }
+            }
+            row("vehicle-position") {
+                SwitchRow(
+                    copy.vehiclePosition,
+                    copy.vehiclePositionHint,
+                    snapshot.vehiclePositionEnabled || pendingVehiclePositionEnable,
+                    palette,
+                    rowFill = featureMaturityFill(palette),
+                    verticalPadding = 8.dp
+                ) { enabled ->
+                    runAction {
+                        if (!enabled) {
+                            pendingVehiclePositionEnable = false
+                            activity.composeSetVehiclePositionEnabled(false)
+                        } else {
+                            pendingVehiclePositionEnable = true
+                            if (activity.composeHasVehiclePositionForegroundPermission()) {
+                                requestBackgroundLocationPermission()
+                            } else {
+                                foregroundLocationPermissionLauncher.launch(arrayOf(
+                                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                                    android.Manifest.permission.ACCESS_COARSE_LOCATION
+                                ))
+                            }
+                        }
+                    }
+                }
             }
         }
         optionsSection("route-eta", language.choose("ЕТА маршруту", "Route ETA", "ETA маршрута"), R.drawable.ic_options_schedule) {
@@ -9220,13 +9223,14 @@ private fun SettingRow(
     enabled: Boolean = true,
     onHelp: (() -> Unit)? = null,
     rowFill: Color = Color.Transparent,
+    verticalPadding: Dp = 14.dp,
     action: @Composable () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(rowFill)
-            .padding(horizontal = 14.dp, vertical = 14.dp),
+            .padding(horizontal = 14.dp, vertical = verticalPadding),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
@@ -10343,6 +10347,7 @@ private fun SwitchRow(
     enabled: Boolean = true,
     onHelp: (() -> Unit)? = null,
     rowFill: Color = Color.Transparent,
+    verticalPadding: Dp = 14.dp,
     onChecked: (Boolean) -> Unit
 ) {
     val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
@@ -10352,7 +10357,7 @@ private fun SwitchRow(
         modifier = Modifier
             .fillMaxWidth()
             .background(rowFill, RoundedCornerShape(7.dp))
-            .padding(horizontal = 14.dp, vertical = 14.dp)
+            .padding(horizontal = 14.dp, vertical = verticalPadding)
             .background(pressBackground(Color.Transparent, palette, press.pressed), RoundedCornerShape(7.dp))
             .then(press.modifier)
             .toggleable(

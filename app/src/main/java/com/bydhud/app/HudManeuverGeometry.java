@@ -3,7 +3,7 @@ package com.bydhud.app;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 
-/** Schematic RoadInfo coordinates, never Android location or a real route. */
+/** Schematic RoadInfo fallback and explicit live spatial-field selection. */
 final class HudManeuverGeometry {
     static final double LONGITUDE = 121.47832472222223;
     static final double LATITUDE = 31.228410277777776;
@@ -19,6 +19,8 @@ final class HudManeuverGeometry {
     static final Selection LANE_ONLY = new Selection("clear", "lane-only", "");
     static final Selection UNKNOWN_CIRCLE = new Selection("clear", "circle-direction-unavailable", "");
     static final Selection UNSUPPORTED_CIRCLE = new Selection("clear", "circle-shape-unvalidated", "");
+    private static final Selection OFF = new Selection("off", "vehicle-position-off", "",
+            0.0d, 0.0d, 0.0d, HudSpatialGeometry.Mode.OFF, false, false, "vehicle_position_off");
 
     private HudManeuverGeometry() { }
 
@@ -41,6 +43,35 @@ final class HudManeuverGeometry {
                 && frame.getBydManeuver() != 99 ? STRAIGHT : CLEAR;
     }
 
+    static Selection withSpatialResult(Selection current, HudSpatialGeometry.Result result,
+            long nowElapsedMs, boolean reset) {
+        if (reset) {
+            return new Selection("reset", "vehicle-position-off", "", 0.0d, 0.0d,
+                    0.0d, HudSpatialGeometry.Mode.OFF, true, true, "vehicle_position_off");
+        }
+        if (result == null || result.mode == HudSpatialGeometry.Mode.OFF) return OFF;
+        if (current == null) current = CLEAR;
+        if (current.line.isEmpty()) {
+            return new Selection(current.name, current.reason, current.line,
+                    current.longitude, current.latitude, current.heading,
+                    HudSpatialGeometry.Mode.OFF, false, true, current.reason);
+        }
+        if (result.mode == HudSpatialGeometry.Mode.REAL && result.usableAt(nowElapsedMs)
+                && result.latitude != null && result.longitude != null
+                && result.headingDegrees != null && result.line != null && !result.line.isEmpty()
+                && Double.isFinite(result.latitude) && Double.isFinite(result.longitude)
+                && Double.isFinite(result.headingDegrees)) {
+            return new Selection("real", result.reason, result.line,
+                    result.longitude, result.latitude, result.headingDegrees,
+                    HudSpatialGeometry.Mode.REAL, false, true, result.reason);
+        }
+        String reason = result.mode == HudSpatialGeometry.Mode.REAL
+                ? "real_geometry_expired" : result.reason;
+        return new Selection(current.name, current.reason, current.line,
+                current.longitude, current.latitude, current.heading,
+                HudSpatialGeometry.Mode.SCHEMATIC, false, true, reason);
+    }
+
     static final class Selection {
         final String name;
         final String reason;
@@ -48,21 +79,37 @@ final class HudManeuverGeometry {
         final double longitude;
         final double latitude;
         final double heading;
+        final HudSpatialGeometry.Mode spatialMode;
+        final boolean spatialReset;
+        final String spatialReason;
         private final byte[] fields;
 
         private Selection(String name, String reason, String line) {
+            this(name, reason, line, line.isEmpty() ? 0.0d : LONGITUDE,
+                    line.isEmpty() ? 0.0d : LATITUDE,
+                    line.isEmpty() ? 0.0d : HEADING, null, false, true, "");
+        }
+
+        private Selection(String name, String reason, String line, double longitude,
+                double latitude, double heading, HudSpatialGeometry.Mode spatialMode,
+                boolean spatialReset, boolean includeFields, String spatialReason) {
             this.name = name;
             this.reason = reason;
             this.line = line;
-            longitude = line.isEmpty() ? 0.0d : LONGITUDE;
-            latitude = line.isEmpty() ? 0.0d : LATITUDE;
-            heading = line.isEmpty() ? 0.0d : HEADING;
+            this.longitude = longitude;
+            this.latitude = latitude;
+            this.heading = heading;
+            this.spatialMode = spatialMode;
+            this.spatialReset = spatialReset;
+            this.spatialReason = spatialReason == null ? "" : spatialReason;
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            writeDouble(out, 19, longitude);
-            writeDouble(out, 20, latitude);
-            writeString(out, 30, line);
-            writeString(out, 31, "");
-            writeDouble(out, 32, heading);
+            if (includeFields) {
+                writeDouble(out, 19, longitude);
+                writeDouble(out, 20, latitude);
+                writeString(out, 30, line);
+                writeString(out, 31, "");
+                writeDouble(out, 32, heading);
+            }
             fields = out.toByteArray();
         }
 
