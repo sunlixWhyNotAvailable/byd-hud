@@ -9,6 +9,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.widget.Toast
 import android.graphics.BitmapFactory
 import android.view.MotionEvent
@@ -340,6 +342,8 @@ private data class Copy(
     val setupDialogDismiss: String,
     val bootRuntime: String,
     val bootRuntimeHint: String,
+    val vehiclePosition: String,
+    val vehiclePositionHint: String,
     val saveScreenshotsLogs: String,
     val saveScreenshotsLogsHint: String,
     val checkForUpdates: String,
@@ -2311,6 +2315,46 @@ private fun OptionsTab(
     onDeleteMapProfile: (HudMapProfile.Source) -> Unit
 ) {
     val language = copy.language
+    val backgroundLocationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { activity.composeRefreshVehiclePositionPermission() }
+    val backgroundLocationSettingsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { activity.composeRefreshVehiclePositionPermission() }
+    val requestBackgroundLocationPermission = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+            && !activity.composeHasVehiclePositionBackgroundPermission()
+        ) {
+            if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q) {
+                backgroundLocationPermissionLauncher.launch(
+                    android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
+                )
+            } else {
+                val settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:${activity.packageName}")
+                }
+                try {
+                    backgroundLocationSettingsLauncher.launch(settingsIntent)
+                } catch (_: ActivityNotFoundException) {
+                    backgroundLocationPermissionLauncher.launch(
+                        android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
+                    )
+                }
+            }
+        }
+    }
+    val foregroundLocationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions[android.Manifest.permission.ACCESS_FINE_LOCATION] == true
+            || permissions[android.Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        ) {
+            activity.composeSetVehiclePositionEnabled(true)
+            requestBackgroundLocationPermission()
+        } else {
+            activity.composeSetVehiclePositionEnabled(false)
+        }
+    }
     var widgetColorTarget by remember { mutableStateOf<Boolean?>(null) }
     var showSteeringButtonCapture by remember { mutableStateOf(false) }
     var steeringCaptureLearningRevision by remember { mutableStateOf(0L) }
@@ -2527,6 +2571,29 @@ private fun OptionsTab(
             row("boot-runtime") {
                 SwitchRow(copy.bootRuntime, copy.bootRuntimeHint, snapshot.bootEnabled, palette) {
                     runAction { activity.composeSetBootEnabled(it) }
+                }
+            }
+            row("vehicle-position") {
+                SwitchRow(
+                    copy.vehiclePosition,
+                    copy.vehiclePositionHint,
+                    snapshot.vehiclePositionEnabled,
+                    palette,
+                    rowFill = featureMaturityFill(palette)
+                ) { enabled ->
+                    runAction {
+                        if (!enabled) {
+                            activity.composeSetVehiclePositionEnabled(false)
+                        } else if (activity.composeHasVehiclePositionForegroundPermission()) {
+                            activity.composeSetVehiclePositionEnabled(true)
+                            requestBackgroundLocationPermission()
+                        } else {
+                            foregroundLocationPermissionLauncher.launch(arrayOf(
+                                android.Manifest.permission.ACCESS_FINE_LOCATION,
+                                android.Manifest.permission.ACCESS_COARSE_LOCATION
+                            ))
+                        }
+                    }
                 }
             }
             row("diagnostic-artifacts") {
@@ -10262,6 +10329,7 @@ private fun SwitchRow(
     palette: Palette,
     enabled: Boolean = true,
     onHelp: (() -> Unit)? = null,
+    rowFill: Color = Color.Transparent,
     onChecked: (Boolean) -> Unit
 ) {
     val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
@@ -10270,6 +10338,7 @@ private fun SwitchRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(rowFill, RoundedCornerShape(7.dp))
             .padding(horizontal = 14.dp, vertical = 14.dp)
             .background(pressBackground(Color.Transparent, palette, press.pressed), RoundedCornerShape(7.dp))
             .then(press.modifier)
@@ -11110,6 +11179,8 @@ private fun enCopy() = Copy(
     setupDialogDismiss = "Got it",
     bootRuntime = "Boot runtime service",
     bootRuntimeHint = "Start HUD automatically after boot, unlock or an app update. Turning this off does not stop the current session.",
+    vehiclePosition = "Use vehicle position",
+    vehiclePositionHint = "Uses the vehicle’s location and direction of travel to align the HUD arrow with the route.\nLocation permission is required.",
     saveScreenshotsLogs = "Save diagnostic screenshots and extended logs",
     saveScreenshotsLogsHint = "Keep Waze frames, processing details, and full log history for diagnostics.",
     checkForUpdates = "Check for updates",
@@ -11353,6 +11424,8 @@ private fun uaCopy() = enCopy().copy(
     setupDialogDismiss = "Зрозуміло",
     bootRuntime = "Авто-запуск",
     bootRuntimeHint = "Автоматично запускати HUD після завантаження системи, розблокування або оновлення застосунку. Вимкнення не зупиняє поточну роботу.",
+    vehiclePosition = "Використовувати позицію автомобіля",
+    vehiclePositionHint = "Використовує місцезнаходження та напрямок руху автомобіля для прив’язки стрілки HUD до маршруту.\nПотрібен дозвіл на місцезнаходження.",
     saveScreenshotsLogs = "Зберігати діагностичні скріншоти та розширені логи",
     saveScreenshotsLogsHint = "Зберігати кадри Waze, деталі обробки та повну історію логів для діагностики.",
     checkForUpdates = "Перевіряти оновлення",
@@ -11603,6 +11676,8 @@ private fun ruCopy() = enCopy().copy(
     setupDialogDismiss = "Понятно",
     bootRuntime = "Автозапуск",
     bootRuntimeHint = "Автоматически запускать HUD после загрузки системы, разблокировки или обновления приложения. Отключение не останавливает текущую работу.",
+    vehiclePosition = "Использовать положение автомобиля",
+    vehiclePositionHint = "Использует местоположение и направление движения автомобиля для привязки стрелки HUD к маршруту.\nТребуется разрешение на доступ к местоположению.",
     saveScreenshotsLogs = "Сохранять диагностические снимки и расширенные логи",
     saveScreenshotsLogsHint = "Хранить кадры Waze, детали обработки и полную историю логов для диагностики.",
     checkForUpdates = "Проверить обновления",

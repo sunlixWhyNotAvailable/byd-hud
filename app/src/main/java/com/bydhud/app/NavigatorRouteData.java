@@ -122,4 +122,18 @@ public final class NavigatorRouteData {
     public Maneuver maneuver(int index) {
         return maneuvers[index];
     }
+
+    public boolean hasManeuverCoordinate(int index) {
+        Maneuver maneuver = maneuvers[index];
+        return Double.isFinite(maneuver.latitude) && Double.isFinite(maneuver.longitude)
+                && Math.abs(maneuver.latitude) <= 90 && Math.abs(maneuver.longitude) <= 180
+                && !("waze-5.25.0.1".equals(header.navigator)
+                && maneuver.latitude == 0 && maneuver.longitude == 0);
+    }
+
+    public int availableManeuverCoordinateCount() {
+        int available = 0;
+        for (int i = 0; i < maneuvers.length; i++) if (hasManeuverCoordinate(i)) available++;
+        return available;
+    }
 }

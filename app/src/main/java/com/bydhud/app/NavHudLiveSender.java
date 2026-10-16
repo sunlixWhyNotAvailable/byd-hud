@@ -3252,6 +3252,7 @@ final class NavHudLiveSender {
         advanceTbtLifecycleForFirstFrame();
         boolean hudOwner = isHudOutputOwner(ownerPackage);
         boolean semanticTbt = shouldDispatchSemanticTbtForDirectReason(reason);
+        if (hudOwner && semanticTbt) VehicleRouteRuntime.onFrame(ownerPackage, frame);
         if (semanticTbt) {
             if (!manualTbtActive && shouldClaimTbtOwnerForFrameForTest(
                     tbtPublisher.isRouteActive(),
@@ -3614,6 +3615,7 @@ final class NavHudLiveSender {
         advanceTbtLifecycleForFirstFrame();
         boolean hudOwner = isHudOutputOwner(ownerPackage);
         boolean semanticTbt = shouldDispatchSemanticTbtForDirectReason(reason);
+        if (hudOwner && semanticTbt) VehicleRouteRuntime.onFrame(ownerPackage, frame);
         if (semanticTbt) {
             if (!manualTbtActive && shouldClaimTbtOwnerForFrameForTest(
                     tbtPublisher.isRouteActive(),

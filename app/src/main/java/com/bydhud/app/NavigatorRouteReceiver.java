@@ -18,7 +18,6 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -94,6 +93,7 @@ final class NavigatorRouteReceiver {
             return;
         }
 
+        VehicleRouteRuntime.start(app);
         NavigatorRouteLog.event(app, "receiver_started");
         state.ingress.post(() -> initializeSources(state));
     }
@@ -115,12 +115,12 @@ final class NavigatorRouteReceiver {
                 state.registered = false;
             }
         }
+        VehicleRouteRuntime.stop(reason);
         if (state == null) return;
 
         state.ingress.removeCallbacksAndMessages(null);
         synchronized (state.decodeLock) {
             state.pendingDecodes.clear();
-            state.pendingArtifacts.clear();
             state.decodePumpScheduled = false;
         }
         state.decode.removeCallbacksAndMessages(null);
@@ -258,6 +258,7 @@ final class NavigatorRouteReceiver {
             }
         }
         state.detailedEnabled = detailed;
+        VehicleRouteRuntime.changed();
     }
 
     private static void reconnectSource(RuntimeState state, String source) {
@@ -279,6 +280,7 @@ final class NavigatorRouteReceiver {
         synchronized (LIFECYCLE_LOCK) {
             if (isActiveLocked(state)) STORE.clearSource(source);
         }
+        VehicleRouteRuntime.changed();
     }
 
     private static void handleBroadcast(RuntimeState state, Intent intent) {
@@ -628,11 +630,13 @@ final class NavigatorRouteReceiver {
                 if (source != null) {
                     cancelDeadline(state, source);
                     if (completion != null && result.newRevision) {
+                        String targetDay = NavCaptureStore.todayDir(System.currentTimeMillis());
                         long age = Math.max(0L, now - completion.route.header().sourceElapsedMs);
                         NavigatorRouteLog.accepted(state.app, completion.route,
                                 completion.work.encodedBytes, age,
-                                completion.assemblyMs, completion.decodeMs);
-                        enqueueArtifact(state, completion.route);
+                                completion.assemblyMs, completion.decodeWaitMs,
+                                completion.decodeMs);
+                        NavigatorRouteLog.saveDetailedCurrent(state.app, targetDay, completion.route);
                     }
                 }
                 break;
@@ -687,6 +691,12 @@ final class NavigatorRouteReceiver {
             if (snapshot != null && snapshot.step != null) {
                 NavigatorRouteLog.step(state.app, snapshot.step);
             }
+        }
+        if (result.newRevision || result.stepChanged
+                || (result.outcome != NavigatorRouteStore.Outcome.COLLECTING
+                && result.outcome != NavigatorRouteStore.Outcome.DUPLICATE
+                && result.outcome != NavigatorRouteStore.Outcome.STALE)) {
+            VehicleRouteRuntime.changed();
         }
     }
 
@@ -756,7 +766,7 @@ final class NavigatorRouteReceiver {
         if (!isActive(state)) return;
         long now = SystemClock.elapsedRealtime();
         long started = assemblyStartedAt(state, work.header, now);
-        DecodeEntry entry = new DecodeEntry(work, started);
+        DecodeEntry entry = new DecodeEntry(work, Math.max(0L, now - started), now);
         synchronized (state.decodeLock) {
             if (!state.active) return;
             state.pendingDecodes.put(work.header.navigator, entry);
@@ -765,7 +775,6 @@ final class NavigatorRouteReceiver {
                 if (!state.decode.post(() -> decodeNext(state))) {
                     state.decodePumpScheduled = false;
                     state.pendingDecodes.clear();
-                    state.pendingArtifacts.clear();
                 }
             }
         }
@@ -773,37 +782,19 @@ final class NavigatorRouteReceiver {
 
     private static void enqueueArtifact(RuntimeState state, NavigatorRouteData route) {
         if (!isActive(state) || !HudPrefs.isDetailedDebugArtifactsEnabled(state.app)) return;
-        NavigatorRouteData.Header header = route.header();
-        String key = header.navigator + ":" + header.producerEpoch + ":" + header.routeRevision;
-        synchronized (state.decodeLock) {
-            if (!state.active) return;
-            state.pendingArtifacts.put(key, route);
-            if (!state.decodePumpScheduled) {
-                state.decodePumpScheduled = true;
-                if (!state.decode.post(() -> decodeNext(state))) {
-                    state.decodePumpScheduled = false;
-                    state.pendingDecodes.clear();
-                    state.pendingArtifacts.clear();
-                }
-            }
-        }
+        String targetDay = NavCaptureStore.todayDir(System.currentTimeMillis());
+        NavigatorRouteLog.saveDetailedCurrent(state.app, targetDay, route);
     }
 
     private static void decodeNext(RuntimeState state) {
         DecodeEntry entry = null;
-        NavigatorRouteData artifact = null;
         synchronized (state.decodeLock) {
             if (!state.active) {
                 state.pendingDecodes.clear();
-                state.pendingArtifacts.clear();
                 state.decodePumpScheduled = false;
                 return;
             }
-            // Persist an accepted revision before decoding another; only this worker may wait.
-            if (!state.pendingArtifacts.isEmpty()) {
-                String key = state.pendingArtifacts.keySet().iterator().next();
-                artifact = state.pendingArtifacts.remove(key);
-            } else if (!state.pendingDecodes.isEmpty()) {
+            if (!state.pendingDecodes.isEmpty()) {
                 String source = choosePendingSource(state);
                 state.lastDecodeSource = source;
                 entry = state.pendingDecodes.remove(source);
@@ -812,21 +803,10 @@ final class NavigatorRouteReceiver {
                 return;
             }
         }
-        if (artifact != null) {
-            try {
-                NavigatorRouteLog.saveDetailedCurrent(state.app, artifact);
-            } catch (RuntimeException failure) {
-                NavigatorRouteData.Header header = artifact.header();
-                NavigatorRouteLog.artifactError(state.app, header.navigator,
-                        header.producerEpoch, header.routeRevision);
-            } finally {
-                state.ingress.post(() -> scheduleNextDecode(state));
-            }
-            return;
-        }
 
         DecodeEntry decoding = entry;
         long decodeStart = SystemClock.elapsedRealtime();
+        long decodeWaitMs = Math.max(0L, decodeStart - entry.queuedAtMs);
         NavigatorRouteData route = null;
         String failure = null;
         try {
@@ -839,20 +819,20 @@ final class NavigatorRouteReceiver {
         long decodeEnd = SystemClock.elapsedRealtime();
         NavigatorRouteData decoded = route;
         String decodeFailure = failure;
-        long assemblyMs = Math.max(0L, decodeStart - entry.assemblyStartedMs);
+        long assemblyMs = entry.assemblyMs;
         long decodeMs = Math.max(0L, decodeEnd - decodeStart);
         if (!state.ingress.post(() -> finishDecode(state, decoding, decoded,
-                decodeFailure, assemblyMs, decodeMs))) {
+                decodeFailure, assemblyMs, decodeWaitMs, decodeMs))) {
             synchronized (state.decodeLock) {
                 state.pendingDecodes.clear();
-                state.pendingArtifacts.clear();
                 state.decodePumpScheduled = false;
             }
         }
     }
 
     private static void finishDecode(RuntimeState state, DecodeEntry entry,
-            NavigatorRouteData route, String failure, long assemblyMs, long decodeMs) {
+            NavigatorRouteData route, String failure, long assemblyMs,
+            long decodeWaitMs, long decodeMs) {
         if (!isActive(state)) return;
         long now = SystemClock.elapsedRealtime();
         NavigatorRouteStore.Result result;
@@ -873,7 +853,8 @@ final class NavigatorRouteReceiver {
             handleStoreResult(state, result, null, true);
         } else {
             handleStoreResult(state, result, failure == null && route != null
-                    ? new RouteCompletion(entry.work, route, assemblyMs, decodeMs) : null, false);
+                    ? new RouteCompletion(entry.work, route, assemblyMs, decodeWaitMs,
+                    decodeMs) : null, false);
         }
         scheduleNextDecode(state);
     }
@@ -882,17 +863,15 @@ final class NavigatorRouteReceiver {
         synchronized (state.decodeLock) {
             if (!state.active) {
                 state.pendingDecodes.clear();
-                state.pendingArtifacts.clear();
                 state.decodePumpScheduled = false;
                 return;
             }
-            if (state.pendingDecodes.isEmpty() && state.pendingArtifacts.isEmpty()) {
+            if (state.pendingDecodes.isEmpty()) {
                 state.decodePumpScheduled = false;
                 return;
             }
             if (!state.decode.post(() -> decodeNext(state))) {
                 state.pendingDecodes.clear();
-                state.pendingArtifacts.clear();
                 state.decodePumpScheduled = false;
             }
         }
@@ -1142,7 +1121,6 @@ final class NavigatorRouteReceiver {
         final Map<String, AssemblyClock> assemblyClocks = new HashMap<>();
         final Map<String, NavigatorRouteData.Header> lastHeaders = new HashMap<>();
         final Map<String, DecodeEntry> pendingDecodes = new HashMap<>();
-        final Map<String, NavigatorRouteData> pendingArtifacts = new LinkedHashMap<>();
         volatile boolean active = true;
         boolean registered;
         boolean detailedEnabled;
@@ -1180,11 +1158,13 @@ final class NavigatorRouteReceiver {
 
     private static final class DecodeEntry {
         final NavigatorRouteStore.DecodeWork work;
-        final long assemblyStartedMs;
+        final long assemblyMs;
+        final long queuedAtMs;
 
-        DecodeEntry(NavigatorRouteStore.DecodeWork work, long assemblyStartedMs) {
+        DecodeEntry(NavigatorRouteStore.DecodeWork work, long assemblyMs, long queuedAtMs) {
             this.work = work;
-            this.assemblyStartedMs = assemblyStartedMs;
+            this.assemblyMs = assemblyMs;
+            this.queuedAtMs = queuedAtMs;
         }
     }
 
@@ -1192,13 +1172,15 @@ final class NavigatorRouteReceiver {
         final NavigatorRouteStore.DecodeWork work;
         final NavigatorRouteData route;
         final long assemblyMs;
+        final long decodeWaitMs;
         final long decodeMs;
 
         RouteCompletion(NavigatorRouteStore.DecodeWork work, NavigatorRouteData route,
-                long assemblyMs, long decodeMs) {
+                long assemblyMs, long decodeWaitMs, long decodeMs) {
             this.work = work;
             this.route = route;
             this.assemblyMs = assemblyMs;
+            this.decodeWaitMs = decodeWaitMs;
             this.decodeMs = decodeMs;
         }
     }

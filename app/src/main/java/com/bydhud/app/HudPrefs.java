@@ -10,6 +10,7 @@ final class HudPrefs {
     private static volatile int outputOptionsRevision;
     private static final String PREFS_NAME = "byd_hud_prefs";
     private static final String KEY_BOOT_ENABLED = "boot_enabled";
+    private static final String KEY_VEHICLE_POSITION_ENABLED = "vehicle_position_enabled";
     private static final String KEY_SMALL_DISTANCE_CLAMP = "small_distance_clamp";
     private static final String KEY_OUTPUT_PNG = "output_png";
     private static final String KEY_OUTPUT_NATIVE = "output_native";
@@ -146,6 +147,14 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setBootEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_BOOT_ENABLED, enabled).apply();
+    }
+
+    static boolean isVehiclePositionEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_VEHICLE_POSITION_ENABLED, false);
+    }
+
+    static void setVehiclePositionEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_VEHICLE_POSITION_ENABLED, enabled).apply();
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

@@ -90,7 +90,10 @@ final class NavigatorRouteArtifact {
                 .put("geometryAvailable", route.geometryAvailable())
                 .put("maneuversAvailable", route.maneuversAvailable())
                 .put("pointCount", route.pointCount())
-                .put("maneuverCount", route.maneuverCount());
+                .put("maneuverCount", route.maneuverCount())
+                .put("maneuverCoordinateCount", route.maneuverCount())
+                .put("maneuverCoordinateAvailableCount",
+                        route.availableManeuverCoordinateCount());
         String metadataJson = metadata.toString();
         json.write(metadataJson, 0, metadataJson.length() - 1);
         json.write(",\"points\":[");
@@ -113,6 +116,7 @@ final class NavigatorRouteArtifact {
                     .put("ordinal", maneuver.ordinal)
                     .put("latitude", finiteOrNull(maneuver.latitude))
                     .put("longitude", finiteOrNull(maneuver.longitude))
+                    .put("coordinateAvailable", route.hasManeuverCoordinate(i))
                     .put("vertexIndex", maneuver.vertexIndex)
                     .put("instructionSegmentIndex", maneuver.instructionSegmentIndex)
                     .put("navigationSegmentIndex", maneuver.navigationSegmentIndex)

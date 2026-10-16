@@ -788,6 +788,10 @@ final class GMapsDirectChannel {
             if (road.isEmpty()) road = joinedLines(summary.get("longCueLines"));
             long frameAtMs = data.getLong(
                     "sourceElapsedMs", SystemClock.elapsedRealtime());
+            DirectTbtFrame.SourceDistance sourceDistance = distanceValue >= 0L
+                    && distanceValue <= Integer.MAX_VALUE && frameAtMs >= 0L
+                    ? new DirectTbtFrame.SourceDistance((int) distanceValue, frameAtMs)
+                    : sameStep ? currentFrame.getSourceDistance() : null;
             DirectTbtFrame.TripMetrics tripMetrics = tripMetrics(
                     summary, System.currentTimeMillis());
             byte[] fallbackPng = HudGraphicPayload.buildOemTurnPng(mapping.fallbackSource);
@@ -817,7 +821,7 @@ final class GMapsDirectChannel {
                     DirectTbtFrame.AlertOverlay.inactive(),
                     tripMetrics).withVehicleTbt(
                     mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber,
-                    mapping.roundaboutExit);
+                    mapping.roundaboutExit).withSourceDistance(sourceDistance);
             activeCurrentStepIndex = !stepIndexPresent || stepIndex == null ? -1 : stepIndex;
             boolean firstFrame = !firstStructuredFrame;
             if (!navigating) {

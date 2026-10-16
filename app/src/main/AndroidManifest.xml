@@ -6,6 +6,10 @@
 
     <uses-permission android:name="com.bydhud.app.permission.WAZE_NAVIGATION_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -107,6 +111,7 @@
             android:name=".HudRuntimeService"
             android:exported="true"
             android:permission="android.permission.DUMP"
+            android:foregroundServiceType="location"
             android:stopWithTask="false" />
 
         <receiver android:name=".InstrumentProxyReceiver"

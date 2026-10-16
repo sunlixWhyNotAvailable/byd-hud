@@ -20,7 +20,7 @@ final class NavigatorRouteLog {
     }
 
     static void accepted(Context context, NavigatorRouteData route,
-            long bytes, long sourceAgeMs, long assemblyMs, long decodeMs) {
+            long bytes, long sourceAgeMs, long assemblyMs, long decodeWaitMs, long decodeMs) {
         if (context == null || route == null) return;
         NavigatorRouteData.Header header = route.header();
         String source = NavigatorRouteArtifact.safeSource(header.navigator);
@@ -34,18 +34,23 @@ final class NavigatorRouteLog {
                 + " revision=" + header.routeRevision
                 + " points=" + route.pointCount()
                 + " maneuvers=" + route.maneuverCount()
+                + " maneuver_coordinates_available="
+                + route.availableManeuverCoordinateCount()
+                + " maneuver_coordinates_total=" + route.maneuverCount()
                 + " geometry_available=" + route.geometryAvailable()
                 + " maneuvers_available=" + route.maneuversAvailable()
                 + " bytes=" + Math.max(0L, bytes)
                 + " source_age_ms=" + Math.max(0L, sourceAgeMs)
                 + " assembly_ms=" + Math.max(0L, assemblyMs)
+                + " decode_wait_ms=" + Math.max(0L, decodeWaitMs)
                 + " decode_ms=" + Math.max(0L, decodeMs));
     }
 
-    static void saveDetailedCurrent(Context context, NavigatorRouteData route) {
+    static void saveDetailedCurrent(Context context, String targetDay,
+            NavigatorRouteData route) {
         if (context == null || route == null
                 || !HudPrefs.isDetailedDebugArtifactsEnabled(context)) return;
-        saveArtifact(context, route);
+        saveArtifact(context, targetDay, route);
     }
 
     static void step(Context context, NavigatorRouteStore.CurrentStep step) {
@@ -109,11 +114,33 @@ final class NavigatorRouteLog {
         error(context, source, epoch, revision, "artifact_write");
     }
 
-    static void artifactCancelled(Context context, String source, long epoch, long revision) {
-        error(context, source, epoch, revision, "artifact_interrupted");
+    static void artifactRejected(Context context, NavigatorRouteData route,
+            String reason, long lossCount) {
+        if (context == null || route == null) return;
+        NavigatorRouteData.Header header = route.header();
+        String source = NavigatorRouteArtifact.safeSource(header.navigator);
+        event(context, "artifact_rejected source=" + (source == null ? "unknown" : source)
+                + " epoch=" + header.producerEpoch
+                + " revision=" + header.routeRevision
+                + " reason=" + safeLabel(reason, "queue_rejected")
+                + " loss_count=" + Math.max(1L, lossCount));
     }
 
-    private static void saveArtifact(Context context, NavigatorRouteData route) {
+    static void artifactWrite(Context context, NavigatorRouteData route,
+            long waitMs, long writeMs, boolean written) {
+        if (context == null || route == null) return;
+        NavigatorRouteData.Header header = route.header();
+        String source = NavigatorRouteArtifact.safeSource(header.navigator);
+        event(context, "artifact_write source=" + (source == null ? "unknown" : source)
+                + " epoch=" + header.producerEpoch
+                + " revision=" + header.routeRevision
+                + " artifact_wait_ms=" + Math.max(0L, waitMs)
+                + " artifact_write_ms=" + Math.max(0L, writeMs)
+                + " outcome=" + (written ? "stored" : "failed"));
+    }
+
+    private static void saveArtifact(Context context, String targetDay,
+            NavigatorRouteData route) {
         NavigatorRouteData.Header header = route.header();
         String source = NavigatorRouteArtifact.safeSource(header.navigator);
         if (source == null) {
@@ -121,9 +148,7 @@ final class NavigatorRouteLog {
                     "unsupported_source");
             return;
         }
-        long now = System.currentTimeMillis();
-        String day = NavCaptureStore.todayDir(now);
-        WazeCaptureDebugWriter.get().routeArtifact(context, day, route);
+        WazeCaptureDebugWriter.get().routeArtifact(context, targetDay, route);
     }
 
     private static String compactEvent(String details) {
@@ -177,9 +202,11 @@ final class NavigatorRouteLog {
                 ? line.length() : line.indexOf(' '));
         if (!isErrorCategory(category)) return line;
         String source = field(line, "source");
+        String epoch = field(line, "epoch");
         String revision = field(line, "revision");
         String reason = field(line, "reason");
         String key = category + ":" + (source == null ? "unknown" : source) + ":"
+                + (epoch == null ? "*" : epoch) + ":"
                 + (revision == null ? "*" : revision) + ":"
                 + (reason == null ? "other" : reason);
         long now = SystemClock.elapsedRealtime();
@@ -210,6 +237,7 @@ final class NavigatorRouteLog {
     private static boolean isErrorCategory(String category) {
         return "replay_timeout".equals(category)
                 || "retry_exhausted".equals(category)
+                || "artifact_rejected".equals(category)
                 || "rejected".equals(category)
                 || "decode_failed".equals(category)
                 || "unavailable".equals(category)

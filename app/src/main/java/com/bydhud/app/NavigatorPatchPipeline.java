@@ -1512,6 +1512,8 @@ final class NavigatorPatchPipeline {
                 throw new IOException("Waze stable-session target missing");
             }
             boolean addV2Bridge = lifecycleOwner.lifecycleCoreStock();
+            boolean upgradeGeometryPayload = lifecycleOwner.requiresGeometry
+                    && lifecycleOwner.geometryUpgradeEligible();
             File target = outputMember(outputDirectory, lifecycleOwner.fileName);
             Map<String, File> replacements = new HashMap<>();
             for (String dexEntry : lifecycleOwner.lifecycleDexEntries) {
@@ -1524,7 +1526,13 @@ final class NavigatorPatchPipeline {
             }
             File lifecycleApk = new File(transaction, "waze-lifecycle-unsigned.apk");
             repack(target, lifecycleApk, replacements, Collections.emptyMap());
-            if (addV2Bridge || (lifecycleOwner.requiresGeometry && lifecycleOwner.geometryPayloadCount == 0)) {
+            if (addV2Bridge && upgradeGeometryPayload) {
+                File updatedApk = new File(transaction, "waze-route-upgraded-unsigned.apk");
+                upgradeRouteExportPayload(context, lifecycleApk, updatedApk, transaction,
+                        lifecycleOwner, true);
+                replaceFile(updatedApk, target);
+            } else if (addV2Bridge || (lifecycleOwner.requiresGeometry
+                    && lifecycleOwner.geometryPayloadCount == 0)) {
                 File bridgeDex = new File(transaction, "waze-route-v2.dex");
                 PatchPayloadDex.extract(
                         context, addV2Bridge ? "Lcom/waze/bydhud/RouteStateBridgeV2"
@@ -1532,13 +1540,19 @@ final class NavigatorPatchPipeline {
                         lifecycleOwner.requiresGeometry ? new String[] {
                                 "Lcom/bydhud/navexport/WazeRouteExport",
                                 "Lcom/bydhud/navexport/RouteExport",
-                                "Lcom/bydhud/navexport/RouteData"} : new String[0]);
+                                "Lcom/bydhud/navexport/RouteData",
+                                "Lcom/bydhud/navexport/WazeManeuverRecovery"} : new String[0]);
                 File optionalApk = new File(transaction, "waze-optional-unsigned.apk");
                 Map<String, File> additions = new HashMap<>();
                 List<String> dexEntries = dexEntries(lifecycleApk);
                 additions.put(nextDexEntry(dexEntries), bridgeDex);
                 repack(lifecycleApk, optionalApk, Collections.emptyMap(), additions);
                 replaceFile(optionalApk, target);
+            } else if (upgradeGeometryPayload) {
+                File updatedApk = new File(transaction, "waze-route-upgraded-unsigned.apk");
+                upgradeRouteExportPayload(context, lifecycleApk, updatedApk, transaction,
+                        lifecycleOwner, false);
+                replaceFile(updatedApk, target);
             } else {
                 replaceFile(lifecycleApk, target);
             }
@@ -1574,6 +1588,34 @@ final class NavigatorPatchPipeline {
             replaceFile(alertApk, target);
         }
         return new PatchOutcome(false, false, false);
+    }
+
+    private static void upgradeRouteExportPayload(Context context, File inputApk, File outputApk,
+            File transaction, WazeApkInspection owner, boolean includeV2Bridge)
+            throws IOException {
+        if (owner.geometryPayloadDexEntries.size() != 1) {
+            throw new IOException("Waze route-export payload member is ambiguous");
+        }
+        File payloadDex = new File(transaction, "waze-route-export-current.dex");
+        String[] routeClasses = {
+                "Lcom/bydhud/navexport/WazeRouteExport",
+                "Lcom/bydhud/navexport/RouteExport",
+                "Lcom/bydhud/navexport/RouteData",
+                "Lcom/bydhud/navexport/WazeManeuverRecovery"};
+        if (includeV2Bridge) {
+            PatchPayloadDex.extract(context, "Lcom/waze/bydhud/RouteStateBridgeV2",
+                    payloadDex, routeClasses);
+        } else {
+            PatchPayloadDex.extract(context, routeClasses[0], payloadDex,
+                    routeClasses[1], routeClasses[2], routeClasses[3]);
+        }
+        String dexEntry = owner.geometryPayloadDexEntries.get(0);
+        File upgradedDex = new File(transaction, "waze-route-export-upgraded.dex");
+        WazePatchEngine.replaceRouteExportPayload(readEntry(inputApk, dexEntry),
+                Files.readAllBytes(payloadDex.toPath()), upgradedDex);
+        Map<String, File> replacements = new HashMap<>();
+        replacements.put(dexEntry, upgradedDex);
+        repack(inputApk, outputApk, replacements, Collections.emptyMap());
     }
 
     static void signSet(File directory) throws Exception {
@@ -1680,9 +1722,24 @@ final class NavigatorPatchPipeline {
                     result.laneReason = lane.reason;
                 }
                 WazePatchEngine.LifecycleInspection lifecycle = composite.lifecycle;
+                int payloadCountBefore = result.geometryPayloadCount;
                 result.geometryTargetCount += lifecycle.geometryTargetCount;
                 result.geometryHookCount += lifecycle.geometryHookCount;
                 result.geometryPayloadCount += lifecycle.geometryPayloadCount;
+                result.geometryPayloadClassCount += lifecycle.geometryPayloadClassCount;
+                result.routeExportClassCount += lifecycle.routeExportClassCount;
+                result.routeDataClassCount += lifecycle.routeDataClassCount;
+                result.geometryRecoveryClassCount += lifecycle.geometryRecoveryClassCount;
+                if (lifecycle.geometryPayloadCount > 0) {
+                    if (payloadCountBefore > 0 || lifecycle.geometryPayloadCount != 1) {
+                        result.geometryInvalid = true;
+                    } else {
+                        result.geometryPayloadRevision = lifecycle.geometryPayloadRevision;
+                    }
+                }
+                if (lifecycle.geometryPayloadClassCount > 0) {
+                    result.geometryPayloadDexEntries.add(entry.getName());
+                }
                 result.geometryInvalid |= lifecycle.geometryInvalid;
                 result.applicationTargetCount += lifecycle.applicationTargetCount;
                 result.applicationHookCount += lifecycle.applicationHookCount;
@@ -1702,7 +1759,8 @@ final class NavigatorPatchPipeline {
                         || lifecycle.routeTargetCount > 0
                         || lifecycle.speedTargetCount > 0
                         || lifecycle.clusterEtaTargetCount > 0
-                        || lifecycle.geometryTargetCount > 0) {
+                        || lifecycle.geometryTargetCount > 0
+                        || lifecycle.geometryPayloadClassCount > 0) {
                     result.lifecycleDexEntries.add(entry.getName());
                 }
                 if (lifecycle.applicationTargetCount > 0) {
@@ -1979,10 +2037,16 @@ final class NavigatorPatchPipeline {
         int geometryTargetCount;
         int geometryHookCount;
         int geometryPayloadCount;
+        int geometryPayloadClassCount;
+        int geometryPayloadRevision = -1;
+        int routeExportClassCount;
+        int routeDataClassCount;
+        int geometryRecoveryClassCount;
         boolean geometryInvalid;
         String fileName = "";
         final List<String> dexEntries = new ArrayList<>();
         final List<String> lifecycleDexEntries = new ArrayList<>();
+        final List<String> geometryPayloadDexEntries = new ArrayList<>();
         final List<String> alertDexEntries = new ArrayList<>();
         int allowlistTargetCount;
         String allowlistDex = "";
@@ -2101,7 +2165,8 @@ final class NavigatorPatchPipeline {
             boolean coreCompatible = lifecycleCoreStock() || lifecycleCoreV2Patched();
             boolean etaCompatible = clusterEtaStock() || clusterEtaPatched();
             return coreCompatible && etaCompatible && (!requiresGeometry
-                    || geometryStock() || geometryPatched()) && !lifecyclePatched();
+                    || geometryStock() || geometryPatched() || geometryUpgradeEligible())
+                    && !lifecyclePatched();
         }
 
         boolean lifecyclePatched() {
@@ -2111,12 +2176,27 @@ final class NavigatorPatchPipeline {
 
         boolean geometryStock() {
             return !geometryInvalid && geometryTargetCount == 8
-                    && geometryHookCount == 0 && geometryPayloadCount == 0;
+                    && geometryHookCount == 0 && geometryPayloadCount == 0
+                    && geometryPayloadClassCount == 0;
         }
 
         boolean geometryPatched() {
             return !geometryInvalid && geometryTargetCount == 8
-                    && geometryHookCount == 8 && geometryPayloadCount == 1;
+                    && geometryHookCount == 8 && geometryPayloadCount == 1
+                    && geometryPayloadRevision == WazePatchEngine.ROUTE_EXPORT_PAYLOAD_REVISION
+                    && routeExportClassCount == 1 && routeDataClassCount == 1
+                    && geometryRecoveryClassCount == 1 && geometryPayloadClassCount >= 4
+                    && geometryPayloadDexEntries.size() == 1;
+        }
+
+        boolean geometryUpgradeEligible() {
+            return !geometryInvalid && geometryTargetCount == 8
+                    && geometryHookCount == 8 && geometryPayloadCount == 1
+                    && geometryPayloadRevision >= 0
+                    && geometryPayloadRevision < WazePatchEngine.ROUTE_EXPORT_PAYLOAD_REVISION
+                    && routeExportClassCount == 1 && routeDataClassCount == 1
+                    && geometryRecoveryClassCount <= 1 && geometryPayloadClassCount >= 3
+                    && geometryPayloadDexEntries.size() == 1;
         }
 
         boolean alertStock() {

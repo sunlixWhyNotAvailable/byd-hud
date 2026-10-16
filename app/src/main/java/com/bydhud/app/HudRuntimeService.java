@@ -7,11 +7,19 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.app.AppOpsManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
+import android.location.LocationManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -29,6 +37,10 @@ public final class HudRuntimeService extends Service {
     private static final long START_REQUEST_TIMEOUT_MS = 15_000L;
 
     private static final AtomicBoolean START_IN_FLIGHT = new AtomicBoolean(false);
+    private static final Handler POSITION_MAIN_HANDLER = new Handler(Looper.getMainLooper());
+    private static volatile HudRuntimeService activeService;
+    private static volatile String requestedVehiclePositionRouteSource;
+    private static volatile Runnable vehiclePositionListener;
     private static Handler startGateHandler;
     private static final Runnable START_REQUEST_TIMEOUT = () -> {
         if (START_IN_FLIGHT.compareAndSet(true, false)) {
@@ -52,6 +64,113 @@ public final class HudRuntimeService extends Service {
     private boolean runtimeStartInitialized;
     private boolean runtimeActiveWork;
     private boolean runtimeDestroyed;
+    private VehiclePositionController vehiclePositionController;
+    private boolean locationForegroundActive;
+    private boolean locationFgsStartedWhileUiVisible;
+    private AppOpsManager locationAppOpsManager;
+    private boolean vehiclePositionSleeping;
+    private String lastVehiclePositionState = "";
+    private final AppOpsManager.OnOpChangedListener locationAppOpListener = (op, packageName) -> {
+        if (packageName == null || getPackageName().equals(packageName)) {
+            POSITION_MAIN_HANDLER.post(() -> {
+                if (runtimeDestroyed) return;
+                if (vehiclePositionController != null) {
+                    vehiclePositionController.setAcquiring(false);
+                }
+                reconcileVehiclePosition();
+                notifyVehiclePositionListener();
+            });
+        }
+    };
+    private final BroadcastReceiver locationProviderChangedReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent == null ? null : intent.getAction();
+            if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                vehiclePositionSleeping = true;
+                reconcileVehiclePosition();
+                notifyVehiclePositionListener();
+                return;
+            }
+            if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                vehiclePositionSleeping = false;
+                reconcileVehiclePosition();
+                notifyVehiclePositionListener();
+                return;
+            }
+            if (locationForegroundActive && vehiclePositionController != null) {
+                vehiclePositionController.refreshProviders();
+            }
+            reconcileVehiclePosition();
+            notifyVehiclePositionListener();
+        }
+    };
+
+    /** Root-owned route lifecycle supplies the active navigator package, or null when inactive. */
+    public static void setVehiclePositionRouteSource(String routeSource) {
+        String normalized = routeSource == null || routeSource.trim().isEmpty()
+                ? null : routeSource.trim();
+        String previous = requestedVehiclePositionRouteSource;
+        if (previous == null ? normalized == null : previous.equals(normalized)) return;
+        requestedVehiclePositionRouteSource = normalized;
+        POSITION_MAIN_HANDLER.post(() -> {
+            HudRuntimeService service = activeService;
+            if (service == null || service.runtimeDestroyed) {
+                notifyVehiclePositionListener();
+            } else {
+                service.reconcileVehiclePosition();
+            }
+        });
+    }
+
+    public static VehiclePositionController.Snapshot getVehiclePositionSnapshot() {
+        HudRuntimeService service = activeService;
+        if (service != null && service.vehiclePositionController != null) {
+            return service.vehiclePositionController.snapshot();
+        }
+        return new VehiclePositionController.Snapshot(
+                requestedVehiclePositionRouteSource, null);
+    }
+
+    /** Listener is called on the main thread; consumers should post work to their own worker. */
+    public static void setVehiclePositionListener(Runnable listener) {
+        vehiclePositionListener = listener;
+        POSITION_MAIN_HANDLER.post(() -> {
+            if (vehiclePositionListener == listener && listener != null) {
+                notifyVehiclePositionListener();
+            }
+        });
+    }
+
+    static void refreshVehiclePosition() {
+        POSITION_MAIN_HANDLER.post(() -> {
+            HudRuntimeService service = activeService;
+            if (service != null && !service.runtimeDestroyed) {
+                service.reconcileVehiclePosition();
+            }
+            notifyVehiclePositionListener();
+        });
+    }
+
+    private static void notifyVehiclePositionListener() {
+        Runnable listener = vehiclePositionListener;
+        if (listener == null) return;
+        try {
+            listener.run();
+        } catch (RuntimeException error) {
+            Log.w(TAG, "vehicle position listener failed", error);
+        }
+    }
+
+    private static void onVehiclePositionProviderStateChanged() {
+        POSITION_MAIN_HANDLER.post(() -> {
+            HudRuntimeService service = activeService;
+            if (service != null && !service.runtimeDestroyed) {
+                service.reconcileVehiclePosition();
+            }
+            notifyVehiclePositionListener();
+        });
+    }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     static void startPersistent(Context context, String reason) {
@@ -184,6 +303,7 @@ public final class HudRuntimeService extends Service {
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     static void stopPersistent(Context context, String reason) {
         Context appContext = context.getApplicationContext();
+        setVehiclePositionRouteSource(null);
         NavigatorRouteReceiver.stop("runtime-stop:" + reason);
         clearStartRequestGate();
         HudRuntimeState.clearServicePresent(appContext, "stop:" + reason);
@@ -201,9 +321,27 @@ public final class HudRuntimeService extends Service {
         runtimeStartInitialized = false;
         runtimeActiveWork = false;
         runtimeDestroyed = false;
+        PowerManager powerManager = getSystemService(PowerManager.class);
+        vehiclePositionSleeping = powerManager != null && !powerManager.isInteractive();
+        vehiclePositionController = new VehiclePositionController(this,
+                HudRuntimeService::notifyVehiclePositionListener,
+                HudRuntimeService::onVehiclePositionProviderStateChanged);
+        vehiclePositionController.setRouteSource(requestedVehiclePositionRouteSource);
+        activeService = this;
+        startWatchingLocationAppOps();
+        IntentFilter providerFilter = new IntentFilter(LocationManager.PROVIDERS_CHANGED_ACTION);
+        providerFilter.addAction(Intent.ACTION_SCREEN_OFF);
+        providerFilter.addAction(Intent.ACTION_SCREEN_ON);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(locationProviderChangedReceiver, providerFilter,
+                    Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(locationProviderChangedReceiver, providerFilter);
+        }
         HudRuntimeUpgradeGuard.recordVersionStart(this, "service-create");
         HudGraphicPayload.setContext(this);
-        startForeground(NOTIFICATION_ID, buildNotification("Runtime active"));
+        startForeground(NOTIFICATION_ID, buildNotification("Runtime active"),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE);
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markStarted(this, "onCreate");
         HudRuntimeState.publishServicePresent(this, "onCreate");
@@ -227,6 +365,7 @@ public final class HudRuntimeService extends Service {
                 + " boot=" + HudPrefs.isBootEnabled(this)
                 + " shutdown=" + HudPrefs.isUserShutdownActive(this));
         if (HudPrefs.isUserShutdownActive(this)) {
+            stopVehiclePositionRuntime();
             HudRuntimeWatchdog.cancel(this);
             HudRuntimeState.markStopped(this, "shutdown-active:" + reason);
             stopForegroundCompat();
@@ -244,6 +383,7 @@ public final class HudRuntimeService extends Service {
             InstrumentProxyManager.get(this).awaitExistingRuntime();
         }
         if (!UserRuntimeSession.allowsRuntime(this)) {
+            stopVehiclePositionRuntime();
             HudRuntimeWatchdog.cancel(this);
             HudRuntimeState.markStopped(this, "runtime-disabled:" + reason);
             stopForegroundCompat();
@@ -270,6 +410,7 @@ public final class HudRuntimeService extends Service {
         clearStartRequestGate();
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);
+        reconcileVehiclePosition();
         DashboardWidgetController.onRuntimeStart(this);
         boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(this);
         if (!runtimeStartInitialized || activeWork != runtimeActiveWork) {
@@ -337,6 +478,20 @@ public final class HudRuntimeService extends Service {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         runtimeDestroyed = true;
+        requestedVehiclePositionRouteSource = null;
+        if (activeService == this) activeService = null;
+        if (vehiclePositionController != null) vehiclePositionController.clear();
+        locationFgsStartedWhileUiVisible = false;
+        locationForegroundActive = false;
+        if (locationAppOpsManager != null) {
+            locationAppOpsManager.stopWatchingMode(locationAppOpListener);
+            locationAppOpsManager = null;
+        }
+        try {
+            unregisterReceiver(locationProviderChangedReceiver);
+        } catch (IllegalArgumentException ignored) {
+        }
+        notifyVehiclePositionListener();
         NavigatorRouteReceiver.stop("runtime-destroyed");
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
         clearStartRequestGate();
@@ -346,8 +501,140 @@ public final class HudRuntimeService extends Service {
         releaseInstrumentRuntime(this, "runtime-destroyed");
         HudPrefs.setRuntimeServiceRunning(this, false);
         HudRuntimeState.markStopped(this, "destroyed");
+        recordVehiclePositionState("off/no-source");
         log("runtime destroyed");
         super.onDestroy();
+    }
+
+    private void stopVehiclePositionRuntime() {
+        requestedVehiclePositionRouteSource = null;
+        if (vehiclePositionController != null) vehiclePositionController.clear();
+        setLocationForegroundActive(false);
+        locationFgsStartedWhileUiVisible = false;
+        recordVehiclePositionState("off/no-source");
+        notifyVehiclePositionListener();
+    }
+
+    private void reconcileVehiclePosition() {
+        VehiclePositionController controller = vehiclePositionController;
+        if (runtimeDestroyed || controller == null) return;
+        String routeSource = requestedVehiclePositionRouteSource;
+        controller.setRouteSource(routeSource);
+        boolean enabled = routeSource != null
+                && HudPrefs.isVehiclePositionEnabled(this)
+                && !HudPrefs.isUserShutdownActive(this)
+                && UserRuntimeSession.allowsRuntime(this);
+        if (!enabled) {
+            suspendVehiclePosition("off/no-source");
+            return;
+        }
+        if (!hasForegroundLocationPermission()) {
+            suspendVehiclePosition("permission-unavailable");
+            return;
+        }
+        if (vehiclePositionSleeping) {
+            suspendVehiclePosition("sleep");
+            return;
+        }
+        boolean backgroundPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+                || checkSelfPermission(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED;
+        boolean uiVisible = MainActivity.isUiResumed();
+        if (!locationForegroundActive && !backgroundPermission && !uiVisible) {
+            suspendVehiclePosition("background-unavailable");
+            return;
+        }
+        if (!controller.hasEnabledProvider()) {
+            suspendVehiclePosition("provider-unavailable");
+            return;
+        }
+        if (!locationForegroundActive && !setLocationForegroundActive(true)) {
+            suspendVehiclePosition("location-foreground-unavailable");
+            return;
+        }
+        if (!backgroundPermission && !uiVisible && !locationFgsStartedWhileUiVisible) {
+            suspendVehiclePosition("background-unavailable");
+            return;
+        }
+        if (uiVisible && !backgroundPermission) locationFgsStartedWhileUiVisible = true;
+        if (!controller.setAcquiring(true)) {
+            suspendVehiclePosition("provider-unavailable");
+            return;
+        }
+        recordVehiclePositionState("active");
+    }
+
+    private void suspendVehiclePosition(String state) {
+        if (vehiclePositionController != null) vehiclePositionController.setAcquiring(false);
+        setLocationForegroundActive(false);
+        locationFgsStartedWhileUiVisible = false;
+        recordVehiclePositionState(state);
+    }
+
+    private void recordVehiclePositionState(String state) {
+        if (state.equals(lastVehiclePositionState)) return;
+        lastVehiclePositionState = state;
+        log("vehicle position state=" + state);
+    }
+
+    private void startWatchingLocationAppOps() {
+        locationAppOpsManager = getSystemService(AppOpsManager.class);
+        if (locationAppOpsManager == null) {
+            log("location permission observer unavailable");
+            return;
+        }
+        try {
+            locationAppOpsManager.startWatchingMode(
+                    AppOpsManager.OPSTR_FINE_LOCATION, getPackageName(), locationAppOpListener);
+            locationAppOpsManager.startWatchingMode(
+                    AppOpsManager.OPSTR_COARSE_LOCATION, getPackageName(), locationAppOpListener);
+        } catch (RuntimeException error) {
+            try {
+                locationAppOpsManager.stopWatchingMode(locationAppOpListener);
+            } catch (RuntimeException ignored) {
+            }
+            locationAppOpsManager = null;
+            log("location permission observer unavailable error="
+                    + error.getClass().getSimpleName());
+        }
+    }
+
+    private boolean hasForegroundLocationPermission() {
+        String operation;
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED) {
+            operation = AppOpsManager.OPSTR_FINE_LOCATION;
+        } else if (checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED) {
+            operation = AppOpsManager.OPSTR_COARSE_LOCATION;
+        } else {
+            return false;
+        }
+        AppOpsManager appOps = getSystemService(AppOpsManager.class);
+        if (appOps == null) return false;
+        try {
+            int mode = appOps.unsafeCheckOpRawNoThrow(operation,
+                    android.os.Process.myUid(), getPackageName());
+            // The FGS/visibility gate below applies the foreground-only restriction.
+            return mode == AppOpsManager.MODE_ALLOWED || mode == AppOpsManager.MODE_DEFAULT
+                    || mode == AppOpsManager.MODE_FOREGROUND;
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    private boolean setLocationForegroundActive(boolean enabled) {
+        if (locationForegroundActive == enabled) return true;
+        try {
+            int type = enabled ? ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                    : ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE;
+            startForeground(NOTIFICATION_ID,
+                    buildNotification(runtimeActiveWork ? "Runtime active" : "Runtime idle"), type);
+            locationForegroundActive = enabled;
+            return true;
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     private static void releaseInstrumentRuntime(Context context, String reason) {

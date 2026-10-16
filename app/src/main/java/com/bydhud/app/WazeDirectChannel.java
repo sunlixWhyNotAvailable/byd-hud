@@ -1014,7 +1014,10 @@ public final class WazeDirectChannel {
         DirectTbtFrame.TripMetrics selectedMetrics = snapshot.metrics == null
                 ? navigationFrame.getTripMetrics() : snapshot.metrics;
         DirectTbtFrame next = frameFromStep(snapshot.step, snapshot.distanceMeters,
-                selectedMetrics, snapshot.laneDisposition, snapshot.laneSource);
+                selectedMetrics, snapshot.laneDisposition, snapshot.laneSource)
+                .withSourceDistance(snapshot.distanceKnown && snapshot.distanceElapsedMs >= 0L
+                        ? new DirectTbtFrame.SourceDistance(snapshot.distanceMeters,
+                                snapshot.distanceElapsedMs) : null);
         navigationDistanceKnown = snapshot.distanceKnown;
         acceptedRouteFrame = true;
         int nextRaw = snapshot.step.rawType;

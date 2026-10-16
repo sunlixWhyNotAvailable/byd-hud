@@ -336,6 +336,7 @@ public final class MainActivity extends ComponentActivity {
         }
         activityResumed = true;
         RESUMED_ACTIVITY.set(this);
+        HudRuntimeService.refreshVehiclePosition();
         DashboardWidgetController.refresh(this);
         maybeStartPendingAdbAuthorization();
         refreshControls();
@@ -370,6 +371,7 @@ public final class MainActivity extends ComponentActivity {
         }
         cancelPendingAutoAdbStart();
         RESUMED_ACTIVITY.compareAndSet(this, null);
+        HudRuntimeService.refreshVehiclePosition();
         Context app = getApplicationContext();
         ShellRuntimeSession.afterPersistence(() -> {
             if (!HudPrefs.flush(app)) AppEventLogger.event(app, "UI settings persistence failed on pause");
@@ -675,6 +677,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.uiLanguage(this),
                 HudPrefs.isDarkTheme(this),
                 HudPrefs.isBootEnabled(this),
+                HudPrefs.isVehiclePositionEnabled(this),
                 HudPrefs.isDetailedDebugArtifactsEnabled(this),
                 HudPrefs.isPngOutputEnabled(this),
                 HudPrefs.isNativeOutputEnabled(this),
@@ -1323,6 +1326,37 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetBootEnabled(boolean enabled) {
         setBootMode(enabled);
+    }
+
+    public boolean composeHasVehiclePositionForegroundPermission() {
+        return checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED
+                || checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED;
+    }
+
+    public boolean composeHasVehiclePositionBackgroundPermission() {
+        return android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q
+                || checkSelfPermission(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED;
+    }
+
+    public void composeSetVehiclePositionEnabled(boolean enabled) {
+        if (enabled && !composeHasVehiclePositionForegroundPermission()) return;
+        HudPrefs.setVehiclePositionEnabled(this, enabled);
+        AppEventLogger.event(this, "ui vehicle_position=" + enabled);
+        HudRuntimeService.refreshVehiclePosition();
+        invalidateComposeSnapshot();
+    }
+
+    public void composeRefreshVehiclePositionPermission() {
+        HudRuntimeService.refreshVehiclePosition();
+        invalidateComposeSnapshot();
+    }
+
+    static boolean isUiResumed() {
+        MainActivity activity = RESUMED_ACTIVITY.get();
+        return activity != null && activity.activityResumed && !activity.destroyed;
     }
 
     //keeps this Compose helper focused so UI state changes remain easy to audit.
@@ -2777,6 +2811,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean uaLanguage;
         public final boolean darkTheme;
         public final boolean bootEnabled;
+        public final boolean vehiclePositionEnabled;
         public final boolean detailedDebugArtifactsEnabled;
         public final boolean pngOutputEnabled;
         public final boolean nativeOutputEnabled;
@@ -2874,6 +2909,7 @@ public final class MainActivity extends ComponentActivity {
         public final HudMapProfileCalibrationState mapProfileCalibration;
 
         ComposeSnapshot(String uiLanguage, boolean darkTheme, boolean bootEnabled,
+                boolean vehiclePositionEnabled,
                 boolean detailedDebugArtifactsEnabled,
                 boolean pngOutputEnabled, boolean nativeOutputEnabled,
                 int maneuverCompatibilityProfile, boolean laneOutputEnabled,
@@ -2934,6 +2970,7 @@ public final class MainActivity extends ComponentActivity {
             this.uaLanguage = "uk".equals(this.uiLanguage);
             this.darkTheme = darkTheme;
             this.bootEnabled = bootEnabled;
+            this.vehiclePositionEnabled = vehiclePositionEnabled;
             this.detailedDebugArtifactsEnabled = detailedDebugArtifactsEnabled;
             this.pngOutputEnabled = pngOutputEnabled;
             this.nativeOutputEnabled = nativeOutputEnabled;
@@ -3065,6 +3102,7 @@ public final class MainActivity extends ComponentActivity {
                     && uaLanguage == other.uaLanguage
                     && darkTheme == other.darkTheme
                     && bootEnabled == other.bootEnabled
+                    && vehiclePositionEnabled == other.vehiclePositionEnabled
                     && detailedDebugArtifactsEnabled == other.detailedDebugArtifactsEnabled
                     && pngOutputEnabled == other.pngOutputEnabled
                     && nativeOutputEnabled == other.nativeOutputEnabled
@@ -3163,7 +3201,8 @@ public final class MainActivity extends ComponentActivity {
         @Override
         public int hashCode() {
             return Objects.hash(
-                    uiLanguage, uaLanguage, darkTheme, bootEnabled, detailedDebugArtifactsEnabled,
+                    uiLanguage, uaLanguage, darkTheme, bootEnabled, vehiclePositionEnabled,
+                    detailedDebugArtifactsEnabled,
                     pngOutputEnabled, nativeOutputEnabled, maneuverCompatibilityProfile,
                     laneOutputEnabled,
                     distanceOutputEnabled, streetOutputEnabled, transliterationMode,

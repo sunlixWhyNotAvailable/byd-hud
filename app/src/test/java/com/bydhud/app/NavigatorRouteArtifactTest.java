@@ -40,6 +40,8 @@ public final class NavigatorRouteArtifactTest {
             assertTrue(json.getBoolean("maneuversAvailable"));
             assertEquals(2, json.getInt("pointCount"));
             assertEquals(2, json.getInt("maneuverCount"));
+            assertEquals(2, json.getInt("maneuverCoordinateCount"));
+            assertEquals(2, json.getInt("maneuverCoordinateAvailableCount"));
 
             JSONArray points = json.getJSONArray("points");
             assertEquals(0, points.getJSONObject(0).getInt("index"));
@@ -55,6 +57,7 @@ public final class NavigatorRouteArtifactTest {
 
             JSONArray maneuvers = json.getJSONArray("maneuvers");
             JSONObject first = maneuvers.getJSONObject(0);
+            assertTrue(first.getBoolean("coordinateAvailable"));
             assertEquals("m1", first.getString("id"));
             assertEquals(0, first.getInt("ordinal"));
             assertEquals(31.2, first.getDouble("latitude"), 0d);
@@ -72,6 +75,7 @@ public final class NavigatorRouteArtifactTest {
             assertFalse(first.getBoolean("syntheticPolyline"));
 
             JSONObject second = maneuvers.getJSONObject(1);
+            assertTrue(second.getBoolean("coordinateAvailable"));
             assertEquals("m\"2", second.getString("id"));
             assertEquals(1, second.getInt("ordinal"));
             assertEquals(32.4, second.getDouble("latitude"), 0d);
@@ -95,6 +99,39 @@ public final class NavigatorRouteArtifactTest {
             assertFalse(NavigatorRouteArtifact.write(logs,
                     route("../../outside", "route/../id")));
             assertEquals(1, new File(logs, "route-geometry").list().length);
+        } finally {
+            deleteTree(logs.toPath());
+        }
+    }
+
+    @Test
+    public void treatsOnlyWazeZeroPairAsMissingAndPreservesRawCoordinates() throws Exception {
+        File logs = Files.createTempDirectory("navigator-route-waze-coordinates-").toFile();
+        try {
+            NavigatorRouteData route = new NavigatorRouteData(
+                    new NavigatorRouteData.Header(
+                            "waze-5.25.0.1", 43L, 8L, "waze-coordinate-test", 123457L),
+                    false, true, new double[0], new NavigatorRouteData.Maneuver[] {
+                    new NavigatorRouteData.Maneuver("missing", 0, 0d, 0d,
+                            -1, -1, -1, null, null, Double.NaN, Double.NaN,
+                            Integer.MIN_VALUE, false),
+                    new NavigatorRouteData.Maneuver("valid", 1, 0d, -122.4d,
+                            -1, -1, -1, null, null, Double.NaN, Double.NaN,
+                            Integer.MIN_VALUE, false)
+            });
+
+            assertTrue(NavigatorRouteArtifact.write(logs, route));
+            File artifact = new File(logs,
+                    "route-geometry/waze-5.25.0.1/43-8.json.gz");
+            JSONObject json = new JSONObject(readGzip(artifact));
+            assertEquals(2, json.getInt("maneuverCoordinateCount"));
+            assertEquals(1, json.getInt("maneuverCoordinateAvailableCount"));
+            JSONArray maneuvers = json.getJSONArray("maneuvers");
+            JSONObject missing = maneuvers.getJSONObject(0);
+            assertFalse(missing.getBoolean("coordinateAvailable"));
+            assertEquals(0d, missing.getDouble("latitude"), 0d);
+            assertEquals(0d, missing.getDouble("longitude"), 0d);
+            assertTrue(maneuvers.getJSONObject(1).getBoolean("coordinateAvailable"));
         } finally {
             deleteTree(logs.toPath());
         }

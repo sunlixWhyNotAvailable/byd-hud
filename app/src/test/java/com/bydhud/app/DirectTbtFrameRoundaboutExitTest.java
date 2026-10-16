@@ -2,6 +2,7 @@ package com.bydhud.app;
 
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 
 import java.util.Collections;
 import org.junit.Test;
@@ -15,7 +16,8 @@ public final class DirectTbtFrameRoundaboutExitTest {
         DirectTbtFrame base = new DirectTbtFrame(
                 33, 22, 99, 120, "road", "cue", "road", null, null,
                 Collections.emptyList(), DirectTbtFrame.AlertOverlay.inactive());
-        DirectTbtFrame frame = base.withVehicleTbt(18, 2, exit);
+        DirectTbtFrame.SourceDistance distance = new DirectTbtFrame.SourceDistance(120, 1_234);
+        DirectTbtFrame frame = base.withVehicleTbt(18, 2, exit).withSourceDistance(distance);
         assertSame(exit, base.withRoundaboutExit(exit).getRoundaboutExit());
         DirectTbtFrame laneSource = new DirectTbtFrame(
                 0, 9, 11, 100, "", "", "", null, new byte[]{1},
@@ -31,6 +33,10 @@ public final class DirectTbtFrameRoundaboutExitTest {
                 .withVehicleTbt(18, 3);
 
         assertSame(exit, copy.getRoundaboutExit());
+        assertSame(distance, copy.getSourceDistance());
+        assertEquals(120, copy.getSourceDistance().meters);
+        assertEquals(1_234, copy.getSourceDistance().elapsedMs);
+        assertNull(DirectTbtFrame.empty().getSourceDistance());
         assertEquals("MAIN_SURFACE", copy.getRoundaboutExit().getSourceMode());
         assertSame(RoundaboutExit.unknown(), DirectTbtFrame.empty().getRoundaboutExit());
     }

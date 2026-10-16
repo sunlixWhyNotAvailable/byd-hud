@@ -22,6 +22,7 @@ public final class DirectTbtFrame {
     private final TripMetrics tripMetrics;
     private final SpeedLimit speedLimit;
     private final RoundaboutExit roundaboutExit;
+    private final SourceDistance sourceDistance;
 
     public DirectTbtFrame(
             int rawManeuverType,
@@ -99,6 +100,17 @@ public final class DirectTbtFrame {
             int amapBroadcastManeuver,
             int roundaboutExitNumber,
             RoundaboutExit roundaboutExit) {
+        this(rawManeuverType, amapManeuver, bydManeuver, distanceMeters,
+                roadText, cueText, displayText, maneuverPng, lanePng, lanes,
+                alertOverlay, tripMetrics, speedLimit, amapBroadcastManeuver,
+                roundaboutExitNumber, roundaboutExit, null);
+    }
+
+    private DirectTbtFrame(int rawManeuverType, int amapManeuver, int bydManeuver,
+            int distanceMeters, String roadText, String cueText, String displayText,
+            byte[] maneuverPng, byte[] lanePng, List<Lane> lanes, AlertOverlay alertOverlay,
+            TripMetrics tripMetrics, SpeedLimit speedLimit, int amapBroadcastManeuver,
+            int roundaboutExitNumber, RoundaboutExit roundaboutExit, SourceDistance sourceDistance) {
         this.rawManeuverType = rawManeuverType;
         this.amapManeuver = Math.max(0, amapManeuver);
         this.amapBroadcastManeuver = Math.max(0, amapBroadcastManeuver);
@@ -117,6 +129,7 @@ public final class DirectTbtFrame {
         this.speedLimit = speedLimit == null ? SpeedLimit.inactive() : speedLimit;
         this.roundaboutExit = roundaboutExit == null
                 ? RoundaboutExit.unknown() : roundaboutExit;
+        this.sourceDistance = sourceDistance;
     }
 
     public static DirectTbtFrame empty() {
@@ -150,6 +163,26 @@ public final class DirectTbtFrame {
 
     public int getDistanceMeters() {
         return distanceMeters;
+    }
+
+    SourceDistance getSourceDistance() { return sourceDistance; }
+
+    /** Original numeric measurement; UI rounding and partial frames must not renew its age. */
+    static final class SourceDistance {
+        final int meters;
+        final long elapsedMs;
+        SourceDistance(int meters, long elapsedMs) {
+            if (meters < 0 || elapsedMs < 0) throw new IllegalArgumentException("invalid distance");
+            this.meters = meters;
+            this.elapsedMs = elapsedMs;
+        }
+    }
+
+    DirectTbtFrame withSourceDistance(SourceDistance distance) {
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
+                lanes, alertOverlay, tripMetrics, speedLimit,
+                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit, distance);
     }
 
     public String getRoadText() {
@@ -196,14 +229,14 @@ public final class DirectTbtFrame {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
                 lanes, overlay, tripMetrics, speedLimit,
-                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit);
+                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit, sourceDistance);
     }
 
     DirectTbtFrame withManeuverPng(byte[] png) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, png, lanePng,
                 lanes, alertOverlay, tripMetrics, speedLimit,
-                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit);
+                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit, sourceDistance);
     }
 
     boolean hasLaneGuidance() {
@@ -215,21 +248,21 @@ public final class DirectTbtFrame {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng,
                 other.lanePng, other.lanes, alertOverlay, tripMetrics, speedLimit,
-                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit);
+                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit, sourceDistance);
     }
 
     DirectTbtFrame withTripMetrics(TripMetrics metrics) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
                 lanes, alertOverlay, metrics, speedLimit,
-                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit);
+                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit, sourceDistance);
     }
 
     DirectTbtFrame withSpeedLimit(SpeedLimit value) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
                 lanes, alertOverlay, tripMetrics, value,
-                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit);
+                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit, sourceDistance);
     }
 
     DirectTbtFrame withDistanceMeters(int value) {
@@ -238,7 +271,7 @@ public final class DirectTbtFrame {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 normalized, roadText, cueText, displayText, maneuverPng, lanePng,
                 lanes, alertOverlay, tripMetrics, speedLimit,
-                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit);
+                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit, sourceDistance);
     }
 
     DirectTbtFrame withNavigationText(String road, String cue) {
@@ -246,7 +279,7 @@ public final class DirectTbtFrame {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, road, cue, displayText, maneuverPng, lanePng,
                 lanes, alertOverlay, tripMetrics, speedLimit,
-                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit);
+                amapBroadcastManeuver, roundaboutExitNumber, roundaboutExit, sourceDistance);
     }
 
     DirectTbtFrame withVehicleTbt(int broadcastManeuver, int exitNumber) {
@@ -258,7 +291,7 @@ public final class DirectTbtFrame {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
                 lanes, alertOverlay, tripMetrics, speedLimit,
-                broadcastManeuver, exitNumber, direction);
+                broadcastManeuver, exitNumber, direction, sourceDistance);
     }
 
     DirectTbtFrame withRoundaboutExit(RoundaboutExit value) {
@@ -267,7 +300,7 @@ public final class DirectTbtFrame {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
                 lanes, alertOverlay, tripMetrics, speedLimit,
-                amapBroadcastManeuver, roundaboutExitNumber, normalized);
+                amapBroadcastManeuver, roundaboutExitNumber, normalized, sourceDistance);
     }
 
     /** Canonical direct-channel speed-limit state; zero is an explicit clear. */

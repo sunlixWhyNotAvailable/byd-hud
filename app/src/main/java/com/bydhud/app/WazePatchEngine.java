@@ -36,6 +36,7 @@ import org.jf.dexlib2.iface.reference.FieldReference;
 import org.jf.dexlib2.iface.reference.MethodReference;
 import org.jf.dexlib2.iface.reference.StringReference;
 import org.jf.dexlib2.iface.reference.TypeReference;
+import org.jf.dexlib2.iface.value.IntEncodedValue;
 import org.jf.dexlib2.immutable.ImmutableClassDef;
 import org.jf.dexlib2.immutable.ImmutableDexFile;
 import org.jf.dexlib2.immutable.ImmutableField;
@@ -51,6 +52,7 @@ import org.jf.dexlib2.rewriter.DexRewriter;
 import org.jf.dexlib2.rewriter.Rewriter;
 import org.jf.dexlib2.rewriter.RewriterModule;
 import org.jf.dexlib2.rewriter.Rewriters;
+import org.jf.dexlib2.writer.io.FileDataStore;
 import org.jf.dexlib2.writer.pool.DexPool;
 
 import java.io.ByteArrayInputStream;
@@ -313,6 +315,8 @@ final class WazePatchEngine {
     static final String ALREADY_PATCHED = "ALREADY_PATCHED";
     static final String PARTIAL = "PARTIAL";
     static final String UNSUPPORTED = "UNSUPPORTED";
+    static final int ROUTE_EXPORT_PAYLOAD_REVISION =
+            com.bydhud.navexport.WazeRouteExport.PAYLOAD_REVISION;
 
     private static final WazePatchEngine LEGACY = new WazePatchEngine(false);
     private static final WazePatchEngine WAZE_525 = new WazePatchEngine(true);
@@ -490,8 +494,17 @@ final class WazePatchEngine {
         LifecycleInspection result = new LifecycleInspection();
         for (ClassDef classDef : file.getClasses()) {
             if (BRIDGE_CLASS.equals(classDef.getType())) result.bridgeClassCount++;
+            if (isRouteExportPayloadClass(classDef.getType())) {
+                result.geometryPayloadClassCount++;
+            }
             if ("Lcom/bydhud/navexport/WazeRouteExport;".equals(classDef.getType())) {
                 result.geometryPayloadCount++;
+                result.geometryPayloadRevision = routeExportRevision(classDef);
+            }
+            if ("Lcom/bydhud/navexport/RouteExport;".equals(classDef.getType())) result.routeExportClassCount++;
+            if ("Lcom/bydhud/navexport/RouteData;".equals(classDef.getType())) result.routeDataClassCount++;
+            if ("Lcom/bydhud/navexport/WazeManeuverRecovery;".equals(classDef.getType())) {
+                result.geometryRecoveryClassCount++;
             }
             if (LEGACY_BRIDGE_CLASS.equals(classDef.getType())) result.legacyBridgeClassCount++;
             for (Method method : classDef.getMethods()) {
@@ -532,6 +545,89 @@ final class WazePatchEngine {
             }
         }
         return result;
+    }
+
+    private static boolean isRouteExportPayloadClass(String type) {
+        return underPayloadPrefix(type, "Lcom/bydhud/navexport/WazeRouteExport")
+                || underPayloadPrefix(type, "Lcom/bydhud/navexport/RouteExport")
+                || underPayloadPrefix(type, "Lcom/bydhud/navexport/RouteData")
+                || underPayloadPrefix(type, "Lcom/bydhud/navexport/WazeManeuverRecovery");
+    }
+
+    private static boolean underPayloadPrefix(String type, String prefix) {
+        return type.equals(prefix + ";") || type.startsWith(prefix + "$");
+    }
+
+    private static int routeExportRevision(ClassDef classDef) {
+        int markers = 0;
+        int revision = -1;
+        for (Field field : classDef.getFields()) {
+            if (!"PAYLOAD_REVISION".equals(field.getName())) continue;
+            markers++;
+            if (!"I".equals(field.getType())
+                    || !AccessFlags.STATIC.isSet(field.getAccessFlags())
+                    || !AccessFlags.FINAL.isSet(field.getAccessFlags())
+                    || !(field.getInitialValue() instanceof IntEncodedValue)) return -1;
+            revision = ((IntEncodedValue) field.getInitialValue()).getValue();
+        }
+        return markers == 0 ? 0 : markers == 1 ? revision : -1;
+    }
+
+    static void replaceRouteExportPayload(byte[] inputDex, byte[] payloadDex, File output)
+            throws IOException {
+        DexBackedDexFile input = DexBackedDexFile.fromInputStream(
+                Opcodes.forApi(29), new ByteArrayInputStream(inputDex));
+        DexBackedDexFile payload = DexBackedDexFile.fromInputStream(
+                Opcodes.forApi(29), new ByteArrayInputStream(payloadDex));
+        DexPool pool = new DexPool(Opcodes.forApi(29));
+        java.util.Set<String> classes = new java.util.HashSet<>();
+        boolean foundOldPayload = false;
+        for (ClassDef classDef : input.getClasses()) {
+            if (isRouteExportPayloadClass(classDef.getType())) {
+                if ("Lcom/bydhud/navexport/WazeRouteExport;".equals(classDef.getType())) {
+                    foundOldPayload = true;
+                }
+                continue;
+            }
+            if (!classes.add(classDef.getType())) {
+                throw new IOException("duplicate Waze class while replacing route payload: "
+                        + classDef.getType());
+            }
+            pool.internClass(classDef);
+        }
+        java.util.Set<String> required = new java.util.HashSet<>(java.util.Arrays.asList(
+                "Lcom/bydhud/navexport/WazeRouteExport;",
+                "Lcom/bydhud/navexport/RouteExport;",
+                "Lcom/bydhud/navexport/RouteData;",
+                "Lcom/bydhud/navexport/WazeManeuverRecovery;"));
+        for (ClassDef classDef : payload.getClasses()) {
+            String type = classDef.getType();
+            if (isRouteExportPayloadClass(type) && required.contains(type)) required.remove(type);
+            if (!classes.add(type)) {
+                throw new IOException("duplicate Waze class in replacement route payload: " + type);
+            }
+            pool.internClass(classDef);
+        }
+        if (!foundOldPayload || !required.isEmpty()) {
+            throw new IOException("route payload replacement incomplete: old=" + foundOldPayload
+                    + ", missing=" + required);
+        }
+        File parent = output.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new IOException("cannot create " + parent);
+        }
+        FileDataStore store = new FileDataStore(output);
+        try {
+            pool.writeTo(store);
+        } finally {
+            store.close();
+        }
+        LifecycleInspection verified = WAZE_525.inspectLifecycleImpl(
+                Files.readAllBytes(output.toPath()));
+        if (verified.geometryPayloadCount != 1
+                || verified.geometryPayloadRevision != ROUTE_EXPORT_PAYLOAD_REVISION) {
+            throw new IOException("route payload replacement revision check failed");
+        }
     }
 
     private void patchLifecycleImpl(byte[] inputDex, File outputDex) throws IOException {
@@ -2485,6 +2581,11 @@ final class WazePatchEngine {
         int geometryTargetCount;
         int geometryHookCount;
         int geometryPayloadCount;
+        int geometryPayloadClassCount;
+        int geometryPayloadRevision;
+        int routeExportClassCount;
+        int routeDataClassCount;
+        int geometryRecoveryClassCount;
         boolean geometryInvalid;
         int applicationTargetCount;
         int applicationHookCount;
