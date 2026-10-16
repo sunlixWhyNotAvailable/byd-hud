@@ -342,8 +342,6 @@ private data class Copy(
     val setupDialogDismiss: String,
     val bootRuntime: String,
     val bootRuntimeHint: String,
-    val vehiclePosition: String,
-    val vehiclePositionHint: String,
     val saveScreenshotsLogs: String,
     val saveScreenshotsLogsHint: String,
     val checkForUpdates: String,
@@ -555,7 +553,22 @@ private data class Copy(
     val checkExtendedNotice: String,
     val previous: String,
     val next: String,
-)
+) {
+    // Keep new text outside the constructor: copy$default is near DEX's 255-register limit.
+    val vehiclePosition: String
+        get() = when (language) {
+            Language.Ua -> "Використовувати позицію автомобіля"
+            Language.Ru -> "Использовать положение автомобиля"
+            Language.En -> "Use vehicle position"
+        }
+
+    val vehiclePositionHint: String
+        get() = when (language) {
+            Language.Ua -> "Використовує місцезнаходження та напрямок руху автомобіля для прив’язки стрілки HUD до маршруту.\nПотрібен дозвіл на місцезнаходження."
+            Language.Ru -> "Использует местоположение и направление движения автомобиля для привязки стрелки HUD к маршруту.\nТребуется разрешение на доступ к местоположению."
+            Language.En -> "Uses the vehicle’s location and direction of travel to align the HUD arrow with the route.\nLocation permission is required."
+        }
+}
 
 private data class ShareCopy(
     val shareLogsTitle: String,
@@ -11179,8 +11192,6 @@ private fun enCopy() = Copy(
     setupDialogDismiss = "Got it",
     bootRuntime = "Boot runtime service",
     bootRuntimeHint = "Start HUD automatically after boot, unlock or an app update. Turning this off does not stop the current session.",
-    vehiclePosition = "Use vehicle position",
-    vehiclePositionHint = "Uses the vehicle’s location and direction of travel to align the HUD arrow with the route.\nLocation permission is required.",
     saveScreenshotsLogs = "Save diagnostic screenshots and extended logs",
     saveScreenshotsLogsHint = "Keep Waze frames, processing details, and full log history for diagnostics.",
     checkForUpdates = "Check for updates",
@@ -11424,8 +11435,6 @@ private fun uaCopy() = enCopy().copy(
     setupDialogDismiss = "Зрозуміло",
     bootRuntime = "Авто-запуск",
     bootRuntimeHint = "Автоматично запускати HUD після завантаження системи, розблокування або оновлення застосунку. Вимкнення не зупиняє поточну роботу.",
-    vehiclePosition = "Використовувати позицію автомобіля",
-    vehiclePositionHint = "Використовує місцезнаходження та напрямок руху автомобіля для прив’язки стрілки HUD до маршруту.\nПотрібен дозвіл на місцезнаходження.",
     saveScreenshotsLogs = "Зберігати діагностичні скріншоти та розширені логи",
     saveScreenshotsLogsHint = "Зберігати кадри Waze, деталі обробки та повну історію логів для діагностики.",
     checkForUpdates = "Перевіряти оновлення",
@@ -11676,8 +11685,6 @@ private fun ruCopy() = enCopy().copy(
     setupDialogDismiss = "Понятно",
     bootRuntime = "Автозапуск",
     bootRuntimeHint = "Автоматически запускать HUD после загрузки системы, разблокировки или обновления приложения. Отключение не останавливает текущую работу.",
-    vehiclePosition = "Использовать положение автомобиля",
-    vehiclePositionHint = "Использует местоположение и направление движения автомобиля для привязки стрелки HUD к маршруту.\nТребуется разрешение на доступ к местоположению.",
     saveScreenshotsLogs = "Сохранять диагностические снимки и расширенные логи",
     saveScreenshotsLogsHint = "Хранить кадры Waze, детали обработки и полную историю логов для диагностики.",
     checkForUpdates = "Проверить обновления",
