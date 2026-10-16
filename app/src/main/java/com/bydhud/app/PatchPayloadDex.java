@@ -23,8 +23,14 @@ final class PatchPayloadDex {
     }
 
     static void extract(Context context, String classPrefix, File output) throws IOException {
+        extract(context, classPrefix, output, new String[0]);
+    }
+
+    static void extract(Context context, String classPrefix, File output,
+            String... additionalPrefixes) throws IOException {
         String sourcePath = context.getApplicationInfo().sourceDir;
         List<ClassDef> matches = new ArrayList<>();
+        java.util.Set<String> found = new java.util.HashSet<>();
         try (ZipFile apk = new ZipFile(sourcePath)) {
             java.util.Enumeration<? extends ZipEntry> entries = apk.entries();
             while (entries.hasMoreElements()) {
@@ -37,11 +43,23 @@ final class PatchPayloadDex {
                 DexBackedDexFile dex = DexBackedDexFile.fromInputStream(
                         Opcodes.forApi(29), new ByteArrayInputStream(bytes));
                 for (ClassDef classDef : dex.getClasses()) {
-                    if (classDef.getType().startsWith(classPrefix)) matches.add(classDef);
+                    boolean selected = classDef.getType().startsWith(classPrefix);
+                    if (selected) found.add(classPrefix);
+                    for (String prefix : additionalPrefixes) {
+                        if (classDef.getType().startsWith(prefix)) {
+                            selected = true;
+                            found.add(prefix);
+                        }
+                    }
+                    if (selected) matches.add(classDef);
                 }
             }
         }
         if (matches.isEmpty()) throw new IOException("patch payload missing: " + classPrefix);
+        if (!found.contains(classPrefix)) throw new IOException("patch payload missing: " + classPrefix);
+        for (String prefix : additionalPrefixes) {
+            if (!found.contains(prefix)) throw new IOException("patch payload missing: " + prefix);
+        }
         File parent = output.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
             throw new IOException("cannot create " + parent);

@@ -490,8 +490,18 @@ final class WazePatchEngine {
         LifecycleInspection result = new LifecycleInspection();
         for (ClassDef classDef : file.getClasses()) {
             if (BRIDGE_CLASS.equals(classDef.getType())) result.bridgeClassCount++;
+            if ("Lcom/bydhud/navexport/WazeRouteExport;".equals(classDef.getType())) {
+                result.geometryPayloadCount++;
+            }
             if (LEGACY_BRIDGE_CLASS.equals(classDef.getType())) result.legacyBridgeClassCount++;
             for (Method method : classDef.getMethods()) {
+                ImmutableMethodReference geometry = geometryHook(method);
+                if (geometry != null) {
+                    result.geometryTargetCount++;
+                    int hooks = countCall(method, geometry);
+                    result.geometryHookCount += hooks;
+                    if (method.getImplementation() == null || hooks > 1) result.geometryInvalid = true;
+                }
                 if (matchesApplication(method)) {
                     result.applicationTargetCount++;
                     result.applicationHookCount += countCall(method, BRIDGE_INIT);
@@ -535,6 +545,8 @@ final class WazePatchEngine {
             @Override
             public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
                 return method -> {
+                    ImmutableMethodReference geometry = geometryHook(method);
+                    if (geometry != null) method = injectGeometry(method, geometry);
                     if (matchesApplication(method)) {
                         applicationMatches.incrementAndGet();
                         if (countCall(method, BRIDGE_INIT) == 1
@@ -558,8 +570,7 @@ final class WazePatchEngine {
                         clusterEtaMatches.incrementAndGet();
                         String guard = inspectClusterEtaGuardImpl(method);
                         if ("patched".equals(guard)) {
-                            throw new IllegalStateException(
-                                    "Waze cluster ETA target is already patched");
+                            return method;
                         }
                         if (!"stock".equals(guard)) {
                             throw new IllegalStateException(
@@ -1446,6 +1457,73 @@ final class WazePatchEngine {
                 && "onCreate".equals(method.getName())
                 && method.getParameterTypes().isEmpty()
                 && "V".equals(method.getReturnType());
+    }
+
+    private ImmutableMethodReference geometryHook(Method method) {
+        if (!modern || !"V".equals(method.getReturnType())) return null;
+        if (matchesApplication(method)) {
+            return new ImmutableMethodReference("Lcom/bydhud/navexport/WazeRouteExport;",
+                    "init", Collections.singletonList("Landroid/content/Context;"), "V");
+        }
+        if (!"Lcom/waze/navigate/NavigationInfoNativeManager;".equals(method.getDefiningClass())) return null;
+        String name;
+        List<String> source;
+        List<String> target;
+        switch (method.getName()) {
+            case "onNavigationRouteChanged":
+                name = "route";
+                source = Collections.singletonList("Lcom/waze/jni/protos/navigate/NavigationRoute;");
+                target = java.util.Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;");
+                break;
+            case "onRouteGeometryUpdated":
+                name = "geometry";
+                source = Collections.singletonList("Lcom/waze/jni/protos/navigate/PolylineGeometry;");
+                target = java.util.Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;");
+                break;
+            case "onNavigationStateChanged":
+                name = "navigating";
+                source = java.util.Arrays.asList("Z", "I");
+                target = java.util.Arrays.asList("Ljava/lang/Object;", "Z", "I");
+                break;
+            case "onStreetNameChanged":
+                name = "currentStreet";
+                source = Collections.singletonList("Lcom/waze/jni/protos/navigate/CurrentStreetNameUpdate;");
+                target = Collections.singletonList("Ljava/lang/Object;");
+                break;
+            case "onNextNameChanged":
+                name = "nextStreet";
+                source = Collections.singletonList("Lcom/waze/jni/protos/navigate/NextStreetNameUpdate;");
+                target = Collections.singletonList("Ljava/lang/Object;");
+                break;
+            case "onCurrentInstructionChanged":
+                name = "currentInstruction";
+                source = target = Collections.singletonList("I");
+                break;
+            case "onNextInstructionChanged":
+                name = "nextInstruction";
+                source = target = Collections.singletonList("I");
+                break;
+            default: return null;
+        }
+        if (source.size() != method.getParameterTypes().size()) return null;
+        for (int i = 0; i < source.size(); i++) {
+            if (!source.get(i).contentEquals(method.getParameterTypes().get(i))) return null;
+        }
+        return new ImmutableMethodReference("Lcom/bydhud/navexport/WazeRouteExport;", name, target, "V");
+    }
+
+    private Method injectGeometry(Method method, ImmutableMethodReference hook) {
+        int calls = countCall(method, hook);
+        if (calls == 1) return method;
+        if (calls != 0 || method.getImplementation() == null
+                || AccessFlags.STATIC.isSet(method.getAccessFlags())) {
+            throw new IllegalStateException("Unsupported Waze geometry hook: " + method.getName());
+        }
+        MutableMethodImplementation code = new MutableMethodImplementation(method.getImplementation());
+        int count = hook.getParameterTypes().size();
+        int first = code.getRegisterCount() - count;
+        code.addInstruction(0, new BuilderInstruction3rc(Opcode.INVOKE_STATIC_RANGE, first, count, hook));
+        return immutable(method, code);
     }
 
     private boolean matchesRoute(Method method) {
@@ -2404,6 +2482,10 @@ final class WazePatchEngine {
     }
 
     static final class LifecycleInspection {
+        int geometryTargetCount;
+        int geometryHookCount;
+        int geometryPayloadCount;
+        boolean geometryInvalid;
         int applicationTargetCount;
         int applicationHookCount;
         int legacyApplicationHookCount;

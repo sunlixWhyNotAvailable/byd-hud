@@ -34,7 +34,7 @@ import java.util.concurrent.Future;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-/** Durable patch transaction reports, separate from disposable patch staging and navigation logs. */
+/** Durable private reports with sanitized copies alongside the operation day's navigation logs. */
 final class NavigatorPatchReportStore {
     private static final Object PROCESS_LOCK = new Object();
     private static final Object WRITE_ORDER_LOCK = new Object();
@@ -105,6 +105,7 @@ final class NavigatorPatchReportStore {
                     if (!operationId.equals(existing.optString("operationId"))) {
                         throw new IOException("navigator patch report identity mismatch");
                     }
+                    mirrorDaily(context, existing);
                     return null;
                 }
                 long time = startedAt > 0L ? startedAt : System.currentTimeMillis();
@@ -127,6 +128,7 @@ final class NavigatorPatchReportStore {
                 }
                 write(file, report);
                 updateCache(report);
+                mirrorDaily(context, report);
                 return null;
             });
         }
@@ -410,8 +412,77 @@ final class NavigatorPatchReportStore {
             }
             write(file, report);
             updateCache(report);
+            mirrorDaily(context, report);
             return null;
         });
+    }
+
+    private static void mirrorDaily(Context context, JSONObject report) {
+        try {
+            JSONObject safe = VehicleConfigurationZip.sanitizeJsonForExport(
+                    context, addSnapshotStatus(copy(report)), ZIP_ENTRY);
+            String day = reportDay(safe);
+            NavigationLogStorage.withReadLock(() -> {
+                File logs = NavigationLogStorage.logsDir(context, day);
+                try {
+                    writeDailyReport(logs, safe);
+                } catch (IOException error) {
+                    dailyMirrorFailed(context, error);
+                }
+            });
+        } catch (IOException | RuntimeException error) {
+            dailyMirrorFailed(context, error);
+        }
+    }
+
+    private static void dailyMirrorFailed(Context context, Exception error) {
+        AppEventLogger.event(context, "navigator_patch daily_report_failed error="
+                + clean(error.getMessage(), 300));
+    }
+
+    static String reportDay(JSONObject report) throws IOException {
+        String day = report.optString("day");
+        if (!day.matches("\\d{8}")) throw new IOException("invalid navigator patch report day");
+        return day;
+    }
+
+    private static File dailyReportFile(File logs, JSONObject report) throws IOException {
+        File directory = new File(logs, DIRECTORY);
+        String prefix = "SHELL".equals(report.optString("kind")) ? "shell-" : "app-";
+        return new File(directory, prefix + reportFile(directory, report.optString("operationId")).getName() + "l");
+    }
+
+    /** Preserve complete records for export; discard only an interrupted trailing append. */
+    static File writeDailyReport(File logs, JSONObject report) throws IOException {
+        reportDay(report);
+        File file = dailyReportFile(logs, report);
+        File directory = file.getParentFile();
+        if (!directory.isDirectory() && !directory.mkdirs())
+            throw new IOException("cannot create daily navigator patch report directory");
+        byte[] bytes = (report.toString() + "\n").getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAX_REPORT_BYTES) throw new IOException("daily navigator patch report exceeds size limit");
+        try (RandomAccessFile output = new RandomAccessFile(file, "rw")) {
+            long complete = output.length();
+            byte[] tail = new byte[8192];
+            boolean found = false;
+            while (complete > 0 && !found) {
+                int count = (int) Math.min(complete, tail.length);
+                complete -= count;
+                output.seek(complete);
+                output.readFully(tail, 0, count);
+                for (int i = count - 1; i >= 0; i--) {
+                    if (tail[i] != '\n') continue;
+                    complete += i + 1;
+                    found = true;
+                    break;
+                }
+            }
+            output.setLength(complete);
+            output.seek(complete);
+            output.write(bytes);
+            output.getFD().sync();
+        }
+        return file;
     }
 
     private static void drainPendingLocked() throws IOException {

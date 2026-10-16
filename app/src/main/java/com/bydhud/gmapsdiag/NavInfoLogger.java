@@ -156,6 +156,7 @@ public final class NavInfoLogger {
             return;
         }
         applicationContext = context.getApplicationContext();
+        com.bydhud.navexport.GoogleRouteExport.init(applicationContext);
         Messenger diagnosticClient = null;
         String diagnosticChannel = "";
         try {
@@ -427,6 +428,11 @@ public final class NavInfoLogger {
     public static void captureSpeedLimitStateV26(Object aggregateState) {
         if (aggregateState == null) return;
         RouteSnapshot snapshot = routeSnapshot();
+        synchronized (STATE_LOCK) {
+            if (routeActive && snapshot.epoch == STATE_EPOCH.get()) {
+                com.bydhud.navexport.GoogleRouteExport.capture(aggregateState);
+            }
+        }
         synchronized (SPEED_LOCK) {
             if (!snapshot.active || snapshot.epoch != STATE_EPOCH.get()) return;
             try {
@@ -998,6 +1004,7 @@ public final class NavInfoLogger {
     }
 
     private static void resetTransientState() {
+        com.bydhud.navexport.GoogleRouteExport.clear();
         STATE_EPOCH.incrementAndGet();
         LATEST_FRAME.set(null);
         LAST_FRAME_FOR_REPLAY.set(null);

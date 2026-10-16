@@ -83,10 +83,12 @@ final class NavigatorPatchWorkerClient {
         boolean operationOwned = operation.equals(operationState.operationToken);
         boolean standaloneInspection = command == MSG_SCAN
                 && !operationOwned;
+        long startedAt = operationOwned ? operationState.startedAt : System.currentTimeMillis();
+        input.put("startedAt", startedAt);
         NavigatorPatchReportStore.begin(context, operation, profile.id,
                 command == MSG_PREPARE
                         ? NavigatorPatchStore.OP_PATCH : "INSPECT",
-                operationOwned ? operationState.startedAt : System.currentTimeMillis(),
+                startedAt,
                 new org.json.JSONObject());
         File job = null;
         boolean reportFinished = false;
@@ -196,7 +198,8 @@ final class NavigatorPatchWorkerClient {
         String profile = input.getString("profile");
         String operation = input.getString("operation");
         File source = input.optString("source").isEmpty() ? null : new File(input.getString("source"));
-        NavigatorPatchReportStore.begin(context, operation, profile, "SHELL", System.currentTimeMillis(), new org.json.JSONObject());
+        NavigatorPatchReportStore.begin(context, operation, profile, "SHELL",
+                input.optLong("startedAt", System.currentTimeMillis()), new org.json.JSONObject());
         Bundle payload;
         if (input.getInt("command") == MSG_PREPARE) {
             NavigatorPatchPipeline.WorkerPatchResult result = NavigatorPatchPipeline.workerPrepare(context, profile,
@@ -212,6 +215,8 @@ final class NavigatorPatchWorkerClient {
                     ? NavigatorPatchPipeline.workerInspectDirectory(context, profile, source)
                     : NavigatorPatchPipeline.workerScan(context, profile, source, new File(input.getString("output")));
             payload = NavigatorPatchPipeline.workerBundle(result);
+            NavigatorPatchPipeline.reportScan(context, operation, "CHECK_COMPLETE", result);
+            NavigatorPatchReportStore.finish(context, operation, "SUCCESS", "Navigator inspection completed");
         }
         return new org.json.JSONObject().put("payload", ShellWorkFiles.json(payload))
                 .put("report", NavigatorPatchReportStore.exportSnapshot(context));

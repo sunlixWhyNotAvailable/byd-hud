@@ -82,6 +82,9 @@ public final class NavigatorMapPatcher {
     private static final String BACKGROUND_TARGET = "Lcom/bydhud/mapcapture/BackgroundCapture$Target;";
     private static final String BACKGROUND_D8_ACCESS = "Lcom/bydhud/mapcapture/BackgroundCapture-IA;";
     private static final String SCHEDULER_D8_ACCESS = "Lcom/bydhud/mapcapture/WazeRenderScheduler-IA;";
+    private static final String JOURNAL_D8_ACCESS = "Lcom/bydhud/mapcapture/LifecycleJournalSpool-IA;";
+    private static final String SURFACE_D8_ACCESS = "Lcom/bydhud/mapcapture/WazeSurfaceCopy-IA;";
+    private static final String PUBLISHED_WAZE525 = "map-probe-r11-render-demand-hud-consumer-v1-waze525-surface-copy";
     private static final int MAX_DEX_BYTES = 64 * 1024 * 1024;
     private static final int MAX_METHOD_IDS = 65536;
     private static final Set<String> PAYLOAD_ROOTS = Collections.unmodifiableSet(
@@ -104,9 +107,13 @@ public final class NavigatorMapPatcher {
         public final String revision;
 
         private Inspection(String state, String reason) {
+            this(state, reason, "");
+        }
+
+        private Inspection(String state, String reason, String revision) {
             this.state = state;
             this.reason = reason;
-            this.revision = REVISION;
+            this.revision = revision;
         }
     }
 
@@ -405,9 +412,13 @@ public final class NavigatorMapPatcher {
 
         try {
             verifyCaptured(analysis, family);
-            return currentPayload(analysis.payload, family) && (!"waze".equals(family) || analysis.scheduled)
-                    ? result(PATCHED, "complete " + family + " map-capture payload and hooks verified")
-                    : result(PATCHABLE, "verified legacy capture; producer upgrade available");
+            boolean supported = supportedCapturePayload(analysis.payload, family)
+                    && (!"waze".equals(family) || analysis.scheduled);
+            String revision = analysis.payload.bridgeStrings.contains(REVISION) ? REVISION
+                    : publishedWaze525Payload(analysis.payload, family) ? PUBLISHED_WAZE525 : "";
+            return new Inspection(supported ? PATCHED : PATCHABLE,
+                    supported ? "complete " + family + " map-capture payload and hooks verified"
+                            : "verified legacy capture; producer upgrade available", revision);
         } catch (UnsupportedPatchException error) {
             return result(UNSUPPORTED, message(error));
         }
@@ -418,6 +429,16 @@ public final class NavigatorMapPatcher {
                 && payload.bridgeStrings.contains("bydhud-map-v2:source-mode,output-edge,frame-timeout,lease")
                 && (!"waze".equals(family) || payload.bridgeStrings.contains("map-probe-r11-render-demand-hud-consumer-v1"))
                 && (!modernWaze || payload.bridgeStrings.contains("bydhud-waze525-embedded-v1"));
+    }
+
+    private boolean publishedWaze525Payload(PayloadInfo payload, String family) {
+        return modernWaze && "waze".equals(family) && payload != null
+                && payload.bridgeStrings.contains(PUBLISHED_WAZE525)
+                && payload.bridgeStrings.contains("bydhud-map-v2:source-mode,output-edge,frame-timeout,lease");
+    }
+
+    private boolean supportedCapturePayload(PayloadInfo payload, String family) {
+        return currentPayload(payload, family) || publishedWaze525Payload(payload, family);
     }
 
     private Analysis analyze(List<File> apks, String family) throws IOException {
@@ -565,7 +586,7 @@ public final class NavigatorMapPatcher {
                         if (WazeRenderPatch.extension(ref)) requireStaticImplemented(analysis.payload, key(ref));
                     }
             }
-            if (currentPayload(analysis.payload, family) && !analysis.scheduled)
+            if (supportedCapturePayload(analysis.payload, family) && !analysis.scheduled)
                 throw new UnsupportedPatchException("scheduling payload lacks its complete hook set");
         }
         for (DexUnit unit : analysis.dexUnits) {
@@ -999,7 +1020,7 @@ public final class NavigatorMapPatcher {
     private void verifyPayload(PayloadInfo payload, String family)
             throws UnsupportedPatchException {
         Set<String> requiredClasses = new HashSet<>(REQUIRED_PAYLOAD_CLASSES);
-        if (modernWaze && currentPayload(payload, family)) {
+        if (modernWaze && supportedCapturePayload(payload, family)) {
             requiredClasses.add(PAYLOAD_PREFIX + "WazeSurfaceCopy;");
         }
         if ("waze".equals(family)) {
@@ -1015,7 +1036,8 @@ public final class NavigatorMapPatcher {
                     + " instructions=" + payload.instructionCount + " missing=" + missing);
         }
         for (String type : payload.classes) {
-            if (BACKGROUND_D8_ACCESS.equals(type) || SCHEDULER_D8_ACCESS.equals(type)) continue;
+            if (BACKGROUND_D8_ACCESS.equals(type) || SCHEDULER_D8_ACCESS.equals(type)
+                    || JOURNAL_D8_ACCESS.equals(type) || SURFACE_D8_ACCESS.equals(type)) continue;
             String name = type.substring(PAYLOAD_PREFIX.length(), type.length() - 1);
             int nested = name.indexOf('$');
             String root = nested < 0 ? name : name.substring(0, nested);
@@ -1057,7 +1079,8 @@ public final class NavigatorMapPatcher {
         for (String reference : expectedHookRefs(family).keySet()) {
             requireStaticImplemented(payload, reference);
         }
-        if ("waze".equals(family) && currentPayload(payload, family)) {
+        if (modernWaze && supportedCapturePayload(payload, family)) verifyWazeSurfaceCapture(payload);
+        if ("waze".equals(family) && supportedCapturePayload(payload, family)) {
             for (String type : Arrays.asList("WazeRenderScheduler", "WazeRenderPolicy"))
                 if (!payload.classes.contains(PAYLOAD_PREFIX + type + ";"))
                     throw new UnsupportedPatchException("scheduling payload missing " + type);
@@ -1069,6 +1092,31 @@ public final class NavigatorMapPatcher {
             requireStaticImplemented(payload, methodKey(BACKGROUND, "wazeHostDestroyed",
                     Collections.singletonList("Ljava/lang/Object;"), "Z"));
         }
+    }
+
+    private static void verifyWazeSurfaceCapture(PayloadInfo payload) throws UnsupportedPatchException {
+        requireStaticImplemented(payload, methodKey(BACKGROUND, "captureWaze",
+                Collections.singletonList("Landroid/os/Bundle;"), "V"));
+        requireStaticImplemented(payload, methodKey(BRIDGE, "wazeSurfaceFrame", Arrays.asList(
+                "Landroid/os/Bundle;", "Ljava/lang/Object;", "Landroid/view/Surface;", "I", "I",
+                "Ljava/util/function/BooleanSupplier;"), "V"));
+        String copy = surfaceCopyMethod();
+        requireStaticImplemented(payload, copy);
+        String pixelCopy = "Landroid/view/PixelCopy;->request(Landroid/view/Surface;Landroid/graphics/Bitmap;"
+                + "Landroid/view/PixelCopy$OnPixelCopyFinishedListener;Landroid/os/Handler;)V";
+        for (Instruction op : payload.methods.get(copy).getImplementation().getInstructions()) {
+            if (op instanceof ReferenceInstruction) {
+                Object ref = ((ReferenceInstruction) op).getReference();
+                if (ref instanceof MethodReference && pixelCopy.equals(key((MethodReference) ref))) return;
+            }
+        }
+        throw new UnsupportedPatchException("Waze Surface capture lacks PixelCopy dispatch");
+    }
+
+    private static String surfaceCopyMethod() {
+        return methodKey(PAYLOAD_PREFIX + "WazeSurfaceCopy;", "copy", Arrays.asList(
+                "Landroid/view/Surface;", "I", "I", "J", "Landroid/os/Handler;",
+                "Ljava/util/function/BooleanSupplier;", PAYLOAD_PREFIX + "WazeSurfaceCopy$Result;"), "V");
     }
 
     private static void requireStaticImplemented(PayloadInfo payload, String key)
@@ -1153,12 +1201,15 @@ public final class NavigatorMapPatcher {
             }
             for (Field field : classDef.getFields()) recordUnshippedType(result, field.getType());
         }
+        result.unshippedReferences.removeAll(result.classes);
         return result;
     }
 
     private static void recordUnshippedType(PayloadInfo payload, String type) {
         if (type == null) return;
-        if (type.startsWith("Lcom/bydhud/app/")
+        if (BACKGROUND_D8_ACCESS.equals(type) || SCHEDULER_D8_ACCESS.equals(type)
+                || JOURNAL_D8_ACCESS.equals(type) || SURFACE_D8_ACCESS.equals(type)
+                || type.startsWith("Lcom/bydhud/app/")
                 || type.startsWith("Lcom/bydhud/mapcaptureprobe/")
                 || (!type.startsWith(PAYLOAD_PREFIX)
                 && (type.contains("$$ExternalSyntheticBackport")
@@ -1177,6 +1228,17 @@ public final class NavigatorMapPatcher {
                 "Lcom/bydhud/mapcapture/WazeRenderScheduler$State;", Collections.singleton(
                         methodKey(WazeRenderPatch.OWNER, "attach",
                                 Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;"), "V")));
+        verifyKnownD8Companion(payload, JOURNAL_D8_ACCESS,
+                PAYLOAD_PREFIX + "LifecycleJournalSpool$RestoreState;", Collections.singleton(
+                        methodKey(PAYLOAD_PREFIX + "LifecycleJournalSpool;", "restore",
+                                Collections.singletonList("Ljava/lang/String;"), "V")));
+        verifyKnownD8Companion(payload, JOURNAL_D8_ACCESS,
+                PAYLOAD_PREFIX + "LifecycleJournalSpool$Recovery;", Collections.singleton(
+                        methodKey(PAYLOAD_PREFIX + "LifecycleJournalSpool;", "scanAndRepairTail",
+                                Collections.singletonList(PAYLOAD_PREFIX + "LifecycleJournalSpool$RecordConsumer;"),
+                                PAYLOAD_PREFIX + "LifecycleJournalSpool$Recovery;")));
+        verifyKnownD8Companion(payload, SURFACE_D8_ACCESS,
+                PAYLOAD_PREFIX + "WazeSurfaceCopy$Pending;", Collections.singleton(surfaceCopyMethod()));
     }
 
     private static void verifyKnownD8Companion(PayloadInfo payload, String marker,

@@ -861,6 +861,9 @@ public final class GmapsDiagnosticPatcher {
 
     private static void inspectClass(Inspection inspection, Profile profile,
             String dexEntry, ClassDef classDef) {
+        if ("Lcom/bydhud/navexport/GoogleRouteExport;".equals(classDef.getType())) {
+            inspection.geometryPayloadCount++;
+        }
         if (LOGGER_CLASS.equals(classDef.getType())) {
             inspection.loggerClassCount++;
             inspection.loggerDexEntry = dexEntry;
@@ -1583,6 +1586,13 @@ public final class GmapsDiagnosticPatcher {
                     if (targetHook.matches(method)) {
                         targetCount.incrementAndGet();
                         MethodImplementation source = method.getImplementation();
+                        if (source != null && !targetHook.mandatory
+                                && countLoggerCalls(source, targetHook) == 0
+                                && countLegacyLoggerCalls(source, targetHook) == 0) {
+                            // Current 26.30 bridges already use the model hook, not this optional view hook.
+                            rewrittenCount.incrementAndGet();
+                            return method;
+                        }
                         if (source == null
                                 || countLoggerCalls(source, targetHook)
                                 + countLegacyLoggerCalls(source, targetHook) != 1) {
@@ -1661,7 +1671,8 @@ public final class GmapsDiagnosticPatcher {
 
     private static boolean isLoggerClassFamily(String type) {
         return LOGGER_CLASS.equals(type)
-                || type.startsWith("Lcom/bydhud/gmapsdiag/NavInfoLogger$");
+                || type.startsWith("Lcom/bydhud/gmapsdiag/NavInfoLogger$")
+                || type.startsWith("Lcom/bydhud/navexport/");
     }
 
     private static Method inject(Method method, Hook hook) {
@@ -2342,6 +2353,7 @@ public final class GmapsDiagnosticPatcher {
         boolean loggerHeartbeat;
         boolean loggerBitmapGeneration;
         boolean loggerRouteGeneration;
+        int geometryPayloadCount;
         int gateTargetCount;
         int stockGateCount;
         int gateBypassCount;
@@ -2462,7 +2474,8 @@ public final class GmapsDiagnosticPatcher {
             if (stock) return "PATCHABLE_STOCK";
             if (bridge) {
                 boolean currentLogger = loggerStateReplay && loggerHeartbeat
-                        && loggerBitmapGeneration && loggerRouteGeneration;
+                        && loggerBitmapGeneration && loggerRouteGeneration
+                        && (!"26.30".equals(profile.id) || geometryPayloadCount == 1);
                 if (legacyManeuverHook || !currentLogger) {
                     return "MESSENGER_BRIDGE_UPGRADEABLE";
                 }

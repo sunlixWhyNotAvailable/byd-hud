@@ -1339,7 +1339,9 @@ final class NavigatorPatchPipeline {
             File loggerDex = new File(transaction, "gmaps-bridge.dex");
             File report = new File(transaction, "gmaps-direct-report.json");
             PatchPayloadDex.extract(
-                    context, "Lcom/bydhud/gmapsdiag/NavInfoLogger", loggerDex);
+                    context, "Lcom/bydhud/gmapsdiag/NavInfoLogger", loggerDex,
+                    "Lcom/bydhud/navexport/GoogleRouteExport",
+                    "Lcom/bydhud/navexport/RouteExport", "Lcom/bydhud/navexport/RouteData");
             reportStage(context, "DIRECT", "IN_PROGRESS", "");
             GmapsDiagnosticPatcher.patchDirect(directMember, rewritten, loggerDex, report);
             replaceFile(rewritten, directMember);
@@ -1522,10 +1524,15 @@ final class NavigatorPatchPipeline {
             }
             File lifecycleApk = new File(transaction, "waze-lifecycle-unsigned.apk");
             repack(target, lifecycleApk, replacements, Collections.emptyMap());
-            if (addV2Bridge) {
+            if (addV2Bridge || (lifecycleOwner.requiresGeometry && lifecycleOwner.geometryPayloadCount == 0)) {
                 File bridgeDex = new File(transaction, "waze-route-v2.dex");
                 PatchPayloadDex.extract(
-                        context, "Lcom/waze/bydhud/RouteStateBridgeV2", bridgeDex);
+                        context, addV2Bridge ? "Lcom/waze/bydhud/RouteStateBridgeV2"
+                                : "Lcom/bydhud/navexport/WazeRouteExport", bridgeDex,
+                        lifecycleOwner.requiresGeometry ? new String[] {
+                                "Lcom/bydhud/navexport/WazeRouteExport",
+                                "Lcom/bydhud/navexport/RouteExport",
+                                "Lcom/bydhud/navexport/RouteData"} : new String[0]);
                 File optionalApk = new File(transaction, "waze-optional-unsigned.apk");
                 Map<String, File> additions = new HashMap<>();
                 List<String> dexEntries = dexEntries(lifecycleApk);
@@ -1645,6 +1652,7 @@ final class NavigatorPatchPipeline {
 
     private static WazeApkInspection inspectWaze(File apk, String version) throws IOException {
         WazeApkInspection result = new WazeApkInspection();
+        result.requiresGeometry = "5.25.0.1".equals(version);
         result.fileName = apk.getName();
         try (ZipFile zip = new ZipFile(apk)) {
             java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
@@ -1672,6 +1680,10 @@ final class NavigatorPatchPipeline {
                     result.laneReason = lane.reason;
                 }
                 WazePatchEngine.LifecycleInspection lifecycle = composite.lifecycle;
+                result.geometryTargetCount += lifecycle.geometryTargetCount;
+                result.geometryHookCount += lifecycle.geometryHookCount;
+                result.geometryPayloadCount += lifecycle.geometryPayloadCount;
+                result.geometryInvalid |= lifecycle.geometryInvalid;
                 result.applicationTargetCount += lifecycle.applicationTargetCount;
                 result.applicationHookCount += lifecycle.applicationHookCount;
                 result.legacyApplicationHookCount += lifecycle.legacyApplicationHookCount;
@@ -1689,7 +1701,8 @@ final class NavigatorPatchPipeline {
                 if (lifecycle.applicationTargetCount > 0
                         || lifecycle.routeTargetCount > 0
                         || lifecycle.speedTargetCount > 0
-                        || lifecycle.clusterEtaTargetCount > 0) {
+                        || lifecycle.clusterEtaTargetCount > 0
+                        || lifecycle.geometryTargetCount > 0) {
                     result.lifecycleDexEntries.add(entry.getName());
                 }
                 if (lifecycle.applicationTargetCount > 0) {
@@ -1962,6 +1975,11 @@ final class NavigatorPatchPipeline {
     }
 
     private static final class WazeApkInspection {
+        boolean requiresGeometry;
+        int geometryTargetCount;
+        int geometryHookCount;
+        int geometryPayloadCount;
+        boolean geometryInvalid;
         String fileName = "";
         final List<String> dexEntries = new ArrayList<>();
         final List<String> lifecycleDexEntries = new ArrayList<>();
@@ -2082,11 +2100,23 @@ final class NavigatorPatchPipeline {
         boolean lifecyclePatchable() {
             boolean coreCompatible = lifecycleCoreStock() || lifecycleCoreV2Patched();
             boolean etaCompatible = clusterEtaStock() || clusterEtaPatched();
-            return coreCompatible && etaCompatible && !lifecyclePatched();
+            return coreCompatible && etaCompatible && (!requiresGeometry
+                    || geometryStock() || geometryPatched()) && !lifecyclePatched();
         }
 
         boolean lifecyclePatched() {
-            return lifecycleCoreV2Patched() && clusterEtaPatched();
+            return lifecycleCoreV2Patched() && clusterEtaPatched()
+                    && (!requiresGeometry || geometryPatched());
+        }
+
+        boolean geometryStock() {
+            return !geometryInvalid && geometryTargetCount == 8
+                    && geometryHookCount == 0 && geometryPayloadCount == 0;
+        }
+
+        boolean geometryPatched() {
+            return !geometryInvalid && geometryTargetCount == 8
+                    && geometryHookCount == 8 && geometryPayloadCount == 1;
         }
 
         boolean alertStock() {

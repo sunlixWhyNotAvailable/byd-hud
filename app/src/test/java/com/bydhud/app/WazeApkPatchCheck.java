@@ -26,9 +26,17 @@ public final class WazeApkPatchCheck {
             var repeated = NavigatorMapPatcher.inspect(Collections.singletonList(
                     Path.of(args[3], sources.get(0).getName()).toFile()), "waze", version);
             require(NavigatorMapPatcher.PATCHED.equals(repeated.state), repeated.reason);
+            if (NavigatorMapPatcher.PATCHED.equals(before.state)) {
+                require(Arrays.equals(Files.readAllBytes(sources.get(0).toPath()),
+                        Files.readAllBytes(Path.of(args[3], sources.get(0).getName()))),
+                        "supported capture APK was rewritten");
+            }
             require(NavigatorMapPatcher.UNSUPPORTED.equals(
                     NavigatorMapPatcher.inspect(sources, "waze", "5.26.0.1").state),
                     "unknown version accepted");
+            if (NavigatorMapPatcher.PATCHABLE.equals(before.state)) {
+                verifyMissingCompanions(sources, Path.of(args[2]), Path.of(args[3]), version);
+            }
             System.out.println("Map patch and reopen verified: " + version);
             return;
         }
@@ -98,5 +106,35 @@ public final class WazeApkPatchCheck {
                 "Incomplete Direct set: "+Arrays.asList(hosts,lanes,alerts,once,app,route,speed,eta));
         require(bridge==(verify ? 1 : 0), "Direct payload class count="+bridge);
         System.out.println("Direct: host, lifecycle, speed, ETA, lanes, alerts and deduplication verified.");
+    }
+
+    private static void verifyMissingCompanions(List<java.io.File> sources, Path capture,
+            Path output, String version) throws Exception {
+        var opcodes = org.jf.dexlib2.Opcodes.forApi(35);
+        var dex = new org.jf.dexlib2.dexbacked.DexBackedDexFile(opcodes, Files.readAllBytes(capture));
+        for (String name : Arrays.asList("LifecycleJournalSpool-IA", "WazeSurfaceCopy-IA")) {
+            String missing = "Lcom/bydhud/mapcapture/" + name + ";";
+            List<org.jf.dexlib2.iface.ClassDef> retained = new ArrayList<>();
+            for (var definition : dex.getClasses()) {
+                if (!missing.equals(definition.getType())) retained.add(definition);
+            }
+            if (retained.size() == dex.getClasses().size()) continue;
+            Path incomplete = output.resolve("missing-" + name + ".dex");
+            var pool = new org.jf.dexlib2.writer.pool.DexPool(opcodes);
+            for (var definition : retained) pool.internClass(definition);
+            var data = new org.jf.dexlib2.writer.io.FileDataStore(incomplete.toFile());
+            try {
+                pool.writeTo(data);
+            } finally {
+                data.close();
+            }
+            Path rejectedOutput = output.resolve("rejected-" + name);
+            var rejected = NavigatorMapPatcher.patch(sources, rejectedOutput.toFile(),
+                    incomplete.toFile(), "waze", version);
+            require(NavigatorMapPatcher.UNSUPPORTED.equals(rejected.state)
+                    && rejected.reason.contains(missing), "missing companion accepted: " + rejected.reason);
+            require(!Files.exists(rejectedOutput), "incomplete capture produced patch output");
+            System.out.println("Missing real-payload companion rejected: " + name);
+        }
     }
 }
