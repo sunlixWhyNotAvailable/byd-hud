@@ -7829,9 +7829,9 @@ private fun HudCheckTab(
                             "Таблица кодов манёвров"
                         ),
                         language.choose(
-                            "Вибір доступний для форматів A та B",
-                            "Selection is available for formats A and B",
-                            "Выбор доступен для форматов A и B"
+                            "Таблиця кодів зберігається при зміні формату",
+                            "The code table is preserved when changing format",
+                            "Таблица кодов сохраняется при смене формата"
                         ),
                         palette,
                         verticalPadding = 6.dp,
@@ -7847,8 +7847,7 @@ private fun HudCheckTab(
                             onRight = { runAction { activity.composeHudCheckSelectCodeTable(HudCheckState.CodeTable.AMAP) } },
                             third = "Huawei",
                             thirdActive = state.effectiveCodeTable() == HudCheckState.CodeTable.HUAWEI,
-                            onThird = { runAction { activity.composeHudCheckSelectCodeTable(HudCheckState.CodeTable.HUAWEI) } },
-                            enabled = state.allowsCodeTable()
+                            onThird = { runAction { activity.composeHudCheckSelectCodeTable(HudCheckState.CodeTable.HUAWEI) } }
                         )
                     }
                     Divider(palette)

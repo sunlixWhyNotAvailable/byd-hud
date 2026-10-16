@@ -163,18 +163,14 @@ public final class HudCheckState {
 
     public HudCheckState selectCodeTable(CodeTable value) {
         CodeTable selected = value == null ? CodeTable.BYD : value;
-        if (mode != Mode.BASIC || !allowsCodeTable() || codeTable == selected) return this;
+        if (mode != Mode.BASIC || codeTable == selected) return this;
         return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
                 laneBitmap, transliterate, extendedIndex, format, selected);
     }
 
     public CodeTable effectiveCodeTable() {
-        return allowsCodeTable() ? codeTable : CodeTable.BYD;
-    }
-
-    public boolean allowsCodeTable() {
-        return format == Format.A || format == Format.B;
+        return codeTable;
     }
 
     public boolean effectiveManeuverBitmap() {

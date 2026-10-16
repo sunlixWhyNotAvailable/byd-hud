@@ -205,6 +205,7 @@ public class NativeRoadInfoTest {
         HudCheckState original = new HudCheckState().step(HudCheckState.Field.MANEUVER, 8)
                 .withManeuverBitmap(true).withLaneBitmap(true);
         assertEquals(HudCheckState.Format.NO_PNG, original.format);
+        assertEquals(HudCheckState.CodeTable.BYD, original.effectiveCodeTable());
         HudCheckState selected = original.selectBasicFormat(HudCheckState.Format.B)
                 .selectCodeTable(HudCheckState.CodeTable.HUAWEI);
         assertFalse(selected.effectiveManeuverBitmap());
@@ -224,14 +225,23 @@ public class NativeRoadInfoTest {
         assertSame(running, running.withManeuverBitmap(true));
         assertSame(running, running.withLaneBitmap(true));
         assertEquals(selected, running.stop());
-        HudCheckState fixed = selected.selectBasicFormat(HudCheckState.Format.D);
-        assertEquals(HudCheckState.CodeTable.BYD, fixed.effectiveCodeTable());
-        assertEquals(selected, fixed.selectBasicFormat(HudCheckState.Format.B));
-        HudCheckState restoredImages = fixed.selectBasicFormat(HudCheckState.Format.NO_PNG);
+        HudCheckState denza = selected.selectBasicFormat(HudCheckState.Format.D);
+        assertEquals(HudCheckState.CodeTable.HUAWEI, denza.effectiveCodeTable());
+        assertEquals(selected, denza.selectBasicFormat(HudCheckState.Format.B));
+        HudCheckState restoredImages = denza.selectBasicFormat(HudCheckState.Format.NO_PNG);
         assertTrue(restoredImages.effectiveManeuverBitmap());
         assertTrue(restoredImages.effectiveLaneBitmap());
         for (HudCheckState.Format format : HudCheckState.Format.values()) {
             HudCheckState basic = selected.selectBasicFormat(format);
+            assertEquals(HudCheckState.CodeTable.HUAWEI, basic.effectiveCodeTable());
+            assertEquals(HudCheckState.CodeTable.BYD, original.selectBasicFormat(format).effectiveCodeTable());
+            for (HudCheckState.CodeTable table : HudCheckState.CodeTable.values()) {
+                HudCheckState changed = basic.selectCodeTable(table);
+                assertEquals(table, changed.effectiveCodeTable());
+                assertEquals(changed.toggleRun(), basic.toggleRun().selectCodeTable(table));
+                assertEquals(changed, HudCheckState.restore(changed.checkpoint()));
+                assertEquals(changed, changed.selectBasicFormat(HudCheckState.Format.A).selectBasicFormat(format));
+            }
             HudCheckState extended = basic.selectMode(HudCheckState.Mode.EXTENDED);
             assertEquals(basic, extended.selectMode(HudCheckState.Mode.BASIC));
             assertSame(extended, extended.selectBasicFormat(HudCheckState.Format.A));
@@ -317,16 +327,22 @@ public class NativeRoadInfoTest {
         for (HudCheckState.CodeTable table : HudCheckState.CodeTable.values()) {
             for (int index = 0; index < ids[0].length; index++) {
                 HudCheckState original = new HudCheckState().step(HudCheckState.Field.MANEUVER, index);
-                for (HudCheckState.Format format : new HudCheckState.Format[]{
-                        HudCheckState.Format.A, HudCheckState.Format.B}) {
+                for (HudCheckState.Format format : HudCheckState.Format.values()) {
                     HudCheckState state = original.selectBasicFormat(format).selectCodeTable(table);
                     Map<Integer, Object> fields = road(HudCheckPayload.prepareLive(
                             state, new byte[0], new byte[0]).build(0));
                     int expected = ids[table.ordinal()][index];
                     assertEquals((long) expected, fields.get(28));
-                    if (format == HudCheckState.Format.B) {
+                    if (format == HudCheckState.Format.B || format == HudCheckState.Format.C) {
                         assertArrayEquals(new byte[]{(byte) expected}, (byte[]) fields.get(8));
                     } else assertFalse(fields.containsKey(8));
+                    Map<Integer, Object> baseline = road(HudCheckPayload.prepareLive(
+                            original.selectBasicFormat(format), new byte[0], new byte[0]).build(0));
+                    baseline.put(28, (long) expected);
+                    if (format == HudCheckState.Format.B || format == HudCheckState.Format.C) {
+                        baseline.put(8, new byte[]{(byte) expected});
+                    }
+                    assertFieldsEqual(baseline, fields);
                     assertEquals(original.toHudState().maneuverId, state.toHudState().maneuverId);
                     assertEquals(original.liveFrame().getAmapManeuver(), state.liveFrame().getAmapManeuver());
                     assertEquals(original.liveFrame().getAmapBroadcastManeuver(), state.liveFrame().getAmapBroadcastManeuver());
