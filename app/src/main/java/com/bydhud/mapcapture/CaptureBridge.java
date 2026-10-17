@@ -19,6 +19,7 @@ import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
 import java.util.UUID;
 import android.os.SharedMemory;
+import android.system.ErrnoException;
 import android.system.OsConstants;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.microedition.khronos.egl.EGL10;
@@ -29,6 +30,7 @@ import javax.microedition.khronos.egl.EGLSurface;
 public final class CaptureBridge {
     private static final String REVISION = "navigator-map-capture-r3";
     private static final Uri ENDPOINT = Uri.parse("content://com.bydhud.app.mapframes");
+    private static final Runnable POLL = CaptureBridge::poll;
     private static final AtomicBoolean BUSY = new AtomicBoolean();
     private static final Object WAZE_LOCK = new Object();
     private static Bundle wazeRequest;
@@ -42,6 +44,8 @@ public final class CaptureBridge {
     private static String session = "";
     private static volatile String lifecycleSessionId = "";
     private static long pollIntervalMs = CapturePollPolicy.DEFAULT_MS;
+    private static long captureDeliveredId;
+    private static String captureDeliveredSession = "";
     private static volatile boolean journalSendingEnabled = true;
     private static volatile int outputEdge = 320;
     private static Boolean swapRedBlue;
@@ -76,7 +80,7 @@ public final class CaptureBridge {
             HandlerThread thread = new HandlerThread("MapProbeProducer");
             thread.start();
             worker = new Handler(thread.getLooper());
-            worker.post(CaptureBridge::poll);
+            worker.post(POLL);
         } catch (Throwable e) { lastError = error(e); }
     }
 
@@ -87,6 +91,7 @@ public final class CaptureBridge {
 
     private static void poll() {
         long delay = CapturePollPolicy.DEFAULT_MS;
+        long targetIntervalMs = CapturePollPolicy.DEFAULT_MS;
         try {
             if (!BackgroundCapture.journalReady()) {
                 String newJournalSession = android.os.Process.myPid() + "-" + UUID.randomUUID();
@@ -104,10 +109,13 @@ public final class CaptureBridge {
             hello.putBoolean("fullSourceMemory", true);
             hello.putLong("captureProtocol", 2L);
             hello.putString("captureCapabilities", CapturePollPolicy.CAPABILITIES);
+            hello.putBoolean("deadlinePollSupported", true);
             hello.putLong("minPollIntervalMs", CapturePollPolicy.MIN_MS);
             hello.putLong("pollIntervalMs", pollIntervalMs);
             hello.putInt("pid", android.os.Process.myPid());
             hello.putBoolean("busy", BUSY.get());
+            hello.putLong("captureDeliveredId", captureDeliveredId);
+            hello.putString("captureDeliveredSession", captureDeliveredSession);
             hello.putLong("draws", draws);
             Object controller = maps.get();
             hello.putString("controller", controller == null ? "none" : identity(controller));
@@ -119,9 +127,20 @@ public final class CaptureBridge {
             if (request == null) throw new IllegalStateException("empty_collector_reply");
             lastError = "";
             boolean active = request.getBoolean("active");
-            delay = CapturePollPolicy.interval(active,
+            targetIntervalMs = CapturePollPolicy.interval(active,
                     request.getLong("pollIntervalMs", CapturePollPolicy.DEFAULT_MS));
-            if (active) session=request.getString("session",session);
+            delay = request.getBoolean("deadlinePoll")
+                    ? CapturePollPolicy.bounded(request.getLong("nextPollDelayMs", targetIntervalMs),
+                            targetIntervalMs, 0L, targetIntervalMs)
+                    : targetIntervalMs;
+            if (active) {
+                String nextSession = request.getString("session", session);
+                if (!session.equals(nextSession)) {
+                    captureDeliveredId = 0L;
+                    captureDeliveredSession = "";
+                }
+                session = nextSession;
+            }
             boolean fullSource = active && request.getBoolean("fullSourceMemory", false);
             outputEdge = CapturePollPolicy.outputEdge(request.getInt("outputMaxEdge"), fullSource);
             leaseMs = CapturePollPolicy.bounded(request.getLong("leaseMs"), 6000, 1000, 30000);
@@ -146,18 +165,26 @@ public final class CaptureBridge {
             }
             journalSendingEnabled = active || journalAccepted;
             if (!request.getBoolean("active")) {
+                captureDeliveredId = 0L;
+                captureDeliveredSession = "";
                 if (takeWaze() != null) BUSY.set(false);
             } else if (request.getLong("id") != 0 && BUSY.compareAndSet(false, true)) {
+                captureDeliveredId = 0L;
+                captureDeliveredSession = "";
                 request.putLong("producerRequestNs", SystemClock.elapsedRealtimeNanos());
                 if (app.getPackageName().equals("com.waze")) {
                     setWaze(request);
                     if (waze525) BackgroundCapture.captureWaze(request);
                     WazeRenderScheduler.request();
-                    worker.postDelayed(() -> {
+                    if (!worker.postDelayed(() -> {
                         if (takeWaze(request)) finish(request, null, "no_gl_frame", "waze", 0, 0);
-                    }, CapturePollPolicy.bounded(request.getLong("frameTimeoutMs"), 2500, 100, 30000));
+                    }, CapturePollPolicy.bounded(request.getLong("frameTimeoutMs"), 2500, 100, 30000))) {
+                        failCaptureWorker();
+                    }
                 } else {
-                    new Handler(Looper.getMainLooper()).post(() -> captureMaps(request));
+                    if (!new Handler(Looper.getMainLooper()).post(() -> captureMaps(request))) {
+                        failCaptureWorker();
+                    }
                 }
             }
         } catch (Throwable e) {
@@ -166,8 +193,8 @@ public final class CaptureBridge {
             delay = CapturePollPolicy.DEFAULT_MS;
         } // Existing lease expires if IPC stays unavailable.
         finally {
-            pollIntervalMs = delay;
-            worker.postDelayed(CaptureBridge::poll, delay);
+            pollIntervalMs = targetIntervalMs;
+            worker.postDelayed(POLL, delay);
         }
     }
 
@@ -175,9 +202,9 @@ public final class CaptureBridge {
         AtomicBoolean delivered = new AtomicBoolean();
         Object controller = maps.get();
         try {
-            if (controller == null) { worker.post(() -> finish(request, null, "no_map_controller", "maps", 0, 0)); return; }
+            if (controller == null) { postFinish(request, null, "no_map_controller", "maps", 0, 0); return; }
             if (MAPS_PENDING.containsKey(controller)) {
-                worker.post(() -> finish(request, null, "snapshot_waiting_for_previous_callback", identity(controller), 0, 0));
+                postFinish(request, null, "snapshot_waiting_for_previous_callback", identity(controller), 0, 0);
                 return;
             }
             MAPS_PENDING.put(controller, delivered);
@@ -195,17 +222,41 @@ public final class CaptureBridge {
                     if (MAPS_PENDING.get(controller) == delivered) MAPS_PENDING.remove(controller);
                 });
                 if (delivered.compareAndSet(false, true)) {
+                    SharedMemory shared = null;
+                    Bitmap copy = null;
                     try {
                         long callbackNs = SystemClock.elapsedRealtimeNanos();
                         Bitmap bitmap = args != null && args.length == 1 && args[0] instanceof Bitmap ? (Bitmap) args[0] : null;
                         if (bitmap != null) BackgroundCapture.frame(controller);
                         int width = bitmap == null ? 0 : bitmap.getWidth();
                         int height = bitmap == null ? 0 : bitmap.getHeight();
-                        // Copy while the callback owns the source; never recycle a navigator-owned Bitmap.
-                        Bitmap copy = bitmap == null ? null : smallCopy(bitmap, CapturePollPolicy.outputEdge(request.getInt("outputMaxEdge"), request.getBoolean("fullSourceMemory")));
+                        int edge = CapturePollPolicy.outputEdge(
+                                request.getInt("outputMaxEdge"), request.getBoolean("fullSourceMemory"));
                         request.putLong("callbackNs", callbackNs);
-                        worker.post(() -> finish(request, copy, copy == null ? "null_snapshot" : "ok", source, width, height));
-                    } catch (Throwable e) { worker.post(() -> finish(request, null, error(e), source, 0, 0)); }
+                        if (bitmap != null && request.getBoolean("fullSourceMemory")
+                                && directMemoryCompatible(bitmap, edge)) {
+                            long copyStart = SystemClock.elapsedRealtimeNanos();
+                            shared = copyPixelsToSharedMemory(bitmap);
+                            request.putInt("bitmapWidth", width);
+                            request.putInt("bitmapHeight", height);
+                            request.putLong("sharedCopyNs", SystemClock.elapsedRealtimeNanos() - copyStart);
+                            SharedMemory resultMemory = shared;
+                            shared = null;
+                            postFinish(request, null, "ok", source, width, height, resultMemory);
+                        } else {
+                            // Copy while the callback owns the source; never recycle a navigator-owned Bitmap.
+                            copy = bitmap == null ? null : smallCopy(bitmap, edge);
+                            Bitmap resultBitmap = copy;
+                            copy = null;
+                            postFinish(request, resultBitmap,
+                                    resultBitmap == null ? "null_snapshot" : "ok", source, width, height);
+                        }
+                    } catch (Throwable e) {
+                        postFinish(request, null, error(e), source, 0, 0);
+                    } finally {
+                        if (shared != null) closeSharedMemory(shared);
+                        if (copy != null) copy.recycle();
+                    }
                 }
                 return null;
             });
@@ -214,18 +265,18 @@ public final class CaptureBridge {
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 if (delivered.compareAndSet(false, true)) {
                     // Do not overlap native snapshots. A late callback or a new controller allows recovery.
-                    worker.post(() -> finish(request, null, "snapshot_callback_timeout", source, 0, 0));
+                    postFinish(request, null, "snapshot_callback_timeout", source, 0, 0);
                 }
             }, CapturePollPolicy.bounded(request.getLong("frameTimeoutMs"), 2500, 100, 30000));
         } catch (Throwable e) {
             if (MAPS_PENDING.get(controller) == delivered) MAPS_PENDING.remove(controller);
-            if (delivered.compareAndSet(false, true)) worker.post(() -> finish(request, null, error(e), "maps", 0, 0));
+            if (delivered.compareAndSet(false, true)) postFinish(request, null, error(e), "maps", 0, 0);
         }
     }
 
 
     static void wazeUnavailable(Bundle request, String status) {
-        if (takeWaze(request)) worker.post(() -> finish(request, null, status, "waze_surface_copy", 0, 0));
+        if (takeWaze(request)) postFinish(request, null, status, "waze_surface_copy", 0, 0);
     }
     static void wazeSurfaceFrame(Bundle request, Object renderer, android.view.Surface surface,
             int width, int height, java.util.function.BooleanSupplier current) {
@@ -247,7 +298,7 @@ public final class CaptureBridge {
                         WazeRenderScheduler.frame(renderer);
                         WazeRenderScheduler.readback(renderer, request.getLong("callbackNs") - request.getLong("captureStartNs"));
                     }
-                    worker.post(() -> finish(request, bitmap, status, "waze_surface_copy:" + identity(renderer), width, height));
+                    postFinish(request, bitmap, status, "waze_surface_copy:" + identity(renderer), width, height);
                 });
         WazeRenderScheduler.request();
     }
@@ -307,7 +358,7 @@ public final class CaptureBridge {
             WazeRenderScheduler.readback(renderer, request.getLong("callbackNs") - request.getLong("captureStartNs"));
             request.putInt("previousGlError", previousError);
             request.putString("glVersion", version);
-            worker.post(() -> {
+            if (!worker.post(() -> {
                 try {
                     long conversionStart = SystemClock.elapsedRealtimeNanos();
                     int edge = CapturePollPolicy.outputEdge(request.getInt("outputMaxEdge"), request.getBoolean("fullSourceMemory"));
@@ -315,9 +366,9 @@ public final class CaptureBridge {
                     request.putLong("conversionNs", SystemClock.elapsedRealtimeNanos() - conversionStart);
                     finish(request, bitmap, "ok", source, width, height);
                 } catch (Throwable e) { finish(request, null, error(e), source, width, height); }
-            });
+            })) failCaptureWorker();
         } catch (Throwable e) {
-            worker.post(() -> finish(request, null, error(e), "waze", 0, 0));
+            postFinish(request, null, error(e), "waze", 0, 0);
         }
     }
 
@@ -400,8 +451,64 @@ public final class CaptureBridge {
         return scaled;
     }
 
+    private static boolean directMemoryCompatible(Bitmap bitmap, int edge) {
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        return bitmap.getConfig() == Bitmap.Config.ARGB_8888
+                && bitmap.isPremultiplied()
+                && bitmap.getColorSpace() != null && bitmap.getColorSpace().isSrgb()
+                && width <= edge && height <= edge
+                && bitmap.getRowBytes() == (long) width * 4L
+                && bitmap.getByteCount() == (long) width * height * 4L;
+    }
+
+    private static SharedMemory copyPixelsToSharedMemory(Bitmap bitmap) throws ErrnoException {
+        SharedMemory shared = SharedMemory.create("bydhud-map-source", bitmap.getByteCount());
+        try {
+            ByteBuffer pixels = shared.mapReadWrite();
+            try { bitmap.copyPixelsToBuffer(pixels); }
+            finally { SharedMemory.unmap(pixels); }
+            if (!shared.setProtect(OsConstants.PROT_READ))
+                throw new IllegalStateException("source_memory_protection");
+            return shared;
+        } catch (ErrnoException | RuntimeException | Error failure) {
+            closeSharedMemory(shared);
+            throw failure;
+        }
+    }
+
+    private static void postFinish(
+            Bundle request, Bitmap bitmap, String status, String source, int width, int height) {
+        postFinish(request, bitmap, status, source, width, height, null);
+    }
+
+    private static void postFinish(
+            Bundle request, Bitmap bitmap, String status, String source, int width, int height,
+            SharedMemory sourceMemory) {
+        Handler handler = worker;
+        try {
+            if (handler != null && handler.post(
+                    () -> finish(request, bitmap, status, source, width, height, sourceMemory))) return;
+        } catch (RuntimeException ignored) { }
+        if (sourceMemory != null) closeSharedMemory(sourceMemory);
+        if (bitmap != null) bitmap.recycle();
+        failCaptureWorker();
+    }
+
+    private static void failCaptureWorker() {
+        lastError = "capture_worker_stopped";
+        BUSY.set(false);
+    }
+
     private static void finish(Bundle request, Bitmap bitmap, String status, String source, int width, int height) {
-        SharedMemory shared = null;
+        finish(request, bitmap, status, source, width, height, null);
+    }
+
+    private static void finish(
+            Bundle request, Bitmap bitmap, String status, String source, int width, int height,
+            SharedMemory sourceMemory) {
+        SharedMemory shared = sourceMemory;
+        boolean accepted = false;
         try {
             request.putLong("captureProtocol", 2L);
             request.putString("package", app.getPackageName());
@@ -410,23 +517,56 @@ public final class CaptureBridge {
             request.putAll(BackgroundCapture.metadata(false));
             request.putInt("sourceWidth", width);
             request.putInt("sourceHeight", height);
-            request.putLong("sendNs", SystemClock.elapsedRealtimeNanos());
-            if (bitmap != null && request.getBoolean("fullSourceMemory")) {
+            if (bitmap != null && request.getBoolean("fullSourceMemory") && shared == null) {
                 long copyStart = SystemClock.elapsedRealtimeNanos();
-                shared = SharedMemory.create("bydhud-map-source", bitmap.getByteCount());
-                ByteBuffer pixels = shared.mapReadWrite();
-                try { bitmap.copyPixelsToBuffer(pixels); }
-                finally { SharedMemory.unmap(pixels); }
-                if (!shared.setProtect(OsConstants.PROT_READ))
-                    throw new IllegalStateException("source_memory_protection");
+                shared = copyPixelsToSharedMemory(bitmap);
                 request.putInt("bitmapWidth", bitmap.getWidth());
                 request.putInt("bitmapHeight", bitmap.getHeight());
-                request.putParcelable("sourceMemory", shared);
                 request.putLong("sharedCopyNs", SystemClock.elapsedRealtimeNanos() - copyStart);
-            } else if (bitmap != null) request.putParcelable("bitmap", bitmap);
-            app.getContentResolver().call(ENDPOINT, "result", null, request);
+            }
+            if (shared != null) request.putParcelable("sourceMemory", shared);
+            else if (bitmap != null) request.putParcelable("bitmap", bitmap);
+            long producerReadyNs = SystemClock.elapsedRealtimeNanos();
+            request.putLong("producerReadyNs", producerReadyNs);
+            long requestNs = request.getLong("requestNs", 0L);
+            if (requestNs > 0L) {
+                long interval = CapturePollPolicy.interval(true,
+                        request.getLong("pollIntervalMs", pollIntervalMs));
+                request.putLong("producerDeadlineMissMs", Math.max(0L,
+                        producerReadyNs / 1_000_000L - requestNs / 1_000_000L - interval));
+            }
+            request.putLong("sendNs", SystemClock.elapsedRealtimeNanos());
+            Bundle result = app.getContentResolver().call(ENDPOINT, "result", null, request);
+            accepted = result != null && result.getBoolean("accepted");
         } catch (Throwable e) { lastError = error(e); }
-        finally { if (shared != null) shared.close(); if (bitmap != null) bitmap.recycle(); BUSY.set(false); }
+        finally {
+            if (shared != null) closeSharedMemory(shared);
+            if (bitmap != null) bitmap.recycle();
+            if (accepted && request.getLong("id", 0L) != 0L
+                    && session.equals(request.getString("session", ""))) {
+                captureDeliveredId = request.getLong("id");
+                captureDeliveredSession = request.getString("session", "");
+            }
+            BUSY.set(false);
+            rescheduleAfterCapture(request);
+        }
+    }
+
+    private static void closeSharedMemory(SharedMemory shared) {
+        try { shared.close(); }
+        catch (RuntimeException e) { lastError = error(e); }
+    }
+
+    private static void rescheduleAfterCapture(Bundle request) {
+        if (worker == null || !request.getBoolean("deadlinePoll")
+                || !request.getBoolean("active")
+                || !session.equals(request.getString("session", ""))) return;
+        long requestNs = request.getLong("requestNs", 0L);
+        long delay = CapturePollPolicy.nextPollDelayMs(
+                requestNs > 0L ? requestNs / 1_000_000L : -1L,
+                pollIntervalMs, SystemClock.elapsedRealtime(), false);
+        worker.removeCallbacks(POLL);
+        worker.postDelayed(POLL, delay);
     }
 
     private static String identity(Object value) { return value.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(value)); }

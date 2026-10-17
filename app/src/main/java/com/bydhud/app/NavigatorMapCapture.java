@@ -9,6 +9,8 @@ import android.os.HandlerThread;
 import android.os.Process;
 import android.os.SystemClock;
 
+import com.bydhud.mapcapture.CapturePollPolicy;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -70,6 +72,10 @@ public final class NavigatorMapCapture {
     private static long lastRequestAtElapsedMs = -1L;
     private static long lastPollIntervalMs = -1L;
     private static long processingId;
+    private static long skippedPollCount;
+    private static long skippedPollStartedAtElapsedMs = -1L;
+    private static String lastPollSkipReason = "";
+    private static long processingWaitAccumulatedMs;
     private static long lastRejectedLogAtElapsedMs;
     private static String lastProducerState = "";
     private static String lastRenderStatsState = "";
@@ -176,6 +182,11 @@ public final class NavigatorMapCapture {
             lastRequestAtElapsedMs = -1L;
             lastPollIntervalMs = -1L;
             processingId = 0L;
+            skippedPollCount = 0L;
+            skippedPollStartedAtElapsedMs = -1L;
+            lastPollSkipReason = "";
+            processingWaitAccumulatedMs = 0L;
+            LOCK.notifyAll();
             lastProducerState = "";
             lastRenderStatsState = "";
             lastRenderStatsAt = -1;
@@ -284,6 +295,11 @@ public final class NavigatorMapCapture {
             lastRequestAtElapsedMs = -1L;
             lastPollIntervalMs = -1L;
             processingId = 0L;
+            skippedPollCount = 0L;
+            skippedPollStartedAtElapsedMs = -1L;
+            lastPollSkipReason = "";
+            processingWaitAccumulatedMs = 0L;
+            LOCK.notifyAll();
             lastProducerState = "";
             lastRenderStatsState = "";
             lastRenderStatsAt = -1;
@@ -439,6 +455,55 @@ public final class NavigatorMapCapture {
                 long interval = Math.max(FRAME.requestIntervalMs(), producerMinimum > 0L
                         ? producerMinimum : NavigatorMapSessionState.IDLE_INTERVAL_MS);
                 interval = Math.max(interval, 1000L / updateRateHz);
+                boolean busy = booleanValue(data, "busy", false);
+                boolean deadlinePoll = booleanValue(data, "deadlinePollSupported", false);
+                long processingWaitMs = 0L;
+                boolean waitTimedOut = false;
+                boolean waitInterrupted = false;
+                long deliveredId = longValue(data, "captureDeliveredId", 0L);
+                String deliveredSession = string(data, "captureDeliveredSession", "");
+                boolean matchingDelivery = deadlinePoll && !busy && deliveredId != 0L
+                        && session.equals(deliveredSession) && processingId == deliveredId;
+                if (matchingDelivery) {
+                    String waitSession = session;
+                    String waitOwner = ownerPackage;
+                    long waitGeneration = ownerGeneration;
+                    long waitStartedAt = SystemClock.elapsedRealtime();
+                    long waitDeadline = waitStartedAt + 1000L;
+                    while (session.equals(waitSession) && ownerPackage.equals(waitOwner)
+                            && ownerGeneration == waitGeneration
+                            && FRAME.isCurrent(waitOwner, waitGeneration, waitSession)
+                            && processingId == deliveredId) {
+                        long remaining = waitDeadline - SystemClock.elapsedRealtime();
+                        if (remaining <= 0L) break;
+                        try {
+                            LOCK.wait(remaining);
+                        } catch (InterruptedException interrupted) {
+                            waitInterrupted = true;
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                    long waitEndedAt = SystemClock.elapsedRealtime();
+                    processingWaitMs = Math.max(0L, waitEndedAt - waitStartedAt);
+                    waitTimedOut = !waitInterrupted && processingWaitMs >= 1000L
+                            && session.equals(waitSession) && ownerPackage.equals(waitOwner)
+                            && ownerGeneration == waitGeneration && processingId == deliveredId;
+                    int refreshedRateHz = HudPrefs.mapUpdateRateHz(app);
+                    now = SystemClock.elapsedRealtime();
+                    if (!session.equals(waitSession) || !ownerPackage.equals(waitOwner)
+                            || ownerGeneration != waitGeneration
+                            || !FRAME.isCurrent(waitOwner, waitGeneration, waitSession)) {
+                        answer.putBoolean("active", false);
+                        answer.putLong("id", 0L);
+                    } else {
+                        updateRateHz = refreshedRateHz;
+                        interval = Math.max(FRAME.requestIntervalMs(), producerMinimum > 0L
+                                ? producerMinimum : NavigatorMapSessionState.IDLE_INTERVAL_MS);
+                        interval = Math.max(interval, 1000L / updateRateHz);
+                    }
+                }
+                if (deadlinePoll) answer.putBoolean("deadlinePoll", true);
                 answer.putLong("pollIntervalMs", interval);
                 if (interval != lastPollIntervalMs) {
                     cadenceLog = "navigator_map_capture cadence owner=" + field(ownerPackage, 96)
@@ -448,19 +513,48 @@ public final class NavigatorMapCapture {
                             + " producerMinMs=" + producerMinimum;
                     lastPollIntervalMs = interval;
                 }
-                boolean busy = booleanValue(data, "busy", false);
-                if (pendingId == 0L && processingId == 0L && !busy
-                        && (lastRequestAtElapsedMs < 0L || now - lastRequestAtElapsedMs >= interval)) {
+                boolean stillActive = answer.getBoolean("active", false);
+                boolean canRequest = stillActive && pendingId == 0L && processingId == 0L && !busy;
+                boolean due = lastRequestAtElapsedMs < 0L || now - lastRequestAtElapsedMs >= interval;
+                if (canRequest && due) {
+                    long requestStartedNs = SystemClock.elapsedRealtimeNanos();
+                    now = requestStartedNs / 1_000_000L;
                     pendingId = nextRequestIdLocked();
                     pendingAtElapsedMs = now;
                     requestSourceMode = activeSourceMode;
                     requestSourceModeRevision = activeSourceModeRevision;
                     lastRequestAtElapsedMs = now;
                     answer.putLong("id", pendingId);
-                    answer.putLong("requestNs", SystemClock.elapsedRealtimeNanos());
+                    answer.putLong("requestNs", requestStartedNs);
+                    answer.putLong("pollSkipCount", skippedPollCount);
+                    answer.putLong("pollSkipElapsedMs", skippedPollStartedAtElapsedMs < 0L
+                            ? 0L : Math.max(0L, now - skippedPollStartedAtElapsedMs));
+                    answer.putString("pollSkipReason", lastPollSkipReason);
+                    answer.putLong("processingWaitMs", processingWaitAccumulatedMs + processingWaitMs);
+                    skippedPollCount = 0L;
+                    skippedPollStartedAtElapsedMs = -1L;
+                    lastPollSkipReason = "";
+                    processingWaitAccumulatedMs = 0L;
                     logRequest = "navigator_map_capture request owner="
                             + field(ownerPackage, 96) + " session=" + session + " id=" + pendingId
                             + " pollIntervalMs=" + interval;
+                } else if (stillActive) {
+                    if (skippedPollCount == 0L) skippedPollStartedAtElapsedMs = now;
+                    skippedPollCount++;
+                    lastPollSkipReason = busy ? "producer_busy"
+                            : pendingId != 0L ? "request_pending"
+                            : processingId != 0L ? (waitTimedOut ? "processing_wait_timeout" : "processing")
+                            : "cadence";
+                    processingWaitAccumulatedMs = processingWaitMs
+                            > Long.MAX_VALUE - processingWaitAccumulatedMs
+                            ? Long.MAX_VALUE : processingWaitAccumulatedMs + processingWaitMs;
+                }
+                if (stillActive && deadlinePoll) {
+                    long nextDelay = waitTimedOut ? CapturePollPolicy.MIN_MS
+                            : CapturePollPolicy.nextPollDelayMs(lastRequestAtElapsedMs,
+                                    interval, now, !canRequest && (busy || pendingId != 0L
+                                            || processingId != 0L));
+                    answer.putLong("nextPollDelayMs", nextDelay);
                 }
             } else if (callerPackage.equals(stoppedOwnerPackage)
                     && string(data, "captureSession", "").equals(stoppedSession)
@@ -688,7 +782,6 @@ public final class NavigatorMapCapture {
                             inputHash, sourceMetadata, backgroundState);
                     retained = true;
                     samePng = FRAME.pngForSnapshot();
-                    processingId = 0L;
                     sequence = FRAME.frameSequence();
                     rawFrameSequence = sequence;
                     revision = FRAME.revision();
@@ -706,7 +799,6 @@ public final class NavigatorMapCapture {
             byte[] png = HudMapImage.encodePng(crop);
             data.putLong("pngEncodeNs", SystemClock.elapsedRealtimeNanos() - encodeStart);
             if (png == null || png.length == 0) {
-                finishProcessing(resultSession, id);
                 logResultError(app, callerPackage, resultSession, id, status, "empty_cropped_png", data);
                 return;
             }
@@ -716,7 +808,6 @@ public final class NavigatorMapCapture {
             replacedRaw = null;
             synchronized (LOCK) {
                 if (processingId == id) {
-                    processingId = 0L;
                     if (WAZE_PACKAGE.equals(callerPackage)
                             && activeSourceModeRevision != modeRevisionAtRequest) {
                         publishFailure = "stale_source_mode";
@@ -780,7 +871,6 @@ public final class NavigatorMapCapture {
                     bitmap, receivedAt, data, inputHash, png, frameSource, selection);
             runCallback(notify, app);
         } catch (RuntimeException | NoSuchAlgorithmException error) {
-            finishProcessing(resultSession, id);
             logResultError(app, callerPackage, resultSession, id, status,
                     "processing_" + error.getClass().getSimpleName(), data);
         } finally {
@@ -1127,6 +1217,7 @@ public final class NavigatorMapCapture {
         synchronized (LOCK) {
             if (session.equals(expectedSession) && processingId == id) {
                 processingId = 0L;
+                LOCK.notifyAll();
             }
         }
     }
@@ -1197,7 +1288,6 @@ public final class NavigatorMapCapture {
                     return null;
                 } finally {
                     recycle(source);
-                    shared.close();
                 }
             }
             Object value = data.getParcelable("bitmap");
@@ -1265,6 +1355,8 @@ public final class NavigatorMapCapture {
             HudMapProfile.Source source,
             ProfileSelection selection) {
         long age = Math.max(0L, SystemClock.elapsedRealtime() - receivedAt);
+        saveFrameArtifacts(app, callerPackage, frameSession, id, png, source, selection);
+        markProcessingComplete(data);
         log(app, "navigator_map_capture frame owner=" + field(callerPackage, 96)
                 + " session=" + frameSession + " id=" + id
                 + " status=" + field(status, 64) + " source=" + field(string(data, "source", ""), 96)
@@ -1282,8 +1374,6 @@ public final class NavigatorMapCapture {
                 + " receivedAgeMs=" + age + " pixels=" + pixelChange
                 + " inputHash=" + inputHash
                 + timing(data));
-        saveFrameArtifacts(app, callerPackage, frameSession, id, png,
-                source, selection);
     }
 
     private static void saveFrameArtifacts(Context app, String owner, String frameSession,
@@ -1351,6 +1441,7 @@ public final class NavigatorMapCapture {
         synchronized (LOCK) {
             if (session.equals(frameSession)) FRAME.resetCadence();
         }
+        markProcessingComplete(data);
         log(app, "navigator_map_capture result_error owner=" + field(callerPackage, 96)
                 + " session=" + field(frameSession, 96) + " id=" + id
                 + " status=" + field(status, 96) + " reason=" + field(reason, 96)
@@ -1455,9 +1546,29 @@ public final class NavigatorMapCapture {
                 + " captureStartNs=" + longValue(data, "captureStartNs", 0L)
                 + " callbackNs=" + longValue(data, "callbackNs", 0L)
                 + " sendNs=" + longValue(data, "sendNs", 0L)
+                + " producerReadyNs=" + longValue(data, "producerReadyNs", 0L)
+                + " producerDeadlineMissMs=" + longValue(data, "producerDeadlineMissMs", 0L)
+                + " receiverProcessingCompleteNs=" + longValue(data, "receiverProcessingCompleteNs", 0L)
+                + " receiverDeadlineLateMs=" + longValue(data, "receiverDeadlineLateMs", 0L)
+                + " processingWaitMs=" + longValue(data, "processingWaitMs", 0L)
+                + " nextPollDelayMs=" + longValue(data, "nextPollDelayMs", 0L)
+                + " pollSkipCount=" + longValue(data, "pollSkipCount", 0L)
+                + " pollSkipElapsedMs=" + longValue(data, "pollSkipElapsedMs", 0L)
+                + " pollSkipReason=" + field(string(data, "pollSkipReason", ""), 64)
                 + " sourceSize=" + integer(data, "sourceWidth", 0) + "x"
                 + integer(data, "sourceHeight", 0)
                 + " mapsState=" + field(string(data, "mapsState", ""), 512);
+    }
+
+    private static void markProcessingComplete(Bundle data) {
+        long completedNs = SystemClock.elapsedRealtimeNanos();
+        data.putLong("receiverProcessingCompleteNs", completedNs);
+        long requestNs = longValue(data, "requestNs", 0L);
+        if (requestNs > 0L) {
+            long interval = longValue(data, "pollIntervalMs", NavigatorMapSessionState.IDLE_INTERVAL_MS);
+            data.putLong("receiverDeadlineLateMs", Math.max(0L,
+                    completedNs / 1_000_000L - requestNs / 1_000_000L - interval));
+        }
     }
 
     private static String sourceName(HudMapProfile.Source source) {

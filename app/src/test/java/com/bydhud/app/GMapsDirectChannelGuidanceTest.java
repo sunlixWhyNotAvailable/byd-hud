@@ -1,6 +1,8 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertTrue;
 
 import java.util.ArrayList;
@@ -12,6 +14,42 @@ import java.util.Map;
 import org.junit.Test;
 
 public final class GMapsDirectChannelGuidanceTest {
+    @SuppressWarnings("removal")
+    @Test
+    public void routePayloadFenceAllowsSameStepRecurrenceAndKeepsCrossStepHistory() {
+        GMapsDirectChannel.RoutePayloadResurrectionFence fence =
+                new GMapsDirectChannel.RoutePayloadResurrectionFence();
+        Integer step1000First = new Integer(1000);
+        Integer step1000Second = new Integer(1000);
+        Integer step1000Third = new Integer(1000);
+        assertNotSame(step1000First, step1000Second);
+        assertNotSame(step1000Second, step1000Third);
+
+        assertTrue(fence.accepts(step1000First, true, "A"));
+        assertTrue(fence.accepts(step1000Second, true, "B"));
+        assertTrue(fence.accepts(step1000Third, true, "A"));
+        assertTrue(fence.accepts(step1000Third, true, "A"));
+        assertTrue(fence.accepts(1001, true, "C"));
+        assertFalse(fence.accepts(step1000First, true, "A"));
+        assertTrue(fence.accepts(4, true, "D"));
+        assertEquals(4, fence.lastAcceptedCurrentStepIndex());
+
+        fence.reset();
+        assertEquals(0, fence.size());
+        assertTrue(fence.accepts(9, true, "A"));
+        assertEquals(9, fence.lastAcceptedCurrentStepIndex());
+
+        fence.reset();
+        assertTrue(fence.accepts(0, false, "unknown-A"));
+        assertTrue(fence.accepts(0, false, "unknown-B"));
+        assertFalse(fence.accepts(0, false, "unknown-A"));
+
+        fence.reset();
+        assertTrue(fence.accepts(0, true, "explicit-A"));
+        assertTrue(fence.accepts(0, true, "explicit-B"));
+        assertTrue(fence.accepts(0, true, "explicit-A"));
+    }
+
     @Test
     public void laneSetIsClearedForDisabledOrIncompletePhysicalLaneData() {
         Map<String, Object> left = lane(Collections.singletonList(arrow(5, 1, true)));

@@ -19,4 +19,13 @@ public final class CapturePollPolicy {
         return active && requestedMs > 0L ? Math.min(requestedMs, DEFAULT_MS) : DEFAULT_MS;
     }
 
+    public static long nextPollDelayMs(
+            long requestStartedAtMs, long intervalMs, long nowMs, boolean blocked) {
+        long interval = bounded(intervalMs, DEFAULT_MS, MIN_MS, DEFAULT_MS);
+        if (blocked) return interval;
+        if (requestStartedAtMs < 0L || nowMs < requestStartedAtMs
+                || requestStartedAtMs > Long.MAX_VALUE - interval) return DEFAULT_MS;
+        return Math.max(0L, Math.min(interval, requestStartedAtMs + interval - nowMs));
+    }
+
 }

@@ -7,12 +7,14 @@ import android.util.Log;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 //defines the NavCaptureStore module boundary so related behavior stays readable inside one unit.
@@ -135,28 +137,65 @@ final class NavCaptureStore {
             String targetDay,
             String fileName,
             String line) {
-        File file = NavigationLogStorage.withReadLock(() -> {
-            // Images also acquire topology before the file monitor. Never rotate
-            // while holding this monitor: rotation waits for all image readers.
-            synchronized (NavCaptureStore.class) {
-                File target = new File(NavigationLogStorage.logsDir(context, targetDay), fileName);
-                try (FileWriter writer = new FileWriter(target, true)) {
-                    writer.write(line);
-                    writer.write('\n');
-                } catch (IOException e) {
-                    WazeCaptureDebugWriter.recordWriteFailure("append: " + e);
-                    Log.e(TAG, "append failed " + target.getAbsolutePath(), e);
-                    return null;
+        if (WazeCaptureDebugWriter.captureNavigationText(context, targetDay, fileName, line)) return;
+        writeBatch(context, targetDay, fileName, Collections.singletonList(line + '\n'));
+    }
+
+    static boolean writeBatch(
+            Context context, String targetDay, String fileName, List<String> lines) {
+        if (context == null || fileName == null || lines == null || lines.isEmpty()) return false;
+        int index = 0;
+        boolean allWritten = true;
+        while (index < lines.size()) {
+            final int start = index;
+            BatchAppend append = NavigationLogStorage.withReadLock(() -> {
+                // Images acquire topology before this monitor; rotation must happen after both are released.
+                synchronized (NavCaptureStore.class) {
+                    int next = start;
+                    File target = null;
+                    try {
+                        target = new File(
+                                NavigationLogStorage.logsDir(context, targetDay), fileName);
+                        long projectedLength = target.isFile() ? target.length() : 0L;
+                        List<String> chunk = new ArrayList<>();
+                        while (next < lines.size()) {
+                            String line = lines.get(next++);
+                            chunk.add(line);
+                            projectedLength += JournalTextBatch.byteCount(line);
+                            if (projectedLength > MAX_LOG_BYTES) break;
+                        }
+                        JournalTextBatch.append(target, chunk);
+                        return new BatchAppend(target, next, true);
+                    } catch (IOException | RuntimeException error) {
+                        WazeCaptureDebugWriter.recordWriteFailure("append: " + error);
+                        Log.e(TAG, "append failed "
+                                + (target == null ? fileName : target.getAbsolutePath()), error);
+                        return new BatchAppend(target, Math.max(start + 1, next), false);
+                    }
                 }
+            });
+            if (append.written) {
                 WazeCaptureDebugWriter.recordWriteSuccess();
-                return target;
+            } else {
+                allWritten = false;
             }
-        });
-        if (file == null) {
-            return;
+            index = append.nextIndex;
+            if (append.written && append.file != null && rotateIfNeeded(append.file)) {
+                NavigationLogStorage.enforceNavCaptureRetention(context);
+            }
         }
-        if (rotateIfNeeded(file)) {
-            NavigationLogStorage.enforceNavCaptureRetention(context);
+        return allWritten;
+    }
+
+    private static final class BatchAppend {
+        final File file;
+        final int nextIndex;
+        final boolean written;
+
+        BatchAppend(File file, int nextIndex, boolean written) {
+            this.file = file;
+            this.nextIndex = nextIndex;
+            this.written = written;
         }
     }
 

@@ -53,6 +53,20 @@ public final class CapturePayloadPolicyTest {
         assertEquals(1000L, CapturePollPolicy.interval(true, Long.MAX_VALUE));
     }
 
+    @Test public void deadlinePollingUsesRequestStartAndSkipsCatchUpWhenBlocked() {
+        assertEquals(200L, CapturePollPolicy.nextPollDelayMs(1000L, 200L, 1000L, false));
+        assertEquals(80L, CapturePollPolicy.nextPollDelayMs(1000L, 200L, 1120L, false));
+        assertEquals(0L, CapturePollPolicy.nextPollDelayMs(1000L, 200L, 1200L, false));
+        assertEquals(0L, CapturePollPolicy.nextPollDelayMs(1000L, 200L, 1500L, false));
+        assertEquals(700L, CapturePollPolicy.nextPollDelayMs(1000L, 1000L, 1300L, false));
+        assertEquals(200L, CapturePollPolicy.nextPollDelayMs(1000L, 200L, 1200L, true));
+        assertEquals(1000L, CapturePollPolicy.nextPollDelayMs(-1L, 200L, 1200L, false));
+        assertEquals(1000L, CapturePollPolicy.nextPollDelayMs(1200L, 200L, 1100L, false));
+        assertEquals(1000L, CapturePollPolicy.nextPollDelayMs(Long.MAX_VALUE - 100L, 200L,
+                Long.MAX_VALUE - 100L, false));
+        assertEquals(1000L, CapturePollPolicy.nextPollDelayMs(1000L, 0L, 1000L, false));
+    }
+
     @Test public void carCapturePolicyDoesNotReviveVisibleOrDisposedSurfaces() {
         assertTrue(CarCapturePolicy.mayAttach(true, true, false, true));
         assertFalse(CarCapturePolicy.mayAttach(true, true, true, true));

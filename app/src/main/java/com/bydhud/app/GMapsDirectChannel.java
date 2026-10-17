@@ -235,31 +235,41 @@ final class GMapsDirectChannel {
     }
 
     static final class RoutePayloadResurrectionFence {
-        private final Map<String, Boolean> acceptedPayloads =
-                new LinkedHashMap<String, Boolean>(
-                        MAX_ROUTE_PAYLOAD_HISTORY, 0.75f, true) {
+        private final Map<String, Integer> acceptedPayloads =
+                new LinkedHashMap<String, Integer>(
+                        MAX_ROUTE_PAYLOAD_HISTORY, 0.75f, false) {
                     @Override
                     protected boolean removeEldestEntry(
-                            Map.Entry<String, Boolean> eldest) {
+                            Map.Entry<String, Integer> eldest) {
                         return size() > MAX_ROUTE_PAYLOAD_HISTORY;
                     }
                 };
         private String lastAcceptedPayloadDigest = "";
         private int lastAcceptedCurrentStepIndex = -1;
 
-        boolean accepts(Integer currentStepIndex, String payloadDigest) {
+        boolean accepts(Integer currentStepIndex, boolean currentStepIndexPresent,
+                String payloadDigest) {
             if (currentStepIndex == null || currentStepIndex < 0) return true;
             boolean digestAvailable = payloadDigest != null
                     && !payloadDigest.isEmpty()
                     && !"unavailable".equals(payloadDigest);
             if (!digestAvailable) return true;
-            if (payloadDigest.equals(lastAcceptedPayloadDigest)) return true;
-            if (acceptedPayloads.containsKey(payloadDigest)) {
+            int acceptedCurrentStepIndex = currentStepIndexPresent ? currentStepIndex : -1;
+            if (payloadDigest.equals(lastAcceptedPayloadDigest)) {
+                acceptedPayloads.put(payloadDigest, acceptedCurrentStepIndex);
+                lastAcceptedCurrentStepIndex = acceptedCurrentStepIndex;
+                return true;
+            }
+            Integer acceptedStepIndex = acceptedPayloads.get(payloadDigest);
+            if (acceptedStepIndex != null
+                    && (acceptedCurrentStepIndex < 0 || acceptedStepIndex < 0
+                    || acceptedStepIndex != acceptedCurrentStepIndex
+                    || acceptedCurrentStepIndex != lastAcceptedCurrentStepIndex)) {
                 return false;
             }
-            acceptedPayloads.put(payloadDigest, Boolean.TRUE);
+            acceptedPayloads.put(payloadDigest, acceptedCurrentStepIndex);
             lastAcceptedPayloadDigest = payloadDigest;
-            lastAcceptedCurrentStepIndex = currentStepIndex;
+            lastAcceptedCurrentStepIndex = acceptedCurrentStepIndex;
             return true;
         }
 
@@ -764,18 +774,17 @@ final class GMapsDirectChannel {
                 publishGuidanceIndependentMetrics(summary, sequence, timing);
                 return;
             }
-            Integer currentStepIndex = integerValue(summary.get("currentStepIndex"));
+            Integer stepIndex = integerValue(summary.get("currentStepIndex"));
+            boolean stepIndexPresent = Boolean.TRUE.equals(summary.get("currentStepIndexPresent"));
             String payloadDigest = sha256(payload);
-            if (!routePayloadFence.accepts(currentStepIndex, payloadDigest)) {
+            if (!routePayloadFence.accepts(stepIndex, stepIndexPresent, payloadDigest)) {
                 listener.onLog("frame ignored reason=payload-resurrection sequence="
-                        + sequence + " currentStepIndex=" + currentStepIndex
+                        + sequence + " currentStepIndex=" + stepIndex
                         + " lastAcceptedCurrentStepIndex="
                         + routePayloadFence.lastAcceptedCurrentStepIndex()
                         + " sha256=" + payloadDigest);
                 return;
             }
-            Integer stepIndex = integerValue(summary.get("currentStepIndex"));
-            boolean stepIndexPresent = Boolean.TRUE.equals(summary.get("currentStepIndexPresent"));
             boolean stepRewound = stepIndexPresent && stepIndex != null && activeCurrentStepIndex >= 0
                     && stepIndex < activeCurrentStepIndex;
             if (stepRewound) {
