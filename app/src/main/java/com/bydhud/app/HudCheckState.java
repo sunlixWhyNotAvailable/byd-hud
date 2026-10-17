@@ -49,7 +49,7 @@ public final class HudCheckState {
 
     private static final String[] STREETS = {
             "ТЕСТ", "TEST", "Київ", "Main Street", "Львів", "Oak Avenue",
-            "Шевченка", "Щаслива", "Європейська", "Їжак"
+            "Шевченка", "Щаслива", "Європейська", "Їжак", "西藏中路"
     };
 
     private static final Label[] TRAFFIC_LIGHTS = {
