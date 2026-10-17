@@ -153,17 +153,20 @@ final class NavigatorManeuverAnchor {
                 || anchorProgressMeters > cumulative[cumulative.length - 1]) return null;
         StringBuilder line = new StringBuilder("[");
         if (!appendPoint(line, start.longitude, start.latitude)) return null;
+        int pointCount = 1;
         double lastLatitude = start.latitude, lastLongitude = start.longitude;
         for (int i = 0; i < cumulative.length; i++) {
             if (cumulative[i] <= start.progressMeters || cumulative[i] >= anchorProgressMeters) continue;
             double latitude = route.latitude(i), longitude = route.longitude(i);
             if (length(lastLatitude, lastLongitude, latitude, longitude) <= SAME_POINT_METERS) continue;
             if (!appendPoint(line, longitude, latitude)) return null;
+            pointCount++;
             lastLatitude = latitude;
             lastLongitude = longitude;
         }
         if (length(lastLatitude, lastLongitude, anchorLatitude, anchorLongitude) > SAME_POINT_METERS) {
             if (!appendPoint(line, anchorLongitude, anchorLatitude)) return null;
+            pointCount++;
             lastLatitude = anchorLatitude;
             lastLongitude = anchorLongitude;
         }
@@ -177,7 +180,12 @@ final class NavigatorManeuverAnchor {
             departureFound = true;
             break;
         }
-        if (!departureFound) return null;
+        // The final approach ends at the destination; there is no departure vertex beyond it.
+        int last = cumulative.length - 1;
+        if (!departureFound && (pointCount < 2
+                || cumulative[last] - anchorProgressMeters > SAME_POINT_METERS
+                || length(anchorLatitude, anchorLongitude, route.latitude(last),
+                        route.longitude(last)) > SAME_POINT_METERS)) return null;
         if (line.length() + 1 > MAX_LINE_BYTES) return null;
         return line.append(']').toString();
     }

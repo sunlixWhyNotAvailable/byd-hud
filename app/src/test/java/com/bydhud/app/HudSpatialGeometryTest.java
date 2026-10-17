@@ -109,7 +109,24 @@ public final class HudSpatialGeometryTest {
         assertEquals(90, unqualified.headingDegrees, 0.001);
     }
 
-    @Test public void routeEndpointWithoutDepartureFallsBackToSchematic() {
+    @Test public void finalApproachEndsAtDestinationButRejectsOnePointLine() {
+        NavigatorRouteData maps = route("gmaps-26.30", new double[]{0, 0, 0, .001, .001, .001});
+        HudSpatialGeometry geometry = new HudSpatialGeometry(maps);
+        HudSpatialGeometry.Result approach = geometry.resolve(step(maps, .001d, .001d),
+                position(0, .0005, 2_000, 5, null, null, null, false), null, 2_000);
+        assertEquals(HudSpatialGeometry.Mode.REAL, approach.mode);
+        assertEquals(NavigatorManeuverAnchor.Origin.NATIVE, approach.origin);
+        String[] approachPoints = linePoints(approach.line);
+        assertEquals(3, approachPoints.length);
+        assertEquals(.0005, Double.parseDouble(approachPoints[0].split(",")[0]), 1e-12);
+        assertEquals(.001, Double.parseDouble(approachPoints[2].split(",")[0]), 1e-12);
+        assertEquals(.001, Double.parseDouble(approachPoints[2].split(",")[1]), 1e-12);
+
+        HudSpatialGeometry.Result outsideEndpoint = geometry.resolve(step(maps, .0011d, .001d),
+                position(0, .0005, 2_000, 5, null, null, null, false), null, 2_000);
+        assertEquals(HudSpatialGeometry.Mode.SCHEMATIC, outsideEndpoint.mode);
+        assertEquals("route_line_unavailable", outsideEndpoint.reason);
+
         NavigatorRouteData route = route("waze-5.25.0.1", new double[]{0, 0, 0, .001});
         HudSpatialGeometry.Result result = new HudSpatialGeometry(route).resolve(step(route, null, null),
                 position(0, .001, 2_000, 5, 90f, 10f, 5f, false), distance(0, 2_000), 2_000);

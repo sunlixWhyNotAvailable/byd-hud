@@ -51,6 +51,8 @@ final class HudManeuverGeometry {
         }
         if (result == null || result.mode == HudSpatialGeometry.Mode.OFF) return OFF;
         if (current == null) current = CLEAR;
+        // A destination instruction is still active guidance; route completion clears separately.
+        if (current == DESTINATION) current = STRAIGHT;
         if (current.line.isEmpty()) {
             return new Selection(current.name, current.reason, current.line,
                     current.longitude, current.latitude, current.heading,

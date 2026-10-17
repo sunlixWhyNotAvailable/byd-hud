@@ -153,6 +153,38 @@ public class NativeRoadInfoTest {
                 alerted, options(), NOW, nowElapsedMs, real, false).spatialMode());
         assertGeometryCleared(alertWithSpatial);
         assertFieldsEqual(alertBaseline, alertWithSpatial);
+
+        DirectTbtFrame destination = navigation(15, 99);
+        Map<Integer, Object> destinationBaseline = road(DirectTbtPayload.prepare(
+                destination, options(), NOW).build(0));
+        assertGeometryCleared(destinationBaseline); // The diagnostic/legacy path stays unchanged.
+        Map<Integer, Object> destinationReal = road(DirectTbtPayload.prepareLive(
+                destination, options(), NOW, nowElapsedMs, real, false).build(0));
+        assertEquals(real.line, text(destinationReal, 30));
+        assertEquals(real.longitude, (Double) destinationReal.get(19), 0);
+        assertEquals(real.latitude, (Double) destinationReal.get(20), 0);
+        assertEquals(real.headingDegrees, (Double) destinationReal.get(32), 0);
+        assertOrdinaryFieldsEqual(destinationBaseline, destinationReal);
+        assertEquals(99L, destinationReal.get(28));
+        for (HudSpatialGeometry.Result unavailable : new HudSpatialGeometry.Result[]{fallback, real}) {
+            Map<Integer, Object> destinationFallback = road(DirectTbtPayload.prepareLive(
+                    destination, options(), NOW, real.validUntilElapsedMs, unavailable, false).build(0));
+            assertEquals(HudManeuverGeometry.STRAIGHT.line, text(destinationFallback, 30));
+            assertEquals(HudManeuverGeometry.LONGITUDE, (Double) destinationFallback.get(19), 0);
+            assertEquals(HudManeuverGeometry.LATITUDE, (Double) destinationFallback.get(20), 0);
+            assertEquals(HudManeuverGeometry.HEADING, (Double) destinationFallback.get(32), 0);
+            assertOrdinaryFieldsEqual(destinationBaseline, destinationFallback);
+        }
+        assertNoSpatialFields(road(DirectTbtPayload.prepareLive(destination, options(), NOW,
+                nowElapsedMs, HudSpatialGeometry.Result.off(), false).build(0)));
+        assertGeometryCleared(road(DirectTbtPayload.prepareLive(destination, options(), NOW,
+                nowElapsedMs, real, true).build(0)));
+        assertGeometryCleared(road(DirectTbtPayload.prepareLive(destination,
+                new DirectTbtPayload.Options(false, false, false, true, true),
+                NOW, nowElapsedMs, real, false).build(0)));
+        assertGeometryCleared(road(DirectTbtPayload.prepareLive(destination.withAlertOverlay(
+                DirectTbtFrame.AlertOverlay.active(7, 25, "Hazard", null)), options(),
+                NOW, nowElapsedMs, real, false).build(0)));
     }
 
     @Test public void selectiveSpatialResetKeepsOrdinaryFieldsAndWaitsForSuccessfulPayload() {
