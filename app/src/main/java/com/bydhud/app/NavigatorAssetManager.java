@@ -251,7 +251,7 @@ final class NavigatorAssetManager {
                 1030736L,
                 "com.waze",
                 NavigatorAssetSignerCatalog.WAZE_PROJECT_SIGNER,
-                "70325517002CA0E4653140CFD7F49298C369BB7577C657EA3BCA0FE24BBE2EA1",
+                "CED99B942C564EA71F9967E4200DBA2A826649E1BD1621B39CA5FAE183F5838F",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v2/waze-5.25.0.1-direct-v2.apk",
                 "waze-5.25.0.1-direct-v2.apk",
