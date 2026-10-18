@@ -170,6 +170,9 @@ final class VehicleConfigurationReadback {
             case "dumpsys thermalservice":
             case "dumpsys meminfo com.bydhud.app":
             case "dumpsys package com.bydhud.app":
+            case "dumpsys package com.huawei.hwid":
+            case "dumpsys activity services com.huawei.hwid":
+            case "pm path com.huawei.hwid":
             case "cat /proc/loadavg":
             case "settings get secure enabled_notification_listeners":
             case "settings get secure enabled_accessibility_services":

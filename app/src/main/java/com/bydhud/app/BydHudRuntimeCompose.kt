@@ -2724,7 +2724,7 @@ private fun OptionsTab(
                     copy.vehiclePositionHint,
                     snapshot.vehiclePositionEnabled,
                     palette,
-                    rowFill = featureMaturityFill(palette),
+                    rowFill = featureMaturityFill(palette, tested = true),
                     verticalPadding = 8.dp
                 ) { enabled ->
                     runAction { activity.composeSetVehiclePositionEnabled(enabled) }
@@ -6727,7 +6727,7 @@ private fun StorageTab(
                     }
                     HudButton(
                         copy.shareConfiguration,
-                        palette,
+                        palette.copy(panelAlt = featureMaturityFill(palette).takeUnless { it == Color.Transparent } ?: palette.panelAlt),
                         primary = false,
                         enabled = !storageActionBusy && !configurationShareBusy,
                         width = 300.dp,
@@ -7912,6 +7912,7 @@ private fun HudCheckTab(
                         onNext = { step(HudCheckState.Field.DISTANCE, 1) })
                     Divider(palette)
                     HudCheckRow(copy.streetText, copy.checkStreetHint, state.effectiveStreet(), palette,
+                        rowFill = featureMaturityFill(palette),
                         onPrevious = { step(HudCheckState.Field.STREET, -1) },
                         onNext = { step(HudCheckState.Field.STREET, 1) },
                         option = {
@@ -8404,9 +8405,10 @@ private fun HudCheckRow(
     monospace: Boolean = false,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
+    rowFill: Color = Color.Transparent,
     option: @Composable () -> Unit = {}
 ) {
-    ActionRow(title, hint, palette, verticalPadding = 6.dp) {
+    ActionRow(title, hint, palette, verticalPadding = 6.dp, rowFill = rowFill) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             HudChevronButton(ChevronDirection.Left, "$title: previous", palette, onClick = onPrevious)
             Box(
@@ -11334,7 +11336,7 @@ private fun enCopy() = Copy(
     distanceMeters = "Distance, m",
     checkDistanceHint = "1 · 11 · 20 · 55 · 155 · 1555 · 15555",
     streetText = "Street",
-    checkStreetHint = "Latin and Cyrillic words · only Cyrillic is transliterated",
+    checkStreetHint = "Latin, Cyrillic and Chinese words · only Cyrillic is transliterated",
     checkTransliteration = "Transliteration",
     checkTrafficLight = "Traffic-light field",
     checkTrafficLightHint = "Directions, colors, numbers and stock symbols",
@@ -11579,7 +11581,7 @@ private fun uaCopy() = enCopy().copy(
     distanceMeters = "Дистанція, м",
     checkDistanceHint = "1 · 11 · 20 · 55 · 155 · 1555 · 15555",
     streetText = "Вулиця",
-    checkStreetHint = "Латиниця й кирилиця · транслітерація лише кирилиці",
+    checkStreetHint = "Латиниця, кирилиця й китайська · транслітерація лише кирилиці",
     checkTransliteration = "Транслітерація",
     checkTrafficLight = "Поле світлофора",
     checkTrafficLightHint = "Напрямки, кольори, числа та штатні символи",
@@ -11825,7 +11827,7 @@ private fun ruCopy() = enCopy().copy(
     distanceMeters = "Дистанция, м",
     checkDistanceHint = "1 · 11 · 20 · 55 · 155 · 1555 · 15555",
     streetText = "Улица",
-    checkStreetHint = "Латиница и кириллица · транслитерация только кириллицы",
+    checkStreetHint = "Латиница, кириллица и китайский · транслитерация только кириллицы",
     checkTransliteration = "Транслитерация",
     checkTrafficLight = "Поле светофора",
     checkTrafficLightHint = "Направления, цвета, числа и штатные символы",

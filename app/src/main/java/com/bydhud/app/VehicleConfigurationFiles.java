@@ -57,6 +57,7 @@ final class VehicleConfigurationFiles {
     private static final Pattern PROCESS_COMMAND = Pattern.compile("^ps -A -o pid,args$");
     private static final Pattern PROCESS_PACKAGE = Pattern.compile("\\b(com\\.[a-z0-9_.]+)");
     private static final String PETAL_PACKAGE = "com.huawei.maps.car.app";
+    static final String HMS_PACKAGE = "com.huawei.hwid";
     private static final Pattern FIND_COMMAND = Pattern.compile(
             "^find (/(?:system|vendor|product|odm|system_ext)(?:/(?:etc|lib|lib64|framework|bin|app|priv-app))?"
                     + "|/cluster)(?: (/(?:system|vendor|product|odm|system_ext)(?:/(?:etc|lib|lib64|framework|bin|app|priv-app))?"
@@ -82,7 +83,7 @@ final class VehicleConfigurationFiles {
             new LinkedHashSet<>(Arrays.asList(
                     "com.byd.naviauto", "com.ts.car.someip.service", "com.byd.someipsystemservice",
                     "com.example.amapservice", "com.byd.amapservice", "com.byd.containerservice",
-                    "com.byd.launchermap", "com.byd.carsettings.plugins", "com.huawei.maps.car.app")));
+                    "com.byd.launchermap", "com.byd.carsettings.plugins", PETAL_PACKAGE, HMS_PACKAGE)));
     private static final Set<String> METADATA_PACKAGES = Collections.unmodifiableSet(
             new LinkedHashSet<>(Arrays.asList(
                     "com.byd.carsetting", "com.byd.car.settings", "com.byd.carsettings",
@@ -227,11 +228,13 @@ final class VehicleConfigurationFiles {
     private static final class ProcessRecord {
         final String pid;
         final boolean petal;
+        final boolean hms;
         final Set<String> clusterPackages = new LinkedHashSet<>();
 
         ProcessRecord(String pid, String command) {
             this.pid = pid;
             this.petal = isPetalProcess(command);
+            this.hms = isPackageProcess(command, HMS_PACKAGE);
             Matcher packages = PROCESS_PACKAGE.matcher(command.toLowerCase(Locale.ROOT));
             while (packages.find()) {
                 String packageName = packages.group(1);
@@ -256,6 +259,7 @@ final class VehicleConfigurationFiles {
         final Map<String, Set<String>> metadata = new LinkedHashMap<>();
         final Set<String> mappedLibraries = new LinkedHashSet<>();
         final Set<String> packageDeclaredDependencyPaths = new LinkedHashSet<>();
+        final Set<String> hmsLocationModules = new LinkedHashSet<>();
         private final ProgressListener progress;
         long totalBytes;
         boolean partial;
@@ -360,9 +364,12 @@ final class VehicleConfigurationFiles {
             String canonical = canonicalPath(path, session, stop, inventory);
             if (canonical == null) continue;
             String category = sharedLibraryCategory(canonical);
+            boolean hmsModule = inventory.hmsLocationModules.contains(path);
+            String owner = hmsModule ? HMS_PACKAGE : PETAL_PACKAGE;
+            if (hmsModule) category = "hms-location-module";
             inventory.metadata("packageSharedLibraryOutcomes",
-                    PETAL_PACKAGE + " -> " + path + ": selected as " + category);
-            addCandidate(canonical, category, Collections.singleton(PETAL_PACKAGE + " sharedLibraryFiles"),
+                    owner + " -> " + path + ": selected as " + category);
+            addCandidate(canonical, category, Collections.singleton(owner + " sharedLibraryFiles"),
                     session, stop, inventory);
         }
 
@@ -377,6 +384,7 @@ final class VehicleConfigurationFiles {
             }
             expandDependencies(context, null, stop, inventory, localLibraries);
             inventory.unavailable("remote-inventory", "ADB export session unavailable; local filesystem inventory attempted");
+            inventory.unavailable("hms-location-active-module", "process maps unavailable without ADB export session");
             inventory.entries.sort(Comparator.comparing(entry -> entry.archivePath));
             return inventory;
         }
@@ -419,7 +427,7 @@ final class VehicleConfigurationFiles {
                 inventory.unavailable(command, "inventory command failed: " + safe(result.error));
             }
         }
-        discoverProcesses(session, stop, inventory, libraryIndex);
+        discoverProcesses(context, session, stop, inventory, libraryIndex);
         retainMappedAbi(inventory);
         expandDependencies(context, session, stop, inventory, libraryIndex);
         inventory.entries.sort(Comparator.comparing(entry -> entry.archivePath));
@@ -454,7 +462,8 @@ final class VehicleConfigurationFiles {
                     if (info == null || !relevantPackageInfo(info)) continue;
                     addPackagePaths(info, paths, aliases);
                 }
-                discoverPetalSharedLibraries(manager, sharedLibraryPaths, inventory);
+                discoverSharedLibraries(manager, PETAL_PACKAGE, sharedLibraryPaths, inventory);
+                discoverSharedLibraries(manager, HMS_PACKAGE, sharedLibraryPaths, inventory);
             } catch (RuntimeException error) {
                 inventory.unavailable("package-manager", error.getClass().getSimpleName());
             }
@@ -466,6 +475,11 @@ final class VehicleConfigurationFiles {
             LocalAdbBridge.ShellResult result;
             try {
                 result = run(session, "pm path " + packageName);
+            } catch (IOException error) {
+                checkCancelled(cancelled);
+                if (!HMS_PACKAGE.equals(packageName)) throw error;
+                inventory.unavailable("package:" + packageName, "pm path failed: " + safe(error.getMessage()));
+                continue;
             } catch (RuntimeException error) {
                 inventory.unavailable("package:" + packageName, error.getClass().getSimpleName());
                 continue;
@@ -478,6 +492,8 @@ final class VehicleConfigurationFiles {
                     "partial pm path output; retained paths may be incomplete");
             if (!result.success() && result.output.trim().isEmpty()) {
                 inventory.metadata("packageOutcomes", packageName + ": not installed or pm path unavailable");
+                if (HMS_PACKAGE.equals(packageName)) inventory.unavailable("package:" + packageName,
+                        "HMS APK paths unavailable: " + safe(result.error));
                 continue;
             }
             int discoveredPaths = 0;
@@ -497,43 +513,52 @@ final class VehicleConfigurationFiles {
             }
             if (result.success() && discoveredPaths == 0) {
                 inventory.metadata("packageOutcomes", packageName + ": not installed or no APK path");
+                if (HMS_PACKAGE.equals(packageName)) inventory.unavailable("package:" + packageName,
+                        "HMS not installed or no APK path returned");
             }
         }
     }
 
-    private static void discoverPetalSharedLibraries(PackageManager manager,
+    private static void discoverSharedLibraries(PackageManager manager, String packageName,
             Set<String> sharedLibraryPaths, Inventory inventory) {
         final PackageInfo petal;
         try {
-            petal = manager.getPackageInfo(PETAL_PACKAGE, PackageManager.GET_SHARED_LIBRARY_FILES);
+            petal = manager.getPackageInfo(packageName, PackageManager.GET_SHARED_LIBRARY_FILES);
         } catch (PackageManager.NameNotFoundException absent) {
-            inventory.metadata("packageSharedLibraryOutcomes", PETAL_PACKAGE + ": package not installed");
+            inventory.metadata("packageSharedLibraryOutcomes", packageName + ": package not installed");
+            if (HMS_PACKAGE.equals(packageName)) inventory.unavailable("package:" + packageName, "not installed (PackageManager)");
             return;
         } catch (RuntimeException unavailable) {
-            inventory.unavailable("package:" + PETAL_PACKAGE,
+            inventory.unavailable("package:" + packageName,
                     "shared library declarations unavailable: " + unavailable.getClass().getSimpleName());
             return;
         }
         if (petal == null || petal.applicationInfo == null) {
-            inventory.unavailable("package:" + PETAL_PACKAGE,
+            inventory.unavailable("package:" + packageName,
                     "shared library declarations unavailable: application info missing");
             return;
         }
         String[] declared = petal.applicationInfo.sharedLibraryFiles;
         if (declared == null || declared.length == 0) {
-            inventory.metadata("packageSharedLibraryOutcomes", PETAL_PACKAGE + ": no shared libraries declared");
+            inventory.metadata("packageSharedLibraryOutcomes", packageName + ": no shared libraries declared");
             return;
         }
         for (String path : declared) {
+            boolean hms = HMS_PACKAGE.equals(packageName);
+            if (hms && !isHmsLocationModulePath(path)) continue;
             if (!isAllowedPath(path) && !isPackageDeclaredDependencyPath(path)) {
                 // Do not echo a rejected private path into export metadata.
-                inventory.unavailable("package:" + PETAL_PACKAGE,
+                inventory.unavailable("package:" + packageName,
                         "shared library declaration rejected by export path policy");
                 continue;
             }
             inventory.packageDeclaredDependencyPaths.add(path);
             sharedLibraryPaths.add(path);
-            inventory.metadata("packageSharedLibraryFiles", PETAL_PACKAGE + " -> " + path);
+            inventory.metadata("packageSharedLibraryFiles", packageName + " -> " + path);
+            if (hms) {
+                inventory.hmsLocationModules.add(path);
+                recordHmsModuleVersion(manager, path, inventory);
+            }
         }
     }
 
@@ -563,7 +588,7 @@ final class VehicleConfigurationFiles {
         }
     }
 
-    private static void discoverProcesses(LocalAdbBridge.ConfigurationExportSession session,
+    private static void discoverProcesses(Context context, LocalAdbBridge.ConfigurationExportSession session,
             BooleanSupplier cancelled, Inventory inventory, Map<String, List<String>> libraryIndex)
             throws IOException {
         inventory.inspect("processes");
@@ -576,12 +601,14 @@ final class VehicleConfigurationFiles {
         });
         if (processes == null) {
             inventory.unavailable("processes", "process identity unavailable");
+            inventory.unavailable("hms-location-active-module", "process identity unavailable");
             return;
         }
         if (processes.truncated) inventory.unavailable("processes", "partial process identity output");
         if (!processes.success() && !processes.truncated) {
             inventory.unavailable("processes", "process identity command failed: " + safe(processes.error));
         }
+        Set<String> activeLocationModules = new LinkedHashSet<>();
         for (ProcessRecord selected : selectedProcesses) {
             checkCancelled(cancelled);
             String pid = selected.pid;
@@ -598,19 +625,35 @@ final class VehicleConfigurationFiles {
                 }
             }
             inventory.inspect("/proc/" + pid);
-            LocalAdbBridge.ShellResult exe = run(session, "readlink -f /proc/" + pid + "/exe");
-            if (exe == null || !exe.success()) {
-                inventory.unavailable("/proc/" + pid + "/exe",
-                        exe == null ? "executable path unavailable" : exe.truncated
-                                ? "executable path output truncated" : "executable path denied");
+            if (!selected.hms) {
+                LocalAdbBridge.ShellResult exe = run(session, "readlink -f /proc/" + pid + "/exe");
+                if (exe == null || !exe.success()) {
+                    inventory.unavailable("/proc/" + pid + "/exe",
+                            exe == null ? "executable path unavailable" : exe.truncated
+                                    ? "executable path output truncated" : "executable path denied");
+                }
+                addProcessPath(exe, "cluster", session, cancelled, inventory, libraryIndex);
             }
-            addProcessPath(exe, "cluster", session, cancelled, inventory, libraryIndex);
-            List<String> mappedPaths = new ArrayList<>();
-            LocalAdbBridge.ShellResult maps = runLines(session, "cat /proc/" + pid + "/maps", mapLine -> {
+            Set<String> mappedPaths = new LinkedHashSet<>();
+            LocalAdbBridge.ShellResult maps;
+            try {
+                maps = runLines(session, "cat /proc/" + pid + "/maps", mapLine -> {
                 checkCancelled(cancelled);
                 int slash = mapLine.indexOf('/');
                 if (slash < 0) return;
                 String path = mapLine.substring(slash).trim();
+                if ((selected.hms || petalProcess) && isHmsLocationModulePath(path.replace(" (deleted)", ""))) {
+                    activeLocationModules.add(path);
+                    if (path.endsWith(" (deleted)")) {
+                        inventory.unavailable("hms-location-active-module", "mapped code was deleted; cannot copy the active version");
+                    } else if (!isAllowedExportPath(path, inventory.packageDeclaredDependencyPaths)) {
+                        inventory.unavailable("hms-location-active-module", "mapped Location Kit code is outside approved export paths");
+                    } else {
+                        inventory.metadata("hmsActiveLocationModules", "pid=" + pid + " " + path);
+                        inventory.hmsLocationModules.add(path);
+                        mappedPaths.add(path);
+                    }
+                }
                 int space = path.indexOf(' ');
                 if (space >= 0) path = path.substring(0, space);
                 if (!isAllowedExportPath(path, inventory.packageDeclaredDependencyPaths)
@@ -624,7 +667,13 @@ final class VehicleConfigurationFiles {
                 }
                 if (isRelevantMappedLibraryPath(path, petalProcess,
                         inventory.packageDeclaredDependencyPaths)) mappedPaths.add(path);
-            });
+                });
+            } catch (IOException error) {
+                checkCancelled(cancelled);
+                if (!selected.hms) throw error;
+                inventory.unavailable("/proc/" + pid + "/maps", "HMS maps failed: " + safe(error.getMessage()));
+                continue;
+            }
             if (maps == null) {
                 inventory.unavailable("/proc/" + pid + "/maps",
                         "maps unavailable");
@@ -635,11 +684,38 @@ final class VehicleConfigurationFiles {
             }
             for (String path : mappedPaths) {
                 checkCancelled(cancelled);
+                boolean hmsModule = inventory.hmsLocationModules.contains(path);
+                if (hmsModule && context != null) recordHmsModuleVersion(context.getPackageManager(), path, inventory);
                 String canonical = canonicalPath(path, session, cancelled, inventory);
                 if (canonical != null) addCandidate(canonical,
-                        petalProcess ? "native-petal" : "native", null,
+                        hmsModule ? "hms-location-module" : petalProcess ? "native-petal" : "native", null,
                         session, cancelled, inventory);
             }
+        }
+        if (activeLocationModules.isEmpty()) inventory.unavailable("hms-location-active-module",
+                "no separate Location Kit code observed in HMS/Petal process maps; may be bundled, inactive or inaccessible");
+    }
+
+    static boolean isHmsLocationModulePath(String path) {
+        if (path == null) return false;
+        String lower = path.toLowerCase(Locale.ROOT);
+        return (lower.contains("location") || lower.contains("geofence") || lower.contains("flp"))
+                && (lower.endsWith(".apk") || lower.endsWith(".jar")
+                || lower.endsWith(".dex") || lower.endsWith(".so"));
+    }
+
+    private static void recordHmsModuleVersion(PackageManager manager, String path, Inventory inventory) {
+        if (!path.toLowerCase(Locale.ROOT).endsWith(".apk")) {
+            inventory.metadata("hmsLocationModuleVersions", path + ": no APK version metadata; exact mapped path retained");
+            return;
+        }
+        try {
+            PackageInfo module = manager.getPackageArchiveInfo(path, 0);
+            inventory.metadata("hmsLocationModuleVersions", path + (module == null
+                    ? ": APK version metadata unavailable" : ": package=" + module.packageName
+                    + " version=" + module.versionName + " versionCode=" + module.getLongVersionCode()));
+        } catch (RuntimeException unavailable) {
+            inventory.unavailable("hms-location-module-version", unavailable.getClass().getSimpleName());
         }
     }
 
@@ -1351,7 +1427,8 @@ final class VehicleConfigurationFiles {
             }
         }
         if (packageMentioned && !knownPackageMentioned) return false;
-        return petalProcess || lower.contains("cluster") || lower.contains("someip") || lower.contains("kanzi")
+        return petalProcess || isPackageProcess(command, HMS_PACKAGE)
+                || lower.contains("cluster") || lower.contains("someip") || lower.contains("kanzi")
                 || lower.contains("naviauto") || lower.contains("instrument")
                 || lower.contains("amapservice") || lower.contains("containerservice")
                 || lower.contains("launchermap") || lower.contains("adas")
@@ -1360,14 +1437,18 @@ final class VehicleConfigurationFiles {
     }
 
     private static boolean isPetalProcess(String command) {
+        return isPackageProcess(command, PETAL_PACKAGE);
+    }
+
+    private static boolean isPackageProcess(String command, String packageName) {
         String[] tokens = command == null ? new String[0]
                 : command.trim().toLowerCase(Locale.ROOT).split("\\s+", 3);
         int processIndex = tokens.length > 0 && tokens[0].matches("[0-9]{1,10}") ? 1 : 0;
         if (processIndex >= tokens.length) return false;
         String processName = tokens[processIndex];
-        return processName.equals(PETAL_PACKAGE)
-                || processName.startsWith(PETAL_PACKAGE + ":")
-                && processName.substring(PETAL_PACKAGE.length() + 1)
+        return processName.equals(packageName)
+                || processName.startsWith(packageName + ":")
+                && processName.substring(packageName.length() + 1)
                         .matches("[a-z0-9_.-]{1,128}");
     }
 

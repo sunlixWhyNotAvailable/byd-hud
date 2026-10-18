@@ -12,6 +12,34 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public final class VehicleConfigurationFilesTest {
+    @Test public void hmsCollectionKeepsExactPackageAndReadOnlyBoundaries() {
+        String install = "/data/app/~~install/com.huawei.hwid-randomized/";
+        assertTrue(VehicleConfigurationFiles.isAllowedPath(install + "base.apk"));
+        assertTrue(VehicleConfigurationFiles.isAllowedPath(install + "split_config.arm64_v8a.apk"));
+        assertTrue(VehicleConfigurationFiles.isAllowedCommand("pm path com.huawei.hwid"));
+        assertTrue(VehicleConfigurationReadback.isAllowedCommand("dumpsys package com.huawei.hwid"));
+        assertTrue(VehicleConfigurationReadback.isAllowedCommand("dumpsys activity services com.huawei.hwid"));
+        assertTrue(VehicleConfigurationFiles.relevantProcess("2401 com.huawei.hwid:location"));
+        assertFalse(VehicleConfigurationFiles.relevantProcess("2401 com.huawei.hwid.other"));
+        assertFalse(VehicleConfigurationFiles.relevantProcess("2401 sh -c com.huawei.hwid"));
+        assertFalse(VehicleConfigurationFiles.isAllowedPath(install + "../other/base.apk"));
+        assertFalse(VehicleConfigurationFiles.isAllowedPath("/data/user/0/com.huawei.hwid/files/location.db"));
+        assertFalse(VehicleConfigurationFiles.isAllowedCommand("pm path com.huawei.hwid; reboot"));
+        assertFalse(VehicleConfigurationReadback.isAllowedCommand("pm grant com.huawei.hwid android.permission.UPDATE_DEVICE_STATS"));
+    }
+
+    @Test public void locationModuleDiscoveryDoesNotAuthorizePrivateDataOrUnrelatedKits() {
+        String module = "/system/app/HMS/modules/com.huawei.hms.location-61500332.apk";
+        assertTrue(VehicleConfigurationFiles.isHmsLocationModulePath(module));
+        assertTrue(VehicleConfigurationFiles.isAllowedExportPath(module, Collections.emptySet()));
+        assertTrue(VehicleConfigurationFiles.isHmsLocationModulePath("/system/lib64/libflp.so"));
+        assertFalse(VehicleConfigurationFiles.isHmsLocationModulePath("/system/app/HMS/modules/hms-account.apk"));
+        assertFalse(VehicleConfigurationFiles.isHmsLocationModulePath("/data/user/0/com.huawei.hwid/files/location.db"));
+        String privateModule = "/data/user/0/com.huawei.hwid/app_modules/location.apk";
+        assertTrue(VehicleConfigurationFiles.isHmsLocationModulePath(privateModule));
+        assertFalse(VehicleConfigurationFiles.isAllowedExportPath(privateModule, Collections.singleton(privateModule)));
+    }
+
     @Test public void petalPackageIncludesRandomizedInstallApksAndPackageMetadataOnly() {
         String petal = "com.huawei.maps.car.app";
         assertTrue(VehicleConfigurationFiles.inventoryPackageName(petal));

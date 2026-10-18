@@ -350,6 +350,9 @@ final class VehicleConfigurationZip {
             adbAuthorized = true;
             addText("adb/identity.txt", "adb:id", identity.output, "");
 
+            collectCommand("adb/hms/package.txt", "dumpsys package com.huawei.hwid");
+            collectCommand("adb/hms/services.txt", "dumpsys activity services com.huawei.hwid");
+
             checkCancelled();
             try {
                 notice("adb/oem-readback.json");
@@ -928,6 +931,8 @@ final class VehicleConfigurationZip {
             JSONObject value = new JSONObject();
             try {
                 int flags = PackageManager.GET_SIGNING_CERTIFICATES;
+                boolean hms = VehicleConfigurationFiles.HMS_PACKAGE.equals(packageName);
+                if (hms) flags |= PackageManager.GET_PERMISSIONS | PackageManager.GET_SHARED_LIBRARY_FILES;
                 PackageInfo info = context.getPackageManager().getPackageInfo(packageName, flags);
                 value.put("installed", true);
                 value.put("versionName", info.versionName == null ? "" : info.versionName);
@@ -940,6 +945,33 @@ final class VehicleConfigurationZip {
                     signers.put(sha256(signature.toByteArray()));
                 }
                 value.put("signerSha256", signers);
+                if (hms) {
+                    if (info.applicationInfo != null) {
+                        value.put("applicationFlags", info.applicationInfo.flags);
+                        value.put("systemApp", (info.applicationInfo.flags
+                                & android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0);
+                        value.put("updatedSystemApp", (info.applicationInfo.flags
+                                & android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0);
+                        value.put("splitSourceDirs", new JSONArray(info.applicationInfo.splitSourceDirs == null
+                                ? new String[0] : info.applicationInfo.splitSourceDirs));
+                        value.put("sharedLibraryFiles", new JSONArray(info.applicationInfo.sharedLibraryFiles == null
+                                ? new String[0] : info.applicationInfo.sharedLibraryFiles));
+                    }
+                    JSONArray permissions = new JSONArray();
+                    if (info.requestedPermissions != null) {
+                        for (int index = 0; index < info.requestedPermissions.length; index++) {
+                            permissions.put(new JSONObject().put("name", info.requestedPermissions[index])
+                                    .put("granted", info.requestedPermissionsFlags != null
+                                            && index < info.requestedPermissionsFlags.length
+                                            && (info.requestedPermissionsFlags[index]
+                                            & PackageInfo.REQUESTED_PERMISSION_GRANTED) != 0));
+                        }
+                    }
+                    value.put("requestedPermissions", permissions);
+                    value.put("updateDeviceStatsGranted", context.getPackageManager().checkPermission(
+                            "android.permission.UPDATE_DEVICE_STATS", packageName) == PackageManager.PERMISSION_GRANTED);
+                    value.put("privilegedStatusAndComponents", "adb/hms/package.txt");
+                }
             } catch (PackageManager.NameNotFoundException e) {
                 value.put("installed", false);
             }
