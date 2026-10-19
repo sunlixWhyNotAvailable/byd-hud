@@ -7924,6 +7924,8 @@ private fun HudCheckTab(
                             ) { runAction { activity.composeHudCheckSetTransliterate(it) } }
                         })
                     Divider(palette)
+                    StreetTestFieldControls(state, activity, language, palette, enabled = !shanghaiBusy)
+                    Divider(palette)
                     HudCheckRow(copy.checkTrafficLight, copy.checkTrafficLightHint,
                         localizeHudCheckLabel(state.trafficLightLabel(ukrainian), language), palette,
                         onPrevious = { step(HudCheckState.Field.TRAFFIC_LIGHT, -1) },
@@ -8436,6 +8438,69 @@ private fun HudCheckRow(
         }
         Spacer(Modifier.width(20.dp))
         Box(Modifier.width(230.dp), contentAlignment = Alignment.CenterEnd) { option() }
+    }
+}
+
+@Composable
+private fun StreetTestFieldControls(
+    state: HudCheckState,
+    activity: MainActivity,
+    language: Language,
+    palette: Palette,
+    enabled: Boolean
+) {
+    val empty = language.choose("Порожнє значення у тесті", "Empty value in the test", "Пустое значение в тесте")
+    val unchanged = language.choose("Без перевизначення поточного значення", "Keep the current value", "Без переопределения текущего значения")
+    val stock = language.choose("як у штатному записі Шанхая", "as in the stock Shanghai recording", "как в штатной записи Шанхая")
+    Column(Modifier.fillMaxWidth().background(featureMaturityFill(palette))) {
+        SwitchRow(
+            title = language.choose("Координати призначення · f25", "Destination coordinates · f25", "Координаты назначения · f25"),
+            hint = if (state.streetTestDestination) "121.482646,31.235493" else empty,
+            checked = state.streetTestDestination,
+            palette = palette,
+            enabled = enabled,
+            verticalPadding = 12.dp,
+            onChecked = { activity.composeHudCheckSetStreetTestDestination(it) }
+        )
+        Divider(palette)
+        ActionRow(
+            language.choose("Час прибуття · f26", "Arrival time · f26", "Время прибытия · f26"),
+            language.choose("Завжди у тесті", "Always included in the test", "Всегда в тесте"),
+            palette,
+            verticalPadding = 6.dp
+        ) {
+            Text("14:51", color = palette.text, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
+        }
+        Divider(palette)
+        SwitchRow(
+            title = language.choose("Опорна точка маневру · f31", "Maneuver guide point · f31", "Опорная точка манёвра · f31"),
+            hint = if (state.streetTestGuidePoint) "121.47840472222222,31.228449722222223,0" else empty,
+            checked = state.streetTestGuidePoint,
+            palette = palette,
+            enabled = enabled,
+            verticalPadding = 12.dp,
+            onChecked = { activity.composeHudCheckSetStreetTestGuidePoint(it) }
+        )
+        Divider(palette)
+        SwitchRow(
+            title = language.choose("Стан мапи · f2", "Map state · f2", "Состояние карты · f2"),
+            hint = if (state.streetTestMapState) "2 · $stock" else unchanged,
+            checked = state.streetTestMapState,
+            palette = palette,
+            enabled = enabled,
+            verticalPadding = 12.dp,
+            onChecked = { activity.composeHudCheckSetStreetTestMapState(it) }
+        )
+        Divider(palette)
+        SwitchRow(
+            title = language.choose("Клас дороги · f6", "Road class · f6", "Класс дороги · f6"),
+            hint = if (state.streetTestRoadClass) "7 · $stock" else unchanged,
+            checked = state.streetTestRoadClass,
+            palette = palette,
+            enabled = enabled,
+            verticalPadding = 12.dp,
+            onChecked = { activity.composeHudCheckSetStreetTestRoadClass(it) }
+        )
     }
 }
 

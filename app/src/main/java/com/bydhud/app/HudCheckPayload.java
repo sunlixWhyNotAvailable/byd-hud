@@ -17,6 +17,10 @@ public final class HudCheckPayload {
     // shortcut: fixed step12 geometry for the private N9 diagnostic; not a real route.
     static final String DIAGNOSTIC_GUIDE_LINE =
             "[[121.4737,31.2304,0],[121.4740,31.2307,0]]";
+    static final String STREET_TEST_DESTINATION = "121.482646,31.235493";
+    static final String STREET_TEST_ARRIVAL_TIME = "14:51";
+    static final String STREET_TEST_GUIDE_POINT =
+            "121.47840472222222,31.228449722222223,0";
     private static final long ROAD_SERVICE_ID = 0x000B010A00010000L;
     private static final long TRAFFIC_INFO_SERVICE_ID = 0x000B000700070000L;
     private static final long MATRIX_SERVICE_ID = 0x000B820282020000L;
@@ -143,13 +147,24 @@ public final class HudCheckPayload {
         ByteArrayOutputStream overrides = new ByteArrayOutputStream();
         if (state.mode == HudCheckState.Mode.EXTENDED) {
             writeExtendedFields(overrides, state.extendedIndex);
+        } else {
+            if (state.streetTestDestination) {
+                writeStringField(overrides, 25, STREET_TEST_DESTINATION);
+            }
+            writeStringField(overrides, 26, STREET_TEST_ARRIVAL_TIME);
+            if (state.streetTestGuidePoint) {
+                writeStringField(overrides, 31, STREET_TEST_GUIDE_POINT);
+            }
+            if (state.streetTestRoadClass) writeVarintField(overrides, 6, 7);
         }
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepareHudCheck(frame, options,
                 state.format, state.liveNativeManeuver(), state.effectiveLaneCodes(),
                 state.effectiveManeuverBitmap() || clearManeuver, true);
         String geometry = geometryDiagnostics(frame, state);
-        return prepared.withHudCheckBaseline(
+        DirectTbtPayload.Prepared withBaseline = prepared.withHudCheckBaseline(
                 baseline.toByteArray(), overrides.toByteArray(), geometry);
+        return state.mode == HudCheckState.Mode.BASIC && state.streetTestMapState
+                ? withBaseline.withFixedCounter(2) : withBaseline;
     }
 
     private static String geometryDiagnostics(DirectTbtFrame frame, HudCheckState state) {

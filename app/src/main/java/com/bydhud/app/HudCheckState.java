@@ -113,13 +113,17 @@ public final class HudCheckState {
     public final boolean maneuverBitmap;
     public final boolean laneBitmap;
     public final boolean transliterate;
+    public final boolean streetTestDestination;
+    public final boolean streetTestGuidePoint;
+    public final boolean streetTestMapState;
+    public final boolean streetTestRoadClass;
     public final int extendedIndex;
     public final Format format;
     public final CodeTable codeTable;
 
     public HudCheckState() {
         this(Mode.BASIC, false, true, 0, 0, 0, 0, 0, false, false, false, 0,
-                Format.NO_PNG, CodeTable.BYD);
+                Format.NO_PNG, CodeTable.BYD, false, false, false, false);
     }
 
     private HudCheckState(Mode mode, boolean running, boolean automatic,
@@ -127,7 +131,9 @@ public final class HudCheckState {
                           int streetIndex, int trafficLightIndex,
                           boolean maneuverBitmap, boolean laneBitmap,
                           boolean transliterate, int extendedIndex, Format format,
-                          CodeTable codeTable) {
+                          CodeTable codeTable, boolean streetTestDestination,
+                          boolean streetTestGuidePoint, boolean streetTestMapState,
+                          boolean streetTestRoadClass) {
         this.mode = mode == null ? Mode.BASIC : mode;
         this.running = running;
         this.automatic = automatic;
@@ -139,6 +145,10 @@ public final class HudCheckState {
         this.maneuverBitmap = maneuverBitmap;
         this.laneBitmap = laneBitmap;
         this.transliterate = transliterate;
+        this.streetTestDestination = streetTestDestination;
+        this.streetTestGuidePoint = streetTestGuidePoint;
+        this.streetTestMapState = streetTestMapState;
+        this.streetTestRoadClass = streetTestRoadClass;
         this.extendedIndex = wrap(extendedIndex, extendedCount());
         this.format = format == null ? Format.NO_PNG : format;
         this.codeTable = codeTable == null ? CodeTable.BYD : codeTable;
@@ -150,7 +160,9 @@ public final class HudCheckState {
                 ? this
                 : new HudCheckState(selected, running && selected != Mode.SHANGHAI, automatic, maneuverIndex, laneIndex,
                         distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
-                        laneBitmap, transliterate, extendedIndex, format, codeTable);
+                        laneBitmap, transliterate, extendedIndex, format, codeTable,
+                        streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                        streetTestRoadClass);
     }
 
     public HudCheckState selectBasicFormat(Format value) {
@@ -158,7 +170,9 @@ public final class HudCheckState {
         if (mode != Mode.BASIC || format == selected) return this;
         return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
-                laneBitmap, transliterate, extendedIndex, selected, codeTable);
+                laneBitmap, transliterate, extendedIndex, selected, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass);
     }
 
     public HudCheckState selectCodeTable(CodeTable value) {
@@ -166,7 +180,9 @@ public final class HudCheckState {
         if (mode != Mode.BASIC || codeTable == selected) return this;
         return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
-                laneBitmap, transliterate, extendedIndex, format, selected);
+                laneBitmap, transliterate, extendedIndex, format, selected,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass);
     }
 
     public CodeTable effectiveCodeTable() {
@@ -199,6 +215,10 @@ public final class HudCheckState {
                 .put("distance", distanceIndex).put("street", streetIndex).put("light", trafficLightIndex)
                 .put("maneuverBitmap", maneuverBitmap).put("laneBitmap", laneBitmap)
                 .put("transliterate", transliterate).put("extended", extendedIndex)
+                .put("streetTestDestination", streetTestDestination)
+                .put("streetTestGuidePoint", streetTestGuidePoint)
+                .put("streetTestMapState", streetTestMapState)
+                .put("streetTestRoadClass", streetTestRoadClass)
                 .put("format", format.name()).put("codeTable", codeTable.name())
                 .put("extendedCount", extendedCount());
     }
@@ -226,20 +246,24 @@ public final class HudCheckState {
                 state.optInt("maneuver"), state.optInt("lane"), state.optInt("distance"),
                 state.optInt("street"), state.optInt("light"), state.optBoolean("maneuverBitmap"),
                 state.optBoolean("laneBitmap"), state.optBoolean("transliterate"), extended,
-                format, codeTable);
+                format, codeTable, state.optBoolean("streetTestDestination"),
+                state.optBoolean("streetTestGuidePoint"), state.optBoolean("streetTestMapState"),
+                state.optBoolean("streetTestRoadClass"));
     }
 
     public HudCheckState toggleRun() {
         if (mode == Mode.SHANGHAI) return this;
         return new HudCheckState(mode, !running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap,
-                transliterate, extendedIndex, format, codeTable);
+                transliterate, extendedIndex, format, codeTable, streetTestDestination,
+                streetTestGuidePoint, streetTestMapState, streetTestRoadClass);
     }
 
     public HudCheckState stop() {
         return running ? new HudCheckState(mode, false, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap,
-                transliterate, extendedIndex, format, codeTable) : this;
+                transliterate, extendedIndex, format, codeTable, streetTestDestination,
+                streetTestGuidePoint, streetTestMapState, streetTestRoadClass) : this;
     }
 
     public HudCheckState step(Field field, int delta) {
@@ -280,27 +304,63 @@ public final class HudCheckState {
     public HudCheckState withAutomatic(boolean value) {
         return automatic == value ? this : new HudCheckState(mode, running, value,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable);
+                maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass);
     }
 
     public HudCheckState withManeuverBitmap(boolean value) {
         return format != Format.NO_PNG || maneuverBitmap == value ? this
                 : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                value, laneBitmap, transliterate, extendedIndex, format, codeTable);
+                value, laneBitmap, transliterate, extendedIndex, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass);
     }
 
     public HudCheckState withLaneBitmap(boolean value) {
         return format != Format.NO_PNG || laneBitmap == value ? this
                 : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                maneuverBitmap, value, transliterate, extendedIndex, format, codeTable);
+                maneuverBitmap, value, transliterate, extendedIndex, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass);
     }
 
     public HudCheckState withTransliterate(boolean value) {
         return transliterate == value ? this : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
-                maneuverBitmap, laneBitmap, value, extendedIndex, format, codeTable);
+                maneuverBitmap, laneBitmap, value, extendedIndex, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass);
+    }
+
+    public HudCheckState withStreetTestDestination(boolean value) {
+        return streetTestDestination == value ? this : new HudCheckState(mode, running, automatic,
+                maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
+                maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
+                value, streetTestGuidePoint, streetTestMapState, streetTestRoadClass);
+    }
+
+    public HudCheckState withStreetTestGuidePoint(boolean value) {
+        return streetTestGuidePoint == value ? this : new HudCheckState(mode, running, automatic,
+                maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
+                maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
+                streetTestDestination, value, streetTestMapState, streetTestRoadClass);
+    }
+
+    public HudCheckState withStreetTestMapState(boolean value) {
+        return streetTestMapState == value ? this : new HudCheckState(mode, running, automatic,
+                maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
+                maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, value, streetTestRoadClass);
+    }
+
+    public HudCheckState withStreetTestRoadClass(boolean value) {
+        return streetTestRoadClass == value ? this : new HudCheckState(mode, running, automatic,
+                maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
+                maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState, value);
     }
 
     public String maneuverLabel(boolean ukrainian) {
@@ -476,7 +536,8 @@ public final class HudCheckState {
     private HudCheckState replace(int maneuver, int lanes, int distance, int street,
                                   int trafficLight, int extended) {
         return new HudCheckState(mode, running, automatic, maneuver, lanes, distance, street,
-                trafficLight, maneuverBitmap, laneBitmap, transliterate, extended, format, codeTable);
+                trafficLight, maneuverBitmap, laneBitmap, transliterate, extended, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState, streetTestRoadClass);
     }
 
     private int nextLaneIndex(int current, int delta) {
@@ -555,6 +616,10 @@ public final class HudCheckState {
                 && trafficLightIndex == that.trafficLightIndex
                 && maneuverBitmap == that.maneuverBitmap && laneBitmap == that.laneBitmap
                 && transliterate == that.transliterate && extendedIndex == that.extendedIndex
+                && streetTestDestination == that.streetTestDestination
+                && streetTestGuidePoint == that.streetTestGuidePoint
+                && streetTestMapState == that.streetTestMapState
+                && streetTestRoadClass == that.streetTestRoadClass
                 && mode == that.mode && format == that.format && codeTable == that.codeTable;
     }
 
@@ -562,7 +627,8 @@ public final class HudCheckState {
     public int hashCode() {
         return Objects.hash(mode, running, automatic, maneuverIndex, laneIndex, distanceIndex,
                 streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap, transliterate,
-                extendedIndex, format, codeTable);
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass, extendedIndex, format, codeTable);
     }
 
     private static class Label {

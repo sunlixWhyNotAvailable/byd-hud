@@ -61,6 +61,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.UnaryOperator;
 
 //anchors MainActivity UI orchestration so controls and diagnostics are wired from one place.
 public final class MainActivity extends ComponentActivity {
@@ -2799,6 +2800,37 @@ public final class MainActivity extends ComponentActivity {
     public void composeHudCheckSetTransliterate(boolean transliterate) {
         NavHudLiveSender.get(this).updateHudCheck(
                 current -> current.withTransliterate(transliterate), "hud-check-transliteration");
+    }
+
+    public void composeHudCheckSetStreetTestDestination(boolean enabled) {
+        updateHudCheckStreetTestField(
+                current -> current.withStreetTestDestination(enabled), "hud-check-street-destination");
+    }
+
+    public void composeHudCheckSetStreetTestGuidePoint(boolean enabled) {
+        updateHudCheckStreetTestField(
+                current -> current.withStreetTestGuidePoint(enabled), "hud-check-street-guide-point");
+    }
+
+    public void composeHudCheckSetStreetTestMapState(boolean enabled) {
+        updateHudCheckStreetTestField(
+                current -> current.withStreetTestMapState(enabled), "hud-check-street-map-state");
+    }
+
+    public void composeHudCheckSetStreetTestRoadClass(boolean enabled) {
+        updateHudCheckStreetTestField(
+                current -> current.withStreetTestRoadClass(enabled), "hud-check-street-road-class");
+    }
+
+    private void updateHudCheckStreetTestField(UnaryOperator<HudCheckState> update, String reason) {
+        if (!activityResumed || destroyed || exitRequested || RESUMED_ACTIVITY.get() != this
+                || ShanghaiTestController.snapshot().isBusy()) return;
+        NavHudLiveSender.get(this).updateHudCheck(current -> {
+            if (!activityResumed || destroyed || exitRequested || RESUMED_ACTIVITY.get() != this
+                    || ShanghaiTestController.snapshot().isBusy()
+                    || current.mode != HudCheckState.Mode.BASIC) return current;
+            return update.apply(current);
+        }, reason);
     }
 
     public void composeHudCheckStepExtended(int delta) {

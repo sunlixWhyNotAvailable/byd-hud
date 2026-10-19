@@ -53,6 +53,22 @@ final class HudCheckDiagnostics {
             if (sample.mode == HudCheckState.Mode.EXTENDED) {
                 line += " stage_fields=" + token(sample.extendedField())
                         + " stage_value=" + token(sample.extendedValue());
+            } else {
+                String f6 = sample.streetTestRoadClass ? "7"
+                        : sample.format == HudCheckState.Format.D ? "omitted"
+                        : HudLaneModel.parse(sample.toHudState()).length == 0 ? "1" : "6";
+                String offOptionalField = sample.format == HudCheckState.Format.D ? "omitted" : "empty";
+                line += " street_test_destination=" + (sample.streetTestDestination ? "on" : "off")
+                        + " street_test_guide_point=" + (sample.streetTestGuidePoint ? "on" : "off")
+                        + " street_test_map_state=" + (sample.streetTestMapState ? "on" : "off")
+                        + " street_test_road_class=" + (sample.streetTestRoadClass ? "on" : "off")
+                        + " f2=" + (sample.streetTestMapState || sample.format == HudCheckState.Format.D ? 2 : 0)
+                        + " f6=" + f6
+                        + " f25=" + (sample.streetTestDestination
+                                ? HudCheckPayload.STREET_TEST_DESTINATION : offOptionalField)
+                        + " f26=" + HudCheckPayload.STREET_TEST_ARRIVAL_TIME
+                        + " f31=" + (sample.streetTestGuidePoint
+                                ? HudCheckPayload.STREET_TEST_GUIDE_POINT : offOptionalField);
             }
             if (frame.getRoundaboutExit().hasDirection()) {
                 line += " " + frame.getRoundaboutExit().diagnostics();
@@ -74,7 +90,10 @@ final class HudCheckDiagnostics {
                 + sample.maneuverIndex + "-l" + sample.laneIndex
                 + "-d" + sample.distanceIndex + "-s" + sample.streetIndex
                 + "-t" + sample.trafficLightIndex + "-mb" + sample.effectiveManeuverBitmap()
-                + "-lb" + sample.effectiveLaneBitmap() + "-tr" + sample.transliterate;
+                + "-lb" + sample.effectiveLaneBitmap() + "-tr" + sample.transliterate
+                + (sample.mode == HudCheckState.Mode.BASIC
+                ? "-st" + sample.streetTestDestination + sample.streetTestGuidePoint
+                        + sample.streetTestMapState + sample.streetTestRoadClass : "");
     }
 
     private static String token(String value) {

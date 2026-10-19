@@ -426,6 +426,81 @@ public class NativeRoadInfoTest {
         }
     }
 
+    @Test public void streetTestChoicesSurviveStateChangesAndCheckpointMigration() throws Exception {
+        HudCheckState original = new HudCheckState();
+        assertFalse(original.streetTestDestination || original.streetTestGuidePoint
+                || original.streetTestMapState || original.streetTestRoadClass);
+        HudCheckState selected = original.withStreetTestDestination(true).withStreetTestGuidePoint(true)
+                .withStreetTestMapState(true).withStreetTestRoadClass(true);
+        HudCheckState edited = selected.withAutomatic(false).withManeuverBitmap(true)
+                .withLaneBitmap(true).withTransliterate(true).step(HudCheckState.Field.STREET, 1)
+                .selectCodeTable(HudCheckState.CodeTable.HUAWEI).toggleRun();
+        for (HudCheckState.Format format : HudCheckState.Format.values()) {
+            HudCheckState state = edited.selectBasicFormat(format);
+            assertTrue(state.streetTestDestination && state.streetTestGuidePoint
+                    && state.streetTestMapState && state.streetTestRoadClass);
+            assertEquals(state, state.stop().toggleRun());
+            assertEquals(state, state.selectMode(HudCheckState.Mode.EXTENDED).stepExtended(1)
+                    .stepExtended(-1).selectMode(HudCheckState.Mode.BASIC));
+            assertEquals(state.stop(), state.selectMode(HudCheckState.Mode.SHANGHAI)
+                    .selectMode(HudCheckState.Mode.BASIC));
+            assertEquals(state, HudCheckState.restore(state.checkpoint()));
+        }
+        org.json.JSONObject oldCheckpoint = selected.checkpoint();
+        for (String key : new String[]{"streetTestDestination", "streetTestGuidePoint",
+                "streetTestMapState", "streetTestRoadClass"}) oldCheckpoint.remove(key);
+        assertEquals(original, HudCheckState.restore(oldCheckpoint));
+        assertEquals(original, selected.withStreetTestDestination(false).withStreetTestGuidePoint(false)
+                .withStreetTestMapState(false).withStreetTestRoadClass(false));
+    }
+
+    @Test public void streetTestChoicesReachWireAndRestoreEachSelectedFormat() {
+        byte[] empty = new byte[0];
+        for (HudCheckState.Format format : HudCheckState.Format.values()) {
+            HudCheckState original = new HudCheckState().selectBasicFormat(format).toggleRun();
+            Map<Integer, Object> baseline = road(HudCheckPayload.prepareLive(original, empty, empty).build(0));
+            assertEquals("14:51", text(baseline, 26));
+            HudCheckDiagnostics diagnostics = new HudCheckDiagnostics();
+            for (int mask : new int[]{0, 1, 2, 4, 8, 15}) {
+                HudCheckState selected = original.withStreetTestDestination((mask & 1) != 0)
+                        .withStreetTestGuidePoint((mask & 2) != 0)
+                        .withStreetTestMapState((mask & 4) != 0)
+                        .withStreetTestRoadClass((mask & 8) != 0);
+                Map<Integer, Object> expected = new HashMap<>(baseline);
+                if ((mask & 1) != 0) expected.put(25, "121.482646,31.235493".getBytes(StandardCharsets.UTF_8));
+                if ((mask & 2) != 0) expected.put(31, "121.47840472222222,31.228449722222223,0".getBytes(StandardCharsets.UTF_8));
+                if ((mask & 4) != 0) expected.put(2, 2L);
+                if ((mask & 8) != 0) expected.put(6, 7L);
+                DirectTbtPayload.Prepared prepared = HudCheckPayload.prepareLive(selected, empty, empty);
+                assertFieldsEqual(expected, road(prepared.build(0)));
+                if (selected.streetTestMapState) assertEquals(2L, road(prepared.build(37)).get(2));
+                assertEquals(mask == 0, HudOutputCoordinator.sameHudCheckPayload(original, selected));
+                HudCheckState reset = selected.withStreetTestDestination(false).withStreetTestGuidePoint(false)
+                        .withStreetTestMapState(false).withStreetTestRoadClass(false);
+                assertFieldsEqual(baseline, road(HudCheckPayload.prepareLive(reset, empty, empty).build(0)));
+                assertTrue(HudOutputCoordinator.sameHudCheckPayload(original, reset));
+
+                // Checks formatter/dedup output only, without simulating transport delivery.
+                String summary = diagnostics.changed(selected, "roadinfo", 0, "selection");
+                assertNotNull(summary);
+                assertTrue(summary.contains(" f2=" + expected.get(2)));
+                assertTrue(summary.contains(" f6=" + (expected.containsKey(6) ? expected.get(6) : "omitted")));
+                assertTrue(summary.contains(" f26=14:51"));
+                for (int field : new int[]{25, 31}) {
+                    String value = expected.containsKey(field) ? text(expected, field) : "omitted";
+                    assertTrue(summary.contains(" f" + field + "=" + (value.isEmpty() ? "empty" : value)));
+                }
+                assertNull(diagnostics.changed(selected, "roadinfo", 0, "selection"));
+                HudCheckState extended = selected.selectMode(HudCheckState.Mode.EXTENDED);
+                HudCheckState extendedOriginal = original.selectMode(HudCheckState.Mode.EXTENDED);
+                assertArrayEquals(HudCheckPayload.prepareLive(extendedOriginal, empty, empty).build(0),
+                        HudCheckPayload.prepareLive(extended, empty, empty).build(0));
+                assertTrue(HudOutputCoordinator.sameHudCheckPayload(extendedOriginal, extended));
+                assertEquals(HudCheckDiagnostics.sampleKey(extendedOriginal), HudCheckDiagnostics.sampleKey(extended));
+            }
+        }
+    }
+
     @Test public void diagnosticFormatsEncodeOnlyTheirDeclaredFieldDifferences() {
         // Real encoders consume image bytes; Android rasterization is outside this check.
         byte[] image = java.util.Base64.getDecoder().decode(
@@ -467,7 +542,7 @@ public class NativeRoadInfoTest {
             assertEquals(12345L, alternate.get(3));
             assertEquals(1200L, alternate.get(4));
             assertEquals(60L, alternate.get(11));
-            assertEquals("12 км", text(alternate, 26));
+            assertEquals("14:51", text(alternate, 26));
             assertEquals("20 мин", text(alternate, 27));
             assertEquals(nativeFields.get(9), alternate.get(9));
             assertEquals(nativeFields.get(28), alternate.get(28));
@@ -558,6 +633,8 @@ public class NativeRoadInfoTest {
                     byte[] lanes = laneBitmap ? image : new byte[0];
                     byte[] maneuver = bitmap ? image : new byte[0];
                     Map<Integer, Object> baseline = road(HudCheckPayload.prepareLive(basic, lanes, maneuver).build(0));
+                    // The mandatory arrival-time sample belongs only to Basic.
+                    baseline.put(26, (format == HudCheckState.Format.D ? "12 км" : "").getBytes(StandardCharsets.UTF_8));
                     HudCheckState extended = basic.selectMode(HudCheckState.Mode.EXTENDED);
                     for (int index = 0; index < HudCheckState.extendedCount(); index++) {
                         HudCheckState sample = extended.stepExtended(index);
@@ -613,7 +690,9 @@ public class NativeRoadInfoTest {
 
     @Test public void comparisonTransitionsClearPreviousEncodingWithoutChangingTargetPackets() {
         HudCheckState bitmap = new HudCheckState()
-                .withAutomatic(false).withManeuverBitmap(true);
+                .withAutomatic(false).withManeuverBitmap(true)
+                .withStreetTestDestination(true).withStreetTestGuidePoint(true)
+                .withStreetTestMapState(true).withStreetTestRoadClass(true);
         HudCheckState nativeState = bitmap.withManeuverBitmap(false);
         assertFalse(HudCheckPayload.needsManeuverClear(null, nativeState));
         assertTrue(HudCheckPayload.needsManeuverClear(bitmap, nativeState));
@@ -648,6 +727,10 @@ public class NativeRoadInfoTest {
                 if (from == to) continue;
                 Map<Integer, Object> reset = road(HudCheckPayload.buildComparisonClear(previous, blank));
                 assertEquals(1L, reset.get(16));
+                assertFalse(reset.containsKey(25));
+                assertFalse(reset.containsKey(26));
+                assertEquals("", text(reset, 31));
+                assertEquals(255L, reset.get(6));
                 assertArrayEquals(new byte[0], (byte[]) reset.get(7));
                 if (from == HudCheckState.Format.NO_PNG) assertArrayEquals(blank, (byte[]) reset.get(8));
                 else if (from == HudCheckState.Format.B || from == HudCheckState.Format.C) {
@@ -798,6 +881,7 @@ public class NativeRoadInfoTest {
         while (cursor[0] < bytes.length) {
             long tag = varint(bytes, cursor);
             int field = (int) (tag >>> 3);
+            assertFalse("Conflicting map-state fields", field == 2 && result.containsKey(2));
             if ((tag & 7) == 0) result.put(field, varint(bytes, cursor));
             else if ((tag & 7) == 1) {
                 assertTrue(cursor[0] + 8 <= bytes.length);

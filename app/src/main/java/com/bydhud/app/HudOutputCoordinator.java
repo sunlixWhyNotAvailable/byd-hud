@@ -1741,7 +1741,12 @@ final class HudOutputCoordinator {
                 && first.streetIndex == second.streetIndex
                 && first.maneuverBitmap == second.maneuverBitmap
                 && first.laneBitmap == second.laneBitmap
-                && first.transliterate == second.transliterate;
+                && first.transliterate == second.transliterate
+                && (first.mode != HudCheckState.Mode.BASIC
+                || (first.streetTestDestination == second.streetTestDestination
+                        && first.streetTestGuidePoint == second.streetTestGuidePoint
+                        && first.streetTestMapState == second.streetTestMapState
+                        && first.streetTestRoadClass == second.streetTestRoadClass));
     }
 
     private void publishHudCheckAuxiliary(String reason) {

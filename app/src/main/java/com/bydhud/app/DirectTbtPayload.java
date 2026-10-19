@@ -780,6 +780,14 @@ public final class DirectTbtPayload {
 
         boolean spatialReset() { return geometry.spatialReset; }
 
+        Prepared withFixedCounter(int value) {
+            return fixedCounter == value ? this : new Prepared(fields, maneuverMode,
+                    nativeManeuver, distanceMeters, displayText, laneCount, lanePngBytes,
+                    maneuverPngBytes, maneuverPngSha, maneuverPngWidth, maneuverPngHeight,
+                    displayTextStart, displayTextEnd, hasStreetEta, etaDiagnostics, geometry,
+                    geometryDiagnostics, value);
+        }
+
         /** Reset old probes, preserve Basic output, then apply only the selected stage fields. */
         Prepared withHudCheckBaseline(byte[] baseline, byte[] overrides) {
             return withHudCheckBaseline(baseline, overrides, null);
