@@ -769,7 +769,6 @@ public final class WazeDirectChannel {
             return;
         }
         Template template = ((TemplateWrapper) value).getTemplate();
-        if (mode == Mode.MAIN_SURFACE) WazeSurfaceActivity.showTemplate(template);
         if (!(template instanceof NavigationTemplate)) {
             log("template=" + typeName(template));
             return;
@@ -2188,19 +2187,6 @@ public final class WazeDirectChannel {
                     callback -> callback.onScale(focusX, focusY, scaleFactor));
         }
 
-        @Override
-        public void onBackPressedByHost() {
-            runOnChannel(() -> {
-                if (appManager == null) return;
-                try {
-                    appManager.onBackPressed(new DoneCallback(
-                            expectedGeneration, "onBackPressed", null));
-                } catch (Throwable error) {
-                    log("surface back failed: " + error);
-                }
-            });
-        }
-
         private void deliverSurfaceIfReady() {
             ISurfaceCallback surfaceCallbackValue = surfaceCallback;
             Surface value = surface;
@@ -2308,7 +2294,6 @@ public final class WazeDirectChannel {
                     Object value = bundle == null ? null : bundle.get();
                     if (value instanceof Alert) {
                         Alert alert = (Alert) value;
-                        if (mode == Mode.MAIN_SURFACE) WazeSurfaceActivity.showAlert(alert);
                         if (wazeAlertsEnabled) WazeDirectChannel.this.showAlert(alert);
                     }
                     else log("invalid alert=" + typeName(value));
@@ -2321,7 +2306,6 @@ public final class WazeDirectChannel {
         @Override
         public void dismissAlert(int alertId) {
             postBinder(expectedGeneration, () -> {
-                if (mode == Mode.MAIN_SURFACE) WazeSurfaceActivity.dismissAlert(alertId);
                 WazeDirectChannel.this.dismissAlert(alertId);
             });
         }

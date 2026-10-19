@@ -249,6 +249,20 @@ public final class ClusterProjectionService extends Service
         return service != null && service.hasCurrentProjection(packageName);
     }
 
+    // Called on main only after the independently owned Surface Activity has finished.
+    static String finishSurfaceProjection(String packageName) {
+        ClusterProjectionService service = instance;
+        if (service == null) return "";
+        int generation;
+        long ownerToken;
+        synchronized (service.lock) {
+            if (!service.projectionRequested || !packageName.equals(service.projectedPackage)) return "";
+            generation = service.projectionGeneration;
+            ownerToken = service.projectionOwnerToken;
+        }
+        return service.retainProjectionIdle(packageName, generation, ownerToken, "surface-finished");
+    }
+
     //Captures an app-owned projection generation for widget work; service recreation yields a new token.
     static long projectedGenerationTokenForWidget(String packageName) {
         ClusterProjectionService service = instance;

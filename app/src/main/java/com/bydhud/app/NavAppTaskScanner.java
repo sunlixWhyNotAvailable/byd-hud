@@ -46,6 +46,9 @@ final class NavAppTaskScanner {
             "(?m)^\\s*packageName=([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)+)(?=\\s|$)");
     private static final Pattern TASK_OWNER_PATTERN = Pattern.compile(
             "\\s(?:A=(?:[0-9]+:)?|I=)([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)+)(?=[/\\s}]|$)");
+    private static final Pattern WAZE_SURFACE_COMPONENT = Pattern.compile(
+            "(?m)^\\s*(?:realActivity=|mActivityComponent=|\\*\\s*Hist #\\d+: ActivityRecord\\{[^\\r\\n]*?\\s)"
+                    + "com\\.bydhud\\.app/(?:com\\.bydhud\\.app\\.|\\.)WazeSurfaceActivity(?=[\\s}]|$)");
     private static final String BOUNDS_RECT =
             "mBounds=Rect\\((-?\\d+),\\s*(-?\\d+) - (-?\\d+),\\s*(-?\\d+)\\)";
     private static final Pattern TASK_BOUNDS_PATTERN = Pattern.compile("(?m)^[\\t ]*" + BOUNDS_RECT);
@@ -344,6 +347,14 @@ final class NavAppTaskScanner {
             if (matcher.find()) packages.add(matcher.group(1));
         }
         return packages;
+    }
+
+    static boolean matchesTransferTarget(String logicalPackage, boolean surfaceTarget, String block) {
+        if (surfaceTarget) {
+            return "com.waze".equals(logicalPackage) && block != null
+                    && WAZE_SURFACE_COMPONENT.matcher(block).find();
+        }
+        return taskPackages(block).contains(logicalPackage);
     }
 
     static String[] activityTaskLines(String dumpsys) {

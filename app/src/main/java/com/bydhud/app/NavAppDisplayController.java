@@ -34,6 +34,9 @@ final class NavAppDisplayController {
     private static final String PREFS = "bydhud_dashboard_projection";
     private static final String KEY_ACTIVE_PACKAGE = "active_package";
     private static final String KEY_ACTIVE_MODE = "active_mode";
+    private static final String KEY_TARGET_KIND = "target_kind";
+    private static final String TARGET_SURFACE = "waze_surface";
+    private static final String TARGET_NAVIGATOR = "navigator";
     private static final String KEY_ACTIVE_REASON = "active_reason";
     private static final String KEY_ACTIVE_UPDATED_MS = "active_updated_ms";
     private static final String KEY_PROJECTION_GENERATION = "projection_generation";
@@ -253,6 +256,30 @@ final class NavAppDisplayController {
         return normalizePackage(dashboardPrefs().getString(KEY_ACTIVE_PACKAGE, ""));
     }
 
+    boolean usesSurfaceTarget(String packageName) {
+        if (!"com.waze".equals(normalizePackage(packageName))) return false;
+        return WazeSurfaceActivity.isActive()
+                || NavHudLiveSender.usesWazeSurfaceTransfer(context)
+                || ("com.waze".equals(persistedDashboardPackage())
+                    && TARGET_SURFACE.equals(dashboardPrefs().getString(KEY_TARGET_KIND, "")));
+    }
+
+    private String targetKind(String packageName) {
+        return usesSurfaceTarget(packageName) ? TARGET_SURFACE : TARGET_NAVIGATOR;
+    }
+
+    void onSurfaceTaskFinished(int taskId) {
+        if (WazeSurfaceActivity.isActive() || !"com.waze".equals(persistedDashboardPackage())
+                || !TARGET_SURFACE.equals(dashboardPrefs().getString(KEY_TARGET_KIND, ""))) return;
+        NavAppDisplayState previous = lastState("com.waze");
+        if (previous.taskId >= 0 && previous.taskId != taskId) return;
+        long generation = projectionGenerationForPackage("com.waze");
+        String failure = ClusterProjectionService.finishSurfaceProjection("com.waze");
+        clearReturnedProjectionIntent("com.waze", generation, "surface-finished");
+        remember(new NavAppDisplayState("com.waze", -1, NavAppDisplayState.DISPLAY_UNKNOWN,
+                false, failure.isEmpty() ? "Surface closed" : "Surface closed; " + failure));
+    }
+
     //persists the exact mode paired with the dashboard package for sticky recovery.
     int persistedDashboardMode() {
         return HudPrefs.normalizeDashboardScreenMode(dashboardPrefs().getInt(
@@ -318,21 +345,36 @@ final class NavAppDisplayController {
                         false,
                         "check failed: " + result.shortDetail()));
             }
-            NavAppDisplayState parsed = parseTask(normalized, result.output);
+            boolean surfaceTarget = usesSurfaceTarget(normalized);
+            NavAppDisplayState parsed = parseTask(normalized, result.output, surfaceTarget);
+            if (surfaceTarget && WazeSurfaceActivity.activeTaskId() >= 0) {
+                parsed = parseTaskId(normalized, WazeSurfaceActivity.activeTaskId(),
+                        result.output, true);
+            }
+            if ("com.waze".equals(normalized)) {
+                NavAppDisplayState main = parseTask(normalized, result.output);
+                NavAppDisplayState surface = parseTask(normalized, result.output, true);
+                log(normalized, "transfer_target kind=" + targetKind(normalized)
+                        + " wazeTask=" + (main == null ? -1 : main.taskId)
+                        + " wazeDisplay=" + (main == null ? -1 : main.displayId)
+                        + " surfaceTask=" + (surface == null ? -1 : surface.taskId)
+                        + " surfaceDisplay=" + (surface == null ? -1 : surface.displayId)
+                        + " reason=" + safe(reason));
+            }
             if (parsed == null) {
                 return remember(new NavAppDisplayState(
                         normalized,
                         -1,
                         NavAppDisplayState.DISPLAY_UNKNOWN,
                         false,
-                        "task missing"));
+                        surfaceTarget ? "Surface task missing" : "task missing"));
             }
             NavAppDisplayState observed = new NavAppDisplayState(
                     normalized,
                     parsed.taskId,
                     parsed.displayId,
                     parsed.visible,
-                    "display=" + parsed.displayId + " task=" + parsed.taskId);
+                    "display=" + parsed.displayId + " task=" + parsed.taskId, parsed.bounds);
             reconcileConfirmedDashboardOwnership(
                     normalized,
                     observed,
@@ -1672,6 +1714,17 @@ final class NavAppDisplayController {
                 return remember(new NavAppDisplayState(normalized, current.taskId, current.displayId,
                         current.visible, label + " blocked: request changed"));
             }
+            if (usesSurfaceTarget(normalized)) {
+                // The projection service can carry an admitted observation across a recreation.
+                NavAppDisplayState target = checkDisplay(normalized, "surface-move:" + safe(reason));
+                if (target.taskId < 0 || (admittedState != null && target.taskId != admittedState.taskId)) {
+                    return remember(new NavAppDisplayState(normalized, -1,
+                            NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                            "Surface task missing or changed before transfer"));
+                }
+                return remember(moveTaskIdToDisplayBlocking(normalized, target.taskId,
+                        targetDisplay, reason, requestCurrent));
+            }
             if (current.taskId < 0) {
                 return remember(new NavAppDisplayState(
                         normalized,
@@ -1804,7 +1857,7 @@ final class NavAppDisplayController {
 
     private boolean ensureWazeSurfaceOnDisplay(
             String logicalPackage, int targetDisplay, String reason) {
-        if (!"com.waze".equals(logicalPackage)) return true;
+        if (!usesSurfaceTarget(logicalPackage)) return true;
         boolean ready = NavHudLiveSender.get(context).ensureWazeSurfaceOnDisplayBlocking(
                 targetDisplay, reason, WAZE_SURFACE_HANDOFF_TIMEOUT_MS);
         log(logicalPackage, "waze_surface_handoff target=" + targetDisplay
@@ -1835,6 +1888,7 @@ final class NavAppDisplayController {
         long startedMs = SystemClock.elapsedRealtime();
         int queries = 1;
         int moves = 0;
+        boolean surfacePrepared = false;
         long queryMs = 0L;
         long moveMs = 0L;
         long confirmationMs = 0L;
@@ -1856,8 +1910,28 @@ final class NavAppDisplayController {
                         label + " failed: task/display state unknown");
             }
             if (current.displayId == targetDisplay) return current;
+            if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
+                return new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false, label + " cancelled");
+            }
+            BooleanSupplier ownerGate = taskOwnerGate(normalized, requestCurrent);
+            BooleanSupplier surfaceGate = usesSurfaceTarget(normalized)
+                    ? NavHudLiveSender.get(context).prepareWazeSurfaceTaskMoveBlocking(
+                            taskId, reason, WAZE_SURFACE_HANDOFF_TIMEOUT_MS)
+                    : () -> true;
+            if (surfaceGate == null) {
+                return new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false, label + " Surface unavailable");
+            }
+            surfacePrepared = usesSurfaceTarget(normalized);
+            BooleanSupplier currentGate = () -> ownerGate.getAsBoolean() && surfaceGate.getAsBoolean();
+            String outputFailure = ClusterProjectionService.prepareOutputForTaskMove(
+                    normalized, taskId, current.displayId, targetDisplay, currentGate);
+            if (!outputFailure.isEmpty()) {
+                return new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false, label + " failed: " + outputFailure);
+            }
             android.graphics.Rect targetBounds = boundsForMove(normalized, current, targetDisplay);
-            BooleanSupplier currentGate = taskOwnerGate(normalized, requestCurrent);
             String command = "cmd activity display move-stack " + taskId + " " + targetDisplay;
             TaskMoveSequencer.Result sequence = TaskMoveSequencer.execute(
                     current, targetDisplay, currentGate, new TaskMoveSequencer.Io() {
@@ -1868,6 +1942,11 @@ final class NavAppDisplayController {
 
                         @Override
                         public TaskMoveSequencer.CommandResult move(String stage) throws IOException {
+                            NavAppDisplayState live = checkTaskId(normalized, taskId, label + "-before-command");
+                            if (!currentGate.getAsBoolean() || live == null
+                                    || live.displayId != current.displayId) {
+                                return new TaskMoveSequencer.CommandResult(false, "Surface task changed before command");
+                            }
                             LocalAdbBridge.ShellResult result = runMutationCommandOnce(
                                     normalized, command, label + "-" + stage
                                             + " target=" + targetDisplay
@@ -1876,11 +1955,15 @@ final class NavAppDisplayController {
                                     result.success(), result.shortDetail());
                         }
                     });
-            queries = sequence.queries;
+            queries = sequence.queries + sequence.moves;
             moves = sequence.moves;
             queryMs = sequence.queryMs;
             moveMs = sequence.moveMs;
             confirmationMs = sequence.confirmationMs;
+            if (!sequence.current) {
+                return new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false, label + " cancelled: owner changed");
+            }
             if (!sequence.error.isEmpty()) {
                 return new NavAppDisplayState(normalized, taskId,
                         sequence.state == null ? NavAppDisplayState.DISPLAY_UNKNOWN
@@ -1894,7 +1977,9 @@ final class NavAppDisplayController {
                         currentGate, label);
                 if (!failure.isEmpty()) return new NavAppDisplayState(normalized, taskId,
                         NavAppDisplayState.DISPLAY_UNKNOWN, false, label + " failed: " + failure);
-                return checkTaskId(normalized, taskId, label + "-bounds-confirmed");
+                NavAppDisplayState resized = checkTaskId(normalized, taskId, label + "-bounds-confirmed");
+                return resized != null ? resized : new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false, label + " resized task disappeared");
             }
             return sequence.state == null
                     ? new NavAppDisplayState(normalized, taskId,
@@ -1906,7 +1991,8 @@ final class NavAppDisplayController {
                     NavAppDisplayState.DISPLAY_UNKNOWN, false,
                     label + " failed: " + safe(error.getMessage()));
         } finally {
-            log(normalized, "transfer_companion elapsedMs="
+            if (surfacePrepared) WazeSurfaceActivity.refreshSurfaceAfterMove(taskId);
+            log(normalized, "transfer_target_move elapsedMs="
                     + (SystemClock.elapsedRealtime() - startedMs)
                     + " queries=" + queries + " moves=" + moves
                     + " preparationMs=0 readbackMs=" + queryMs + " moveMs=" + moveMs
@@ -1918,8 +2004,15 @@ final class NavAppDisplayController {
 
     private BooleanSupplier taskOwnerGate(String packageName, BooleanSupplier requested) {
         long owner = ClusterProjectionService.projectedGenerationTokenForWidget(packageName);
-        return () -> (requested == null || requested.getAsBoolean())
-                && (owner <= 0L || owner == ClusterProjectionService.projectedGenerationTokenForWidget(packageName));
+        boolean surfaceTarget = usesSurfaceTarget(packageName);
+        int surfaceTask = surfaceTarget ? WazeSurfaceActivity.activeTaskId() : -1;
+        return () -> {
+            int currentTask = surfaceTarget ? WazeSurfaceActivity.activeTaskId() : -1;
+            return (requested == null || requested.getAsBoolean())
+                    && surfaceTarget == usesSurfaceTarget(packageName)
+                    && (!surfaceTarget || currentTask < 0 || surfaceTask == currentTask)
+                    && (owner <= 0L || owner == ClusterProjectionService.projectedGenerationTokenForWidget(packageName));
+        };
     }
 
     private android.graphics.Rect boundsForMove(String packageName, NavAppDisplayState before,
@@ -2007,13 +2100,6 @@ final class NavAppDisplayController {
             String result = resizeTaskBounds(packageName, new NavAppDisplayState(packageName, task.taskId,
                     display, task.visible, task.status, previous), display, target, current, "profile-resize");
             if (!result.isEmpty()) return result;
-            if ("com.waze".equals(packageName) && WazeSurfaceActivity.activeDisplayId() == display
-                    && WazeSurfaceActivity.activeTaskId() >= 0) {
-                NavAppDisplayState surface = checkTaskId(packageName, WazeSurfaceActivity.activeTaskId(), "profile-surface");
-                if (surface == null || surface.displayId != display) return "Surface task changed";
-                return resizeTaskBounds(packageName, new NavAppDisplayState(packageName, surface.taskId,
-                        display, surface.visible, surface.status, previous), display, target, current, "profile-surface-resize");
-            }
             return "";
         } catch (IOException error) { return "Profile task resize failed: " + error; }
     }
@@ -2024,7 +2110,8 @@ final class NavAppDisplayController {
                 logicalPackage,
                 "dumpsys activity activities",
                 "check_task_id reason=" + safe(reason));
-        return result.success() ? parseTaskId(logicalPackage, taskId, result.output) : null;
+        return result.success() ? parseTaskId(logicalPackage, taskId, result.output,
+                usesSurfaceTarget(logicalPackage)) : null;
     }
 
     private static NavAppDisplayState awaitTransferCompletion(
@@ -2076,7 +2163,8 @@ final class NavAppDisplayController {
         }
         int normalizedMode = HudPrefs.normalizeDashboardScreenMode(dashboardMode);
         if (!normalized.equals(previousPersistedPackage)
-                || persistedDashboardMode() != normalizedMode) {
+                || persistedDashboardMode() != normalizedMode
+                || !targetKind(normalized).equals(dashboardPrefs().getString(KEY_TARGET_KIND, ""))) {
             persistDashboardProjection(normalized, normalizedMode, reason);
         }
         if (ownershipChanged) {
@@ -2314,6 +2402,7 @@ final class NavAppDisplayController {
                 .edit()
                 .putString(KEY_ACTIVE_PACKAGE, normalized)
                 .putInt(KEY_ACTIVE_MODE, HudPrefs.normalizeDashboardScreenMode(dashboardMode))
+                .putString(KEY_TARGET_KIND, targetKind(normalized))
                 .putString(KEY_ACTIVE_REASON, safe(reason))
                 .putLong(KEY_ACTIVE_UPDATED_MS, System.currentTimeMillis())
                 .apply();
@@ -2339,6 +2428,7 @@ final class NavAppDisplayController {
                 .edit()
                 .remove(KEY_ACTIVE_PACKAGE)
                 .remove(KEY_ACTIVE_MODE)
+                .remove(KEY_TARGET_KIND)
                 .putString(KEY_ACTIVE_REASON, safe(reason))
                 .putLong(KEY_ACTIVE_UPDATED_MS, System.currentTimeMillis())
                 .apply();
@@ -2426,6 +2516,7 @@ final class NavAppDisplayController {
         }
         log(safeState.packageName,
                 "state package=" + safeState.packageName
+                        + " targetKind=" + targetKind(safeState.packageName)
                         + " task=" + safeState.taskId
                         + " display=" + safeState.displayId
                         + " visible=" + safeState.visible
@@ -2458,6 +2549,11 @@ final class NavAppDisplayController {
 
     //parses source data here so downstream HUD code receives normalized navigation fields.
     private static NavAppDisplayState parseTask(String packageName, String dumpsys) {
+        return parseTask(packageName, dumpsys, false);
+    }
+
+    static NavAppDisplayState parseTask(
+            String packageName, String dumpsys, boolean surfaceTarget) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty() || dumpsys == null || dumpsys.isEmpty()) {
             return null;
@@ -2472,7 +2568,7 @@ final class NavAppDisplayController {
             Matcher displaySection = DISPLAY_SECTION_PATTERN.matcher(line);
             if (displaySection.matches()) {
                 selected = preferVisibleTask(selected, taskFromBlock(
-                        normalized, currentTaskId, currentDisplayId, block));
+                        normalized, currentTaskId, currentDisplayId, block, surfaceTarget));
                 currentTaskId = -1;
                 currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
                 block.setLength(0);
@@ -2482,7 +2578,7 @@ final class NavAppDisplayController {
             }
             if (NavAppTaskScanner.isGlobalTaskSummary(line)) {
                 selected = preferVisibleTask(selected, taskFromBlock(
-                        normalized, currentTaskId, currentDisplayId, block));
+                        normalized, currentTaskId, currentDisplayId, block, surfaceTarget));
                 currentTaskId = -1;
                 currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
                 sectionDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
@@ -2495,7 +2591,7 @@ final class NavAppDisplayController {
                         normalized,
                         currentTaskId,
                         currentDisplayId,
-                        block));
+                        block, surfaceTarget));
                 currentTaskId = header[0];
                 currentDisplayId = header[1];
                 block.setLength(0);
@@ -2506,11 +2602,16 @@ final class NavAppDisplayController {
         }
         return preferVisibleTask(
                 selected,
-                taskFromBlock(normalized, currentTaskId, currentDisplayId, block));
+                taskFromBlock(normalized, currentTaskId, currentDisplayId, block, surfaceTarget));
     }
 
     private static NavAppDisplayState parseTaskId(
             String logicalPackage, int targetTaskId, String dumpsys) {
+        return parseTaskId(logicalPackage, targetTaskId, dumpsys, false);
+    }
+
+    static NavAppDisplayState parseTaskId(
+            String logicalPackage, int targetTaskId, String dumpsys, boolean surfaceTarget) {
         if (targetTaskId < 0 || dumpsys == null || dumpsys.isEmpty()) return null;
         String[] lines = NavAppTaskScanner.activityTaskLines(dumpsys);
         int sectionDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
@@ -2521,8 +2622,7 @@ final class NavAppDisplayController {
             Matcher section = DISPLAY_SECTION_PATTERN.matcher(line);
             if (section.matches()) {
                 if (currentTaskId == targetTaskId) {
-                    return new NavAppDisplayState(logicalPackage, targetTaskId,
-                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id", parseBounds(block.toString()));
+                    return taskFromBlock(logicalPackage, targetTaskId, currentDisplayId, block, surfaceTarget);
                 }
                 currentTaskId = -1;
                 currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
@@ -2532,8 +2632,7 @@ final class NavAppDisplayController {
             }
             if (NavAppTaskScanner.isGlobalTaskSummary(line)) {
                 if (currentTaskId == targetTaskId) {
-                    return new NavAppDisplayState(logicalPackage, targetTaskId,
-                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id", parseBounds(block.toString()));
+                    return taskFromBlock(logicalPackage, targetTaskId, currentDisplayId, block, surfaceTarget);
                 }
                 currentTaskId = -1;
                 currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
@@ -2544,8 +2643,7 @@ final class NavAppDisplayController {
             int[] header = parseTaskHeader(line, sectionDisplayId);
             if (header != null) {
                 if (currentTaskId == targetTaskId) {
-                    return new NavAppDisplayState(logicalPackage, targetTaskId,
-                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id", parseBounds(block.toString()));
+                    return taskFromBlock(logicalPackage, targetTaskId, currentDisplayId, block, surfaceTarget);
                 }
                 currentTaskId = header[0];
                 currentDisplayId = header[1];
@@ -2554,8 +2652,7 @@ final class NavAppDisplayController {
             if (currentTaskId >= 0) block.append(line).append('\n');
         }
         return currentTaskId == targetTaskId
-                ? new NavAppDisplayState(logicalPackage, targetTaskId, currentDisplayId,
-                        parseVisible(block.toString()), "parsed-task-id", parseBounds(block.toString()))
+                ? taskFromBlock(logicalPackage, targetTaskId, currentDisplayId, block, surfaceTarget)
                 : null;
     }
 
@@ -2583,12 +2680,12 @@ final class NavAppDisplayController {
             String packageName,
             int taskId,
             int displayId,
-            StringBuilder block) {
+            StringBuilder block, boolean surfaceTarget) {
         if (taskId < 0 || block == null) {
             return null;
         }
         String value = block.toString();
-        if (!NavAppTaskScanner.taskPackages(value).contains(packageName)) {
+        if (!NavAppTaskScanner.matchesTransferTarget(packageName, surfaceTarget, value)) {
             return null;
         }
         return new NavAppDisplayState(
