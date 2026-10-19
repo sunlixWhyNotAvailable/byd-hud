@@ -14,6 +14,23 @@ import static org.junit.Assert.*;
 public class NativeRoadInfoTest {
     private static final long NOW = Instant.parse("2026-10-14T10:00:00Z").toEpochMilli();
 
+    @Test public void positionAcquisitionRequiresActiveHudGuidance() {
+        HudOutputCoordinator.Source direct = HudOutputCoordinator.Source.DIRECT;
+        HudOutputCoordinator.Source none = HudOutputCoordinator.Source.NONE;
+        HudOutputCoordinator.Source manual = HudOutputCoordinator.Source.MANUAL;
+        DirectTbtFrame guidance = frame();
+        String owner = "com.waze";
+        assertEquals("", HudOutputCoordinator.vehiclePositionOwner(none, direct, owner, guidance, false));
+        assertEquals(owner, HudOutputCoordinator.vehiclePositionOwner(direct, direct, owner, guidance, false));
+        assertEquals("", HudOutputCoordinator.vehiclePositionOwner(direct, none, owner, guidance, false));
+        assertEquals("", HudOutputCoordinator.vehiclePositionOwner(direct, manual, owner, guidance, false));
+        assertEquals("", HudOutputCoordinator.vehiclePositionOwner(manual, manual, owner, guidance, false));
+        assertEquals("", HudOutputCoordinator.vehiclePositionOwner(direct, direct, owner, guidance.withoutGuidance(), false));
+        assertEquals("", HudOutputCoordinator.vehiclePositionOwner(direct, direct, owner, null, false));
+        assertEquals("", HudOutputCoordinator.vehiclePositionOwner(direct, direct, owner, guidance, true));
+        assertEquals("", HudOutputCoordinator.vehiclePositionOwner(direct, direct, "", guidance, false));
+    }
+
     @Test public void nativeEtaAndHudLimitUseNumericFieldsAndLeaveStreetAlone() {
         DirectTbtFrame frame = frame().withSpeedLimit(
                 new DirectTbtFrame.SpeedLimit(40, 64, "mph", 1L));

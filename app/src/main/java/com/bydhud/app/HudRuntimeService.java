@@ -114,7 +114,7 @@ public final class HudRuntimeService extends Service {
         }
     };
 
-    /** Root-owned route lifecycle supplies the active navigator package, or null when inactive. */
+    /** Spatial preparation supplies a route; the output owner also gates acquisition. */
     public static void setVehiclePositionRouteSource(String routeSource) {
         String normalized = routeSource == null || routeSource.trim().isEmpty()
                 ? null : routeSource.trim();
@@ -564,6 +564,8 @@ public final class HudRuntimeService extends Service {
         VehiclePositionController controller = vehiclePositionController;
         if (controller == null) return;
         String routeSource = requestedVehiclePositionRouteSource;
+        if (!HudOutputCoordinator.allowsVehiclePosition(routeSource)
+                || !NavCapturePrefs.isHudEnabled(this, routeSource)) routeSource = null;
         controller.setRouteSource(routeSource);
         boolean enabled = HudPrefs.isVehiclePositionEnabled(this)
                 && !HudPrefs.isUserShutdownActive(this)

@@ -68,6 +68,29 @@ final class HudOutputCoordinator {
     private static final long STATS_INTERVAL_MS = 30_000L;
 
     private static volatile HudOutputCoordinator instance;
+    private volatile String vehiclePositionOwner = "";
+
+    static boolean allowsVehiclePosition(String owner) {
+        HudOutputCoordinator current = instance;
+        return current != null && owner != null && !owner.isEmpty()
+                && owner.equals(current.vehiclePositionOwner)
+                && !ShanghaiOutputGate.isSuspended();
+    }
+
+    static String vehiclePositionOwner(Source active, Source desired, String owner,
+            DirectTbtFrame frame, boolean suspended) {
+        return active == Source.DIRECT && desired == Source.DIRECT && !suspended
+                && frame != null && frame.hasGuidance() ? safe(owner) : "";
+    }
+
+    private void updateVehiclePositionOutput() {
+        String next = vehiclePositionOwner(activeSource, desiredSource(),
+                directOwnerPackage, directFrame, ShanghaiOutputGate.isSuspended());
+        if (next.equals(vehiclePositionOwner)) return;
+        vehiclePositionOwner = next;
+        HudRuntimeService.refreshVehiclePosition();
+        VehicleRouteRuntime.changed();
+    }
 
     static synchronized HudOutputCoordinator get(Context context) {
         if (instance == null) {
@@ -606,6 +629,7 @@ final class HudOutputCoordinator {
             }
             directFrame = frame == null ? DirectTbtFrame.empty()
                     : frame.hasGuidance() ? frame : frame.withoutGuidance();
+            updateVehiclePositionOutput();
             directSourceRoad = directFrame.hasGuidance() && sourceRoad != null
                     ? sourceRoad : "";
             preparedDirectFrame = null;
@@ -658,6 +682,7 @@ final class HudOutputCoordinator {
             directGuidanceClearAtMs = clearedAtMs;
             directFrame = directFrame == null
                     ? DirectTbtFrame.empty() : directFrame.withoutGuidance();
+            updateVehiclePositionOutput();
             directSourceRoad = "";
             preparedDirectFrame = null;
             preparedOutputFrame = null;
@@ -723,6 +748,7 @@ final class HudOutputCoordinator {
                 return;
             }
             directFrame = frame;
+            updateVehiclePositionOutput();
             directSourceRoad = sourceRoad == null ? "" : sourceRoad;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
@@ -957,6 +983,7 @@ final class HudOutputCoordinator {
     private void reconcile(String reason, long endDetectedAtMs,
             Runnable firstClearCompletion) {
         Source target = desiredSource();
+        updateVehiclePositionOutput();
         if (pendingSource == Source.NONE && target == activeSource) {
             if (target == Source.NONE && (finalClearInProgress
                     || pendingFinalClearCompletion != null)) {
@@ -1089,6 +1116,7 @@ final class HudOutputCoordinator {
             return;
         }
         activeSource = target;
+        updateVehiclePositionOutput();
         if (!client.isBound()) {
             ensureBoundOnWorker(reason);
         }
@@ -1236,6 +1264,7 @@ final class HudOutputCoordinator {
     }
 
     private void sendActive(String reason) {
+        updateVehiclePositionOutput();
         if (ShanghaiOutputGate.isSuspended()) {
             nativeSpeed.stop("shanghai");
             stopNavigatorMap("shanghai");
@@ -2428,6 +2457,7 @@ final class HudOutputCoordinator {
             pendingDirectReason = "";
             directOwnerPackage = owner;
             directOwnerSessionGeneration = ownerSessionGeneration;
+            updateVehiclePositionOutput();
             directGuidanceClearAtMs = Long.MIN_VALUE;
             resetDirectTransportTiming();
             log("direct owner advanced owner=" + owner
@@ -2556,6 +2586,7 @@ final class HudOutputCoordinator {
         stopDirectPresentation("producer-loss:" + reason);
         resetEtaStreetText("producer-loss:" + reason);
         directFrame = null;
+        updateVehiclePositionOutput();
         preparedDirectFrame = null;
         preparedDirectPayload = null;
         preparedDirectSemanticPayload = null;
@@ -2639,6 +2670,7 @@ final class HudOutputCoordinator {
         directLeaseDeadlineMs = 0L;
         directOwnerPackage = "";
         directOwnerSessionGeneration = Long.MIN_VALUE;
+        updateVehiclePositionOutput();
         directGuidanceClearAtMs = Long.MIN_VALUE;
         directLossClearPending = false;
         directLossClearSent = false;

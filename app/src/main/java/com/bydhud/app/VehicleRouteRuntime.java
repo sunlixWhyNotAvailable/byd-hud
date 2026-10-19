@@ -53,11 +53,14 @@ final class VehicleRouteRuntime {
         VehicleRouteRuntime state = current;
         current = null;
         HudRuntimeService.setVehiclePositionListener(null);
-        HudRuntimeService.setVehiclePositionRouteSource(null);
-        if (state == null) return;
+        if (state == null) {
+            HudRuntimeService.setVehiclePositionRouteSource(null);
+            return;
+        }
         synchronized (state.lock) {
             state.stopped = true;
             state.generation++;
+            HudRuntimeService.setVehiclePositionRouteSource(null);
             state.distance = null;
             state.distanceHeader = null;
             state.result = null;
@@ -111,6 +114,7 @@ final class VehicleRouteRuntime {
     private boolean outputEnabled(String owner) {
         return owner != null && owner.equals(NavCapturePrefs.getHudPackage(context))
                 && NavCapturePrefs.isHudEnabled(context, owner)
+                && HudOutputCoordinator.allowsVehiclePosition(owner)
                 && HudPrefs.isVehiclePositionEnabled(context)
                 && !HudPrefs.isUserShutdownActive(context);
     }
@@ -155,9 +159,7 @@ final class VehicleRouteRuntime {
 
     static void onGuidanceUnavailable(String owner) {
         VehicleRouteRuntime state = current;
-        if (state == null || owner == null || owner.isEmpty()
-                || !owner.equals(NavCapturePrefs.getHudPackage(state.context))
-                || !NavCapturePrefs.isHudEnabled(state.context, owner)) return;
+        if (state == null || owner == null || owner.isEmpty()) return;
         synchronized (state.lock) {
             if (state.stopped || (!state.guidanceOwner.isEmpty()
                     && !owner.equals(state.guidanceOwner))) return;
@@ -175,16 +177,19 @@ final class VehicleRouteRuntime {
             state.fallback = null;
             state.resetResolver = true;
             state.loggedKey = "";
+            HudRuntimeService.setVehiclePositionRouteSource(null);
+            state.worker.removeCallbacks(state.drain);
+            state.worker.removeCallbacks(state.expire);
         }
-        state.worker.removeCallbacks(state.drain);
-        state.worker.removeCallbacks(state.expire);
     }
 
     private void schedule() {
         String owner = NavCapturePrefs.getHudPackage(context);
         synchronized (lock) {
             if (stopped) return;
-            if (!guidanceAvailable || !owner.equals(guidanceOwner)) {
+            if (!guidanceAvailable || !owner.equals(guidanceOwner) || !outputEnabled(owner)) {
+                generation++;
+                HudRuntimeService.setVehiclePositionRouteSource(null);
                 result = HudSpatialGeometry.Result.off();
                 resultOwner = owner;
                 fallback = null;
@@ -257,7 +262,12 @@ final class VehicleRouteRuntime {
                 || snapshot.outcome == NavigatorRouteStore.Outcome.READY_TO_DECODE
                 || snapshot.outcome == NavigatorRouteStore.Outcome.REPLAY_REQUIRED);
         boolean eligible = enabled && !suspended && hasRoute;
-        HudRuntimeService.setVehiclePositionRouteSource(requested && hasRoute ? owner : null);
+        synchronized (lock) {
+            if (stopped || token != generation) return;
+            // A completed worker must not resurrect acquisition after output has stopped.
+            HudRuntimeService.setVehiclePositionRouteSource(
+                    requested && hasRoute && outputEnabled(owner) ? owner : null);
+        }
         if (!enabled) {
             synchronized (lock) {
                 if (stopped || token != generation) return;
