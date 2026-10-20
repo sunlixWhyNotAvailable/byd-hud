@@ -8,11 +8,22 @@ final class HudCheckDiagnostics {
     private final Map<String, String> lastByPlane = new HashMap<>();
 
     String changed(HudCheckState sample, String plane, int result, String reason) {
+        return changed(sample, plane, result, reason, null, "");
+    }
+
+    String changed(HudCheckState sample, String plane, int result, String reason,
+            NativeEtaTransportPolicy.Endpoint endpoint, String selectionReason) {
         if (sample == null || !sample.running) return null;
         String channel = token(plane);
         String line = "hud_check case=" + sampleKey(sample) + " plane=" + channel
-                + " result=" + (result > 0 ? "sent" : result < 0 ? "unavailable-or-error" : "waiting")
+                + " result=" + (result == -2 ? "skipped"
+                        : result > 0 ? ("AMap".equals(plane) ? "dispatched" : "sent")
+                        : result < 0 ? "unavailable-or-error" : "waiting")
                 + " reason=" + token(reason);
+        if (endpoint != null) {
+            line += " amap_endpoint=" + endpoint.name().toLowerCase(java.util.Locale.ROOT)
+                    + " amap_selection=" + token(selectionReason);
+        }
         if (sample.isLiveCheck()) {
             DirectTbtFrame frame = sample.liveFrame();
             HudManeuverGeometry.Selection geometry = sample.liveGeometry();

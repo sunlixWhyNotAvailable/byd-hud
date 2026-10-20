@@ -7,22 +7,52 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public final class NativeEtaTransportPolicyTest {
-    @Test public void nativeModeChoosesExactlyOneWriterFromReceiverState() {
+    @Test public void endpointSelectionPrefersNewThenLegacyAndKeepsUnknownDistinctFromAbsent() {
+        assertEquals(NativeEtaTransportPolicy.Endpoint.NEW,
+                NativeEtaTransportPolicy.endpointFor(
+                        NativeEtaTransportPolicy.ReceiverState.AVAILABLE,
+                        NativeEtaTransportPolicy.ReceiverState.AVAILABLE));
+        assertEquals(NativeEtaTransportPolicy.Endpoint.LEGACY,
+                NativeEtaTransportPolicy.endpointFor(
+                        NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
+                        NativeEtaTransportPolicy.ReceiverState.AVAILABLE));
+        assertEquals(NativeEtaTransportPolicy.Endpoint.NONE,
+                NativeEtaTransportPolicy.endpointFor(
+                        NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
+                        NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE));
+        assertEquals(NativeEtaTransportPolicy.Endpoint.UNKNOWN,
+                NativeEtaTransportPolicy.endpointFor(
+                        NativeEtaTransportPolicy.ReceiverState.UNKNOWN,
+                        NativeEtaTransportPolicy.ReceiverState.AVAILABLE));
+        assertEquals(NativeEtaTransportPolicy.Endpoint.UNKNOWN,
+                NativeEtaTransportPolicy.endpointFor(
+                        NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
+                        NativeEtaTransportPolicy.ReceiverState.UNKNOWN));
+        assertTrue(NativeEtaTransportPolicy.includesInstrumentNavigationFields(
+                NativeEtaTransportPolicy.Endpoint.LEGACY));
+        assertFalse(NativeEtaTransportPolicy.includesInstrumentNavigationFields(
+                NativeEtaTransportPolicy.Endpoint.NEW));
+    }
+
+    @Test public void nativeModeChoosesExactlyOneWriterFromEndpoint() {
         assertEquals(NativeEtaTransportPolicy.Writer.AMAP,
                 NativeEtaTransportPolicy.writerFor(HudPrefs.ETA_OUTPUT_NATIVE,
-                        NativeEtaTransportPolicy.ReceiverState.AVAILABLE));
+                        NativeEtaTransportPolicy.Endpoint.NEW));
         assertEquals(NativeEtaTransportPolicy.Writer.INSTRUMENT,
                 NativeEtaTransportPolicy.writerFor(HudPrefs.ETA_OUTPUT_NATIVE,
-                        NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE));
+                        NativeEtaTransportPolicy.Endpoint.LEGACY));
+        assertEquals(NativeEtaTransportPolicy.Writer.INSTRUMENT,
+                NativeEtaTransportPolicy.writerFor(HudPrefs.ETA_OUTPUT_NATIVE,
+                        NativeEtaTransportPolicy.Endpoint.NONE));
         assertEquals(NativeEtaTransportPolicy.Writer.UNRESOLVED,
                 NativeEtaTransportPolicy.writerFor(HudPrefs.ETA_OUTPUT_NATIVE,
-                        NativeEtaTransportPolicy.ReceiverState.UNKNOWN));
+                        NativeEtaTransportPolicy.Endpoint.UNKNOWN));
         assertEquals(NativeEtaTransportPolicy.Writer.NONE,
                 NativeEtaTransportPolicy.writerFor(HudPrefs.ETA_OUTPUT_OFF,
-                        NativeEtaTransportPolicy.ReceiverState.AVAILABLE));
+                        NativeEtaTransportPolicy.Endpoint.NEW));
         assertEquals(NativeEtaTransportPolicy.Writer.NONE,
                 NativeEtaTransportPolicy.writerFor(HudPrefs.ETA_OUTPUT_ALTERNATIVE,
-                        NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE));
+                        NativeEtaTransportPolicy.Endpoint.LEGACY));
     }
 
     @Test public void directCacheOnlyRepeatsKnownValuesAfterInterval() {

@@ -25,6 +25,7 @@
         </intent>
         <package android:name="com.ts.car.someip.service" />
         <package android:name="com.byd.amapservice" />
+        <package android:name="com.example.amapservice" />
         <package android:name="com.huawei.maps.car.app" />
         <package android:name="com.byd.appstartmanagement" />
         <package android:name="com.byd.launchermap" />

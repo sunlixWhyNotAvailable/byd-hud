@@ -3,6 +3,7 @@ package com.bydhud.app;
 /** Pure policy and payload checks for the mutually exclusive native ETA writers. */
 final class NativeEtaTransportPolicy {
     static final String AMAP_PACKAGE_NAME = "com.byd.amapservice";
+    static final String LEGACY_AMAP_PACKAGE_NAME = "com.example.amapservice";
     static final String AMAP_ACTION = "AUTONAVI_STANDARD_BROADCAST_SEND";
     static final long PERIODIC_DISPATCH_INTERVAL_MS = 1_500L;
     static final long DIRECT_SAME_VALUE_INTERVAL_MS = 3_500L;
@@ -17,12 +18,39 @@ final class NativeEtaTransportPolicy {
 
     enum Writer { NONE, AMAP, INSTRUMENT, UNRESOLVED }
 
+    enum Endpoint { NEW, LEGACY, NONE, UNKNOWN }
+
     private NativeEtaTransportPolicy() { }
 
-    static Writer writerFor(int etaOutputMode, ReceiverState receiverState) {
+    static Endpoint endpointFor(ReceiverState newPackage, ReceiverState legacyPackage) {
+        if (newPackage == ReceiverState.AVAILABLE) return Endpoint.NEW;
+        if (newPackage == ReceiverState.UNKNOWN) return Endpoint.UNKNOWN;
+        if (legacyPackage == ReceiverState.AVAILABLE) return Endpoint.LEGACY;
+        if (legacyPackage == ReceiverState.UNKNOWN) return Endpoint.UNKNOWN;
+        return Endpoint.NONE;
+    }
+
+    static boolean includesInstrumentNavigationFields(Endpoint endpoint) {
+        return endpoint != Endpoint.NEW;
+    }
+
+    static String packageNameFor(Endpoint endpoint) {
+        if (endpoint == Endpoint.NEW) return AMAP_PACKAGE_NAME;
+        if (endpoint == Endpoint.LEGACY) return LEGACY_AMAP_PACKAGE_NAME;
+        return "";
+    }
+
+    static boolean isAmapPackageName(String packageName) {
+        return AMAP_PACKAGE_NAME.equals(packageName)
+                || LEGACY_AMAP_PACKAGE_NAME.equals(packageName);
+    }
+
+    static Writer writerFor(int etaOutputMode, Endpoint endpoint) {
         if (etaOutputMode != HudPrefs.ETA_OUTPUT_NATIVE) return Writer.NONE;
-        if (receiverState == ReceiverState.AVAILABLE) return Writer.AMAP;
-        if (receiverState == ReceiverState.UNAVAILABLE) return Writer.INSTRUMENT;
+        if (endpoint == Endpoint.NEW) return Writer.AMAP;
+        if (endpoint == Endpoint.LEGACY || endpoint == Endpoint.NONE) {
+            return Writer.INSTRUMENT;
+        }
         return Writer.UNRESOLVED;
     }
 

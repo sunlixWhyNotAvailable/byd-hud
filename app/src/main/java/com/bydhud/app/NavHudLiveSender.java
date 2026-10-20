@@ -316,7 +316,7 @@ final class NavHudLiveSender {
 
     static void onNavigatorPackageChanged(String packageName) {
         NavigatorRouteReceiver.packageChanged(packageName);
-        if (!NativeEtaTransportPolicy.AMAP_PACKAGE_NAME.equals(packageName)) return;
+        if (!NativeEtaTransportPolicy.isAmapPackageName(packageName)) return;
         NavHudLiveSender current;
         synchronized (NavHudLiveSender.class) {
             current = instance;

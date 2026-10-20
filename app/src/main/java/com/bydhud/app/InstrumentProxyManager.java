@@ -71,6 +71,8 @@ final class InstrumentProxyManager {
     private final ExecutorService shanghaiTransitions;
     private ExecutorService calls;
     private long callEpoch;
+    private long navigationOutputGeneration;
+    private final List<NavigationOutputFence> navigationOutputFences = new ArrayList<>();
     private long activeOperationId;
     private long activeOperationGeneration;
     private ResultCallback activeOperationCallback;
@@ -82,7 +84,10 @@ final class InstrumentProxyManager {
     private boolean terminalClearInFlight;
     private long guidanceBarrierToken;
     private int terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
+    private boolean terminalClearIncludeNavigationFields = true;
+    private long terminalClearOutputGeneration;
     private final List<ResultCallback> terminalClearCallbacks = new ArrayList<>();
+    private PendingTerminalGuidanceClear deferredTerminalClear;
     private PendingTrafficLight pendingTrafficLight;
     private PendingTrafficLight deferredTrafficLight;
     private boolean trafficLightScheduled;
@@ -568,14 +573,116 @@ final class InstrumentProxyManager {
         if (listener != null) unavailableListeners.addIfAbsent(listener);
     }
 
+    /** Invalidates queued status/guidance work and completes after prior calls drain. */
+    void fenceNavigationOutput(Runnable onFenced) {
+        PendingGuidance pending;
+        PendingGuidance deferred;
+        PendingTerminalGuidanceClear deferredTerminal;
+        List<ResultCallback> cancelledTerminalCallbacks = Collections.emptyList();
+        NavigationOutputFence fence = null;
+        ExecutorService executor;
+        synchronized (callLock) {
+            navigationOutputGeneration++;
+            pending = pendingGuidance;
+            pendingGuidance = null;
+            guidanceScheduled = false;
+            deferred = deferredGuidance;
+            deferredGuidance = null;
+            deferredTerminal = deferredTerminalClear;
+            deferredTerminalClear = null;
+            if (deferredTerminal != null) {
+                cancelledTerminalCallbacks = new ArrayList<>(deferredTerminal.callbacks);
+            }
+            executor = calls;
+            if (onFenced != null) {
+                fence = new NavigationOutputFence(onFenced, callEpoch);
+                navigationOutputFences.add(fence);
+            }
+        }
+        if (pending != null) {
+            deliver(pending.callback,
+                    Result.unavailable("superseded by navigation output policy change"));
+        }
+        if (deferred != null) {
+            deliver(deferred.callback,
+                    Result.unavailable("superseded by navigation output policy change"));
+        }
+        for (ResultCallback terminalCallback : cancelledTerminalCallbacks) {
+            deliver(terminalCallback,
+                    Result.unavailable("superseded by navigation output policy change"));
+        }
+        if (fence != null) {
+            NavigationOutputFence requestFence = fence;
+            if (!enqueueCall(executor, () -> finishNavigationOutputFence(
+                    requestFence, requestFence.callEpoch))) {
+                finishNavigationOutputFence(requestFence, requestFence.callEpoch);
+            }
+        }
+    }
+
+    private void finishNavigationOutputFence(
+            NavigationOutputFence fence, long scheduledCallEpoch) {
+        Runnable callback = null;
+        boolean reschedule = false;
+        synchronized (callLock) {
+            if (!navigationOutputFences.contains(fence)) return;
+            if (scheduledCallEpoch != callEpoch || fence.callEpoch != callEpoch) {
+                fence.callEpoch = callEpoch;
+                reschedule = true;
+            } else {
+                navigationOutputFences.remove(fence);
+                callback = fence.callback;
+            }
+        }
+        if (reschedule) {
+            enqueueNavigationOutputFence(fence);
+        } else if (callback != null) {
+            callback.run();
+        }
+    }
+
+    private void enqueueNavigationOutputFence(NavigationOutputFence fence) {
+        ExecutorService executor;
+        long scheduledCallEpoch;
+        synchronized (callLock) {
+            if (!navigationOutputFences.contains(fence)) return;
+            executor = calls;
+            scheduledCallEpoch = fence.callEpoch;
+        }
+        if (!enqueueCall(executor, () -> finishNavigationOutputFence(
+                fence, scheduledCallEpoch))) {
+            finishNavigationOutputFence(fence, scheduledCallEpoch);
+        }
+    }
+
+    private long navigationOutputGenerationSnapshot() {
+        synchronized (callLock) {
+            return navigationOutputGeneration;
+        }
+    }
+
+    private boolean isNavigationOutputGenerationCurrent(long expectedGeneration) {
+        synchronized (callLock) {
+            return navigationOutputGeneration == expectedGeneration;
+        }
+    }
+
+    private static Bundle staleNavigationOutputResult() {
+        return InstrumentProxyContract.operationResult(Collections.emptyList(), "", true,
+                "superseded by navigation output policy change");
+    }
+
     void sendNavigationStatus(int status, ResultCallback callback) {
         if (!InstrumentProxyContract.validStatus(status)) {
             deliver(callback, Result.unavailable("invalid navigation status"));
             return;
         }
+        long outputGeneration = navigationOutputGenerationSnapshot();
         submitCall("navigation_status", callback,
-                (current, currentGeneration) ->
-                        current.sendNavigationStatus(currentGeneration, status));
+                (current, currentGeneration) -> isNavigationOutputGenerationCurrent(
+                        outputGeneration)
+                        ? current.sendNavigationStatus(currentGeneration, status)
+                        : staleNavigationOutputResult());
     }
 
     void sendNativeEta(int[] values, AtomicLong admissionRevision,
@@ -615,6 +722,13 @@ final class InstrumentProxyManager {
 
     void sendGuidance(int compatibilityProfile, int icon, int distanceMeters, String road,
             int[] laneDirections, int[] laneRecommendations, ResultCallback callback) {
+        sendGuidance(compatibilityProfile, icon, distanceMeters, road,
+                laneDirections, laneRecommendations, true, callback);
+    }
+
+    void sendGuidance(int compatibilityProfile, int icon, int distanceMeters, String road,
+            int[] laneDirections, int[] laneRecommendations,
+            boolean includeNavigationFields, ResultCallback callback) {
         if (!InstrumentProxyContract.validGuidance(compatibilityProfile,
                 icon, distanceMeters, road, laneDirections, laneRecommendations)) {
             deliver(callback, Result.unavailable("invalid guidance frame"));
@@ -623,10 +737,13 @@ final class InstrumentProxyManager {
         PendingGuidance superseded;
         ExecutorService executor = null;
         boolean deferredPath;
+        long outputGeneration;
         synchronized (callLock) {
+            outputGeneration = navigationOutputGeneration;
             PendingGuidance next = new PendingGuidance(
                     compatibilityProfile, icon, distanceMeters, preserveText(road),
-                    laneDirections, laneRecommendations, callback);
+                    laneDirections, laneRecommendations, includeNavigationFields,
+                    outputGeneration, callback);
             deferredPath = guidanceBarrierActive;
             if (deferredPath) {
                 superseded = deferredGuidance;
@@ -809,15 +926,22 @@ final class InstrumentProxyManager {
 
     /** Clears Instrument guidance and fences the next normal frame behind that clear. */
     void sendTerminalGuidanceClear(int compatibilityProfile, ResultCallback callback) {
+        sendTerminalGuidanceClear(compatibilityProfile, true, callback);
+    }
+
+    void sendTerminalGuidanceClear(int compatibilityProfile,
+            boolean includeNavigationFields, ResultCallback callback) {
         if (!InstrumentProxyContract.validCompatibilityProfile(compatibilityProfile)) {
             deliver(callback, Result.unavailable("invalid guidance profile"));
             return;
         }
         PendingGuidance superseded;
         PendingGuidance deferredSuperseded = null;
+        PendingTerminalGuidanceClear deferredTerminalSuperseded = null;
         ExecutorService executor = null;
         long barrierToken = 0L;
         long expectedEpoch = 0L;
+        long outputGeneration = 0L;
         synchronized (callLock) {
             superseded = pendingGuidance;
             pendingGuidance = null;
@@ -832,13 +956,31 @@ final class InstrumentProxyManager {
                     deferredSuperseded = deferredGuidance;
                     deferredGuidance = null;
                 }
-                if (callback != null) terminalClearCallbacks.add(callback);
+                if (terminalClearIncludeNavigationFields == includeNavigationFields
+                        && terminalClearProfile == compatibilityProfile
+                        && terminalClearOutputGeneration == navigationOutputGeneration) {
+                    if (callback != null) terminalClearCallbacks.add(callback);
+                } else {
+                    if (deferredTerminalClear != null
+                            && deferredTerminalClear.matches(compatibilityProfile,
+                                    includeNavigationFields, navigationOutputGeneration)) {
+                        deferredTerminalClear.addCallback(callback);
+                    } else {
+                        deferredTerminalSuperseded = deferredTerminalClear;
+                        deferredTerminalClear = new PendingTerminalGuidanceClear(
+                                compatibilityProfile, includeNavigationFields,
+                                navigationOutputGeneration, callback);
+                    }
+                }
             } else {
                 guidanceBarrierActive = true;
                 terminalClearInFlight = false;
                 terminalClearProfile = compatibilityProfile;
+                terminalClearIncludeNavigationFields = includeNavigationFields;
+                terminalClearOutputGeneration = navigationOutputGeneration;
                 barrierToken = ++guidanceBarrierToken;
                 expectedEpoch = callEpoch;
+                outputGeneration = navigationOutputGeneration;
                 terminalClearCallbacks.clear();
                 if (callback != null) terminalClearCallbacks.add(callback);
                 executor = calls;
@@ -852,11 +994,17 @@ final class InstrumentProxyManager {
             deliver(deferredSuperseded.callback,
                     Result.unavailable("superseded by duplicate terminal clear"));
         }
+        if (deferredTerminalSuperseded != null) {
+            deferredTerminalSuperseded.deliver(Result.unavailable(
+                    "superseded by a different terminal clear policy"));
+        }
         if (executor == null) return;
         final long requestToken = barrierToken;
         final long requestEpoch = expectedEpoch;
+        final long requestOutputGeneration = outputGeneration;
         if (!enqueueCall(executor,
-                () -> executeTerminalGuidanceClear(requestToken, requestEpoch))) {
+                () -> executeTerminalGuidanceClear(requestToken, requestEpoch,
+                        requestOutputGeneration))) {
             finishTerminalGuidanceClear(requestToken,
                     Result.unavailable("proxy call worker unavailable"));
         }
@@ -867,43 +1015,79 @@ final class InstrumentProxyManager {
         return barrierActive && deferredPresent;
     }
 
-    private void executeTerminalGuidanceClear(long requestToken, long requestEpoch) {
+    private void executeTerminalGuidanceClear(long requestToken, long requestEpoch,
+            long outputGeneration) {
         int outgoingProfile;
+        boolean includeNavigationFields;
         synchronized (callLock) {
             if (!guidanceBarrierActive || requestToken != guidanceBarrierToken
                     || requestEpoch != callEpoch) {
                 return;
             }
+            includeNavigationFields = terminalClearIncludeNavigationFields;
             terminalClearInFlight = true;
             outgoingProfile = terminalClearProfile;
         }
         executeCall("terminal_guidance_clear",
                 result -> finishTerminalGuidanceClear(requestToken, result),
-                (current, currentGeneration) -> current.sendGuidance(
-                        currentGeneration, outgoingProfile,
-                        0, -1, "", new int[0], new int[0]));
+                (current, currentGeneration) -> isNavigationOutputGenerationCurrent(
+                        outputGeneration)
+                        ? current.sendGuidance(currentGeneration, outgoingProfile,
+                                0, -1, "", new int[0], new int[0],
+                                includeNavigationFields)
+                        : staleNavigationOutputResult());
     }
 
     private void finishTerminalGuidanceClear(long requestToken, Result result) {
         List<ResultCallback> callbacks;
         ExecutorService executor = null;
         PendingGuidance deferred;
+        PendingTerminalGuidanceClear nextTerminal;
+        long nextBarrierToken = 0L;
+        long nextOutputGeneration = 0L;
+        long nextEpoch = 0L;
         synchronized (callLock) {
             if (!guidanceBarrierActive || requestToken != guidanceBarrierToken) return;
-            guidanceBarrierActive = false;
             terminalClearInFlight = false;
-            terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
             callbacks = new ArrayList<>(terminalClearCallbacks);
             terminalClearCallbacks.clear();
-            deferred = deferredGuidance;
-            deferredGuidance = null;
-            if (deferred != null) {
-                pendingGuidance = deferred;
-                guidanceScheduled = true;
+            nextTerminal = deferredTerminalClear;
+            deferredTerminalClear = null;
+            if (nextTerminal != null) {
+                guidanceBarrierActive = true;
+                terminalClearProfile = nextTerminal.compatibilityProfile;
+                terminalClearIncludeNavigationFields = nextTerminal.includeNavigationFields;
+                terminalClearOutputGeneration = nextTerminal.outputGeneration;
+                terminalClearCallbacks.addAll(nextTerminal.callbacks);
+                nextBarrierToken = ++guidanceBarrierToken;
+                nextOutputGeneration = nextTerminal.outputGeneration;
+                nextEpoch = callEpoch;
                 executor = calls;
+                deferred = null;
+            } else {
+                guidanceBarrierActive = false;
+                terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
+                terminalClearIncludeNavigationFields = true;
+                terminalClearOutputGeneration = navigationOutputGeneration;
+                deferred = deferredGuidance;
+                deferredGuidance = null;
+                if (deferred != null) {
+                    pendingGuidance = deferred;
+                    guidanceScheduled = true;
+                    executor = calls;
+                }
             }
         }
-        if (deferred != null && !enqueueCall(executor, this::drainGuidance)) {
+        if (nextTerminal != null) {
+            long nextRequestToken = nextBarrierToken;
+            long requestEpoch = nextEpoch;
+            long requestOutputGeneration = nextOutputGeneration;
+            if (!enqueueCall(executor, () -> executeTerminalGuidanceClear(
+                    nextRequestToken, requestEpoch, requestOutputGeneration))) {
+                finishTerminalGuidanceClear(nextRequestToken,
+                        Result.unavailable("proxy call worker unavailable"));
+            }
+        } else if (deferred != null && !enqueueCall(executor, this::drainGuidance)) {
             failPendingGuidance("proxy call worker unavailable");
         }
         for (ResultCallback terminalCallback : callbacks) {
@@ -930,10 +1114,14 @@ final class InstrumentProxyManager {
         }
         if (request == null) return;
         executeCall("guidance", request.callback,
-                (current, currentGeneration) -> current.sendGuidance(
-                        currentGeneration, request.compatibilityProfile, request.icon,
-                        request.distanceMeters, request.road,
-                        request.laneDirections, request.laneRecommendations));
+                (current, currentGeneration) -> isNavigationOutputGenerationCurrent(
+                        request.outputGeneration)
+                        ? current.sendGuidance(currentGeneration,
+                                request.compatibilityProfile, request.icon,
+                                request.distanceMeters, request.road,
+                                request.laneDirections, request.laneRecommendations,
+                                request.includeNavigationFields)
+                        : staleNavigationOutputResult());
     }
 
     private void submitCall(String operation, ResultCallback callback, RemoteCall remoteCall) {
@@ -1124,6 +1312,7 @@ final class InstrumentProxyManager {
         PendingTrafficLight trafficDeferred;
         List<ResultCallback> resetTerminalCallbacks = null;
         List<ResultCallback> resetTrafficLightCallbacks = null;
+        List<NavigationOutputFence> navigationFences;
         boolean activeTerminal;
         boolean scheduleDeferred = false;
         ExecutorService deferredExecutor = null;
@@ -1131,6 +1320,10 @@ final class InstrumentProxyManager {
             previous = calls;
             callEpoch++;
             calls = newCallExecutor(callEpoch);
+            navigationFences = new ArrayList<>(navigationOutputFences);
+            for (NavigationOutputFence fence : navigationFences) {
+                fence.callEpoch = callEpoch;
+            }
             activeOperationId = 0L;
             activeOperationGeneration = 0L;
             activeCallback = activeOperationCallback;
@@ -1146,6 +1339,8 @@ final class InstrumentProxyManager {
                 guidanceBarrierActive = false;
                 terminalClearInFlight = false;
                 terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
+                terminalClearIncludeNavigationFields = true;
+                terminalClearOutputGeneration = navigationOutputGeneration;
                 guidanceBarrierToken++;
                 deferred = deferredGuidance;
                 deferredGuidance = null;
@@ -1157,6 +1352,11 @@ final class InstrumentProxyManager {
                 }
             } else {
                 deferred = null;
+            }
+            if (deferredTerminalClear != null) {
+                if (resetTerminalCallbacks == null) resetTerminalCallbacks = new ArrayList<>();
+                resetTerminalCallbacks.addAll(deferredTerminalClear.callbacks);
+                deferredTerminalClear = null;
             }
             trafficPending = pendingTrafficLight;
             pendingTrafficLight = null;
@@ -1201,6 +1401,9 @@ final class InstrumentProxyManager {
         }
         if (scheduleDeferred && !enqueueCall(deferredExecutor, this::drainGuidance)) {
             failPendingGuidance("proxy call worker unavailable");
+        }
+        for (NavigationOutputFence fence : navigationFences) {
+            enqueueNavigationOutputFence(fence);
         }
     }
 
@@ -2032,10 +2235,13 @@ final class InstrumentProxyManager {
         final String road;
         final int[] laneDirections;
         final int[] laneRecommendations;
+        final boolean includeNavigationFields;
+        final long outputGeneration;
         final ResultCallback callback;
 
         PendingGuidance(int compatibilityProfile, int icon, int distanceMeters,
                 String road, int[] laneDirections, int[] laneRecommendations,
+                boolean includeNavigationFields, long outputGeneration,
                 ResultCallback callback) {
             this.compatibilityProfile = compatibilityProfile;
             this.icon = icon;
@@ -2043,7 +2249,51 @@ final class InstrumentProxyManager {
             this.road = road;
             this.laneDirections = laneDirections.clone();
             this.laneRecommendations = laneRecommendations.clone();
+            this.includeNavigationFields = includeNavigationFields;
+            this.outputGeneration = outputGeneration;
             this.callback = callback;
+        }
+    }
+
+    private static final class NavigationOutputFence {
+        final Runnable callback;
+        long callEpoch;
+
+        NavigationOutputFence(Runnable callback, long callEpoch) {
+            this.callback = callback;
+            this.callEpoch = callEpoch;
+        }
+    }
+
+    private static final class PendingTerminalGuidanceClear {
+        final int compatibilityProfile;
+        final boolean includeNavigationFields;
+        final long outputGeneration;
+        final List<ResultCallback> callbacks = new ArrayList<>();
+
+        PendingTerminalGuidanceClear(int compatibilityProfile,
+                boolean includeNavigationFields, long outputGeneration,
+                ResultCallback callback) {
+            this.compatibilityProfile = compatibilityProfile;
+            this.includeNavigationFields = includeNavigationFields;
+            this.outputGeneration = outputGeneration;
+            addCallback(callback);
+        }
+
+        boolean matches(int profile, boolean includeFields, long generation) {
+            return compatibilityProfile == profile
+                    && includeNavigationFields == includeFields
+                    && outputGeneration == generation;
+        }
+
+        void addCallback(ResultCallback callback) {
+            if (callback != null) callbacks.add(callback);
+        }
+
+        void deliver(Result result) {
+            for (ResultCallback callback : callbacks) {
+                InstrumentProxyManager.deliver(callback, result);
+            }
         }
     }
 
@@ -2063,20 +2313,30 @@ final class InstrumentProxyManager {
         final boolean available;
         final List<InstrumentProxyContract.Operation> operations;
         final String error;
+        final boolean intentionallySkipped;
+        final String skipReason;
+        final String navigationDetail;
         NativeSpeedLimitEngine.Result nativeSpeed;
 
         private Result(boolean available,
-                List<InstrumentProxyContract.Operation> operations, String error) {
+                List<InstrumentProxyContract.Operation> operations, String error,
+                boolean intentionallySkipped, String skipReason, String navigationDetail) {
             this.available = available;
             this.operations = operations;
             this.error = safe(error);
+            this.intentionallySkipped = intentionallySkipped;
+            this.skipReason = safe(skipReason);
+            this.navigationDetail = safe(navigationDetail);
         }
 
         static Result from(Bundle result) {
             String error = InstrumentProxyContract.error(result);
             List<InstrumentProxyContract.Operation> operations =
                     InstrumentProxyContract.operations(result);
-            Result parsed = new Result(result != null, operations, error);
+            Result parsed = new Result(result != null, operations, error,
+                    InstrumentProxyContract.intentionallySkipped(result),
+                    InstrumentProxyContract.skipReason(result),
+                    InstrumentProxyContract.navigationDetail(result));
             if (result != null && result.containsKey("native_started")) {
                 parsed.nativeSpeed = new NativeSpeedLimitEngine.Result(error.isEmpty(),
                         result.getInt("native_raw"), result.getLong("native_started"),
@@ -2086,7 +2346,7 @@ final class InstrumentProxyManager {
         }
 
         static Result unavailable(String error) {
-            return new Result(false, Collections.emptyList(), error);
+            return new Result(false, Collections.emptyList(), error, false, "", "");
         }
     }
 }

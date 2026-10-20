@@ -295,22 +295,43 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 if (outputSuspended) return outputSuspendedResult();
                 List<InstrumentProxyContract.Operation> operations = new ArrayList<>(2);
                 InstrumentApi current = instrument();
-                boolean fidSucceeded = false;
-                boolean sdkSucceeded = false;
+                StringBuilder navigationDetail = new StringBuilder();
+                int fidIndex = -1;
+                boolean statusSucceeded = false;
                 if (hasCapability(InstrumentProxyContract.CAP_DIRECT_FID)) {
+                    fidIndex = operations.size();
                     InstrumentProxyContract.Operation operation =
                             setInt(FID_NAV_STATUS, status);
                     operations.add(operation);
-                    fidSucceeded = succeeded(operation);
+                    statusSucceeded = succeeded(operation);
+                    if (!statusSucceeded) {
+                        appendNavigationDetail(navigationDetail, "status:direct-failed");
+                    }
+                } else {
+                    appendNavigationDetail(navigationDetail, "status:direct-unavailable");
                 }
-                if (hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_SDK)) {
-                    InstrumentProxyContract.Operation operation = invoke(
-                            "instrument_sdk:sendAutoNaviStatus",
-                            current == null ? null : current.status, status);
-                    operations.add(operation);
-                    sdkSucceeded = succeeded(operation);
+                if (!statusSucceeded) {
+                    if (hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_SDK)) {
+                        InstrumentProxyContract.Operation operation = invoke(
+                                "instrument_sdk:sendAutoNaviStatus",
+                                current == null ? null : current.status, status);
+                        operations.add(operation);
+                        statusSucceeded = succeeded(operation);
+                        if (statusSucceeded && fidIndex >= 0) {
+                            recoverFailedOperation(operations, fidIndex);
+                            appendNavigationDetail(navigationDetail,
+                                    "status:recovered-by-sdk");
+                        } else if (statusSucceeded) {
+                            appendNavigationDetail(navigationDetail, "status:sdk-only");
+                        } else {
+                            appendNavigationDetail(navigationDetail, "status:sdk-failed");
+                        }
+                    } else {
+                        appendNavigationDetail(navigationDetail, "status:sdk-unsupported");
+                    }
                 }
-                return finishOperations(operations, fidSucceeded || sdkSucceeded);
+                return finishNavigationOperations(
+                        operations, statusSucceeded, navigationDetail.toString());
             } finally {
                 Binder.restoreCallingIdentity(identity);
             }
@@ -320,7 +341,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     @Override
     public Bundle sendGuidance(long requestGeneration, int compatibilityProfile, int icon,
             int distanceMeters, String road,
-            int[] laneDirections, int[] laneRecommendations) {
+            int[] laneDirections, int[] laneRecommendations,
+            boolean includeNavigationFields) {
         enforceSession(requestGeneration);
         String roadText = road == null ? "" : road;
         if (!InstrumentProxyContract.validGuidance(compatibilityProfile,
@@ -333,37 +355,160 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             long identity = Binder.clearCallingIdentity();
             try {
                 if (outputSuspended) return outputSuspendedResult();
+                if (!includeNavigationFields
+                        && !hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_LANES)) {
+                    return InstrumentProxyContract.operationResult(
+                            new ArrayList<>(), "", true, "lane capability unavailable");
+                }
                 List<InstrumentProxyContract.Operation> operations = new ArrayList<>(21);
                 InstrumentApi current = instrument();
-                boolean fidSucceeded = false;
-                boolean sdkSucceeded = false;
-                if (hasCapability(InstrumentProxyContract.CAP_DIRECT_FID)) {
-                    int first = operations.size();
-                    operations.add(setInt(FID_SIMPLE_ICON, icon));
-                    operations.add(setInt(FID_DUAL_ICON, icon));
-                    operations.add(setInt(FID_DISTANCE, distanceMeters));
-                    operations.add(setBytes(FID_ROAD,
-                            roadText.getBytes(StandardCharsets.UTF_16LE)));
-                    fidSucceeded = succeeded(operations, first, 4);
-                }
-                if (hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_SDK)) {
-                    int first = operations.size();
-                    boolean extendedIcon = ManeuverCompatibilityProfile.isBaiduInstrumentIcon(icon);
-                    // The stock SDK rejects extended Baidu icons before reaching Binder.
-                    if (!extendedIcon) {
-                        operations.add(invoke("instrument_sdk:sendSimpleGuidanceInfo",
-                                current == null ? null : current.simple, icon, distanceMeters));
+                boolean fieldsSucceeded = true;
+                StringBuilder navigationDetail = new StringBuilder();
+                if (includeNavigationFields) {
+                    boolean hasDirectFid = hasCapability(InstrumentProxyContract.CAP_DIRECT_FID);
+                    boolean hasSdk = hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_SDK);
+                    boolean simplePairSucceeded;
+                    boolean roadSucceeded;
+                    if (hasDirectFid) {
+                        byte[] roadBytes = roadText.getBytes(StandardCharsets.UTF_16LE);
+                        int simpleIconIndex = operations.size();
+                        operations.add(setInt(FID_SIMPLE_ICON, icon));
+                        int dualIconIndex = operations.size();
+                        operations.add(setInt(FID_DUAL_ICON, icon));
+                        int distanceIndex = operations.size();
+                        operations.add(setInt(FID_DISTANCE, distanceMeters));
+                        int roadIndex = operations.size();
+                        operations.add(setBytes(FID_ROAD, roadBytes));
+                        boolean simpleIconSucceeded =
+                                succeeded(operations.get(simpleIconIndex));
+                        boolean distanceSucceeded = succeeded(operations.get(distanceIndex));
+                        simplePairSucceeded = simpleIconSucceeded && distanceSucceeded;
+                        boolean dualIconSucceeded = succeeded(operations.get(dualIconIndex));
+                        roadSucceeded = succeeded(operations.get(roadIndex));
+                        if (!simpleIconSucceeded || !distanceSucceeded) {
+                            appendNavigationDetail(navigationDetail, "simple:direct-failed");
+                        }
+                        if (!dualIconSucceeded) {
+                            appendNavigationDetail(navigationDetail, "dual-icon:direct-failed");
+                        }
+                        if (!roadSucceeded) {
+                            appendNavigationDetail(navigationDetail, "road:direct-failed");
+                        }
+
+                        boolean extendedIcon =
+                                ManeuverCompatibilityProfile.isBaiduInstrumentIcon(icon);
+                        if (!simplePairSucceeded && hasSdk) {
+                            if (extendedIcon) {
+                                Log.i(TAG, "guidance SDK simple fallback skipped: unsupported extended Baidu icon");
+                                appendNavigationDetail(navigationDetail,
+                                        "simple:sdk-skipped-extended-icon");
+                            } else if (distanceMeters < 0) {
+                                Log.i(TAG, "guidance SDK simple fallback skipped: negative terminal distance");
+                                appendNavigationDetail(navigationDetail,
+                                        "simple:sdk-skipped-negative-distance");
+                            } else {
+                                int sdkPairIndex = operations.size();
+                                operations.add(invoke("instrument_sdk:sendSimpleGuidanceInfo",
+                                        current == null ? null : current.simple,
+                                        icon, distanceMeters));
+                                simplePairSucceeded = succeeded(operations.get(sdkPairIndex));
+                                if (simplePairSucceeded) {
+                                    recoverFailedOperation(operations, simpleIconIndex);
+                                    recoverFailedOperation(operations, distanceIndex);
+                                    appendNavigationDetail(navigationDetail,
+                                            "simple:recovered-by-sdk");
+                                } else {
+                                    appendNavigationDetail(navigationDetail,
+                                            "simple:sdk-failed");
+                                }
+                            }
+                        } else if (!simplePairSucceeded) {
+                            appendNavigationDetail(navigationDetail,
+                                    "simple:sdk-unsupported");
+                        }
+                        if (!roadSucceeded && hasSdk) {
+                            if (roadBytes.length <= 255) {
+                                int sdkRoadIndex = operations.size();
+                                operations.add(invoke("instrument_sdk:sendNextPathName",
+                                        current == null ? null : current.next, roadText));
+                                roadSucceeded = succeeded(operations.get(sdkRoadIndex));
+                                if (roadSucceeded) {
+                                    recoverFailedOperation(operations, roadIndex);
+                                    appendNavigationDetail(navigationDetail,
+                                            "road:recovered-by-sdk");
+                                } else {
+                                    appendNavigationDetail(navigationDetail,
+                                            "road:sdk-failed");
+                                }
+                            } else {
+                                Log.i(TAG, "guidance SDK road fallback skipped: UTF-16LE payload exceeds 255 bytes");
+                                appendNavigationDetail(navigationDetail,
+                                        "road:sdk-skipped-road-length");
+                            }
+                        } else if (!roadSucceeded) {
+                            appendNavigationDetail(navigationDetail,
+                                    "road:sdk-unsupported");
+                        }
+                        fieldsSucceeded = simplePairSucceeded
+                                && dualIconSucceeded && roadSucceeded;
+                    } else if (hasSdk) {
+                        appendNavigationDetail(navigationDetail, "direct-unavailable");
+                        byte[] roadBytes = roadText.getBytes(StandardCharsets.UTF_16LE);
+                        boolean extendedIcon =
+                                ManeuverCompatibilityProfile.isBaiduInstrumentIcon(icon);
+                        if (extendedIcon) {
+                            simplePairSucceeded = false;
+                            Log.i(TAG, "guidance SDK simple output skipped: unsupported extended Baidu icon");
+                            appendNavigationDetail(navigationDetail,
+                                    "simple:sdk-skipped-extended-icon");
+                        } else if (distanceMeters < 0) {
+                            simplePairSucceeded = false;
+                            Log.i(TAG, "guidance SDK simple output skipped: negative terminal distance");
+                            appendNavigationDetail(navigationDetail,
+                                    "simple:sdk-skipped-negative-distance");
+                        } else {
+                            int sdkPairIndex = operations.size();
+                            operations.add(invoke("instrument_sdk:sendSimpleGuidanceInfo",
+                                    current == null ? null : current.simple,
+                                    icon, distanceMeters));
+                            simplePairSucceeded = succeeded(operations.get(sdkPairIndex));
+                            appendNavigationDetail(navigationDetail, simplePairSucceeded
+                                    ? "simple:sdk-only" : "simple:sdk-failed");
+                        }
+                        if (roadBytes.length <= 255) {
+                            int sdkRoadIndex = operations.size();
+                            operations.add(invoke("instrument_sdk:sendNextPathName",
+                                    current == null ? null : current.next, roadText));
+                            roadSucceeded = succeeded(operations.get(sdkRoadIndex));
+                            appendNavigationDetail(navigationDetail, roadSucceeded
+                                    ? "road:sdk-only" : "road:sdk-failed");
+                        } else {
+                            roadSucceeded = false;
+                            Log.i(TAG, "guidance SDK road output skipped: UTF-16LE payload exceeds 255 bytes");
+                            appendNavigationDetail(navigationDetail,
+                                    "road:sdk-skipped-road-length");
+                        }
+                        fieldsSucceeded = simplePairSucceeded && roadSucceeded;
+                    } else {
+                        appendNavigationDetail(navigationDetail, "direct-unavailable");
+                        appendNavigationDetail(navigationDetail, "sdk-unsupported");
+                        fieldsSucceeded = false;
                     }
-                    operations.add(invoke("instrument_sdk:sendNextPathName",
-                            current == null ? null : current.next, roadText));
-                    sdkSucceeded = !extendedIcon && succeeded(operations, first, 2);
                 }
                 if (hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_LANES)) {
+                    int laneFirst = operations.size();
                     addLaneOperations(operations, compatibilityProfile,
                             directions, recommendations,
                             directions.length == 0 ? -1 : Math.max(0, distanceMeters));
+                    boolean lanesSucceeded = succeeded(operations, laneFirst,
+                            operations.size() - laneFirst);
+                    fieldsSucceeded &= lanesSucceeded;
+                    if (!lanesSucceeded) {
+                        appendNavigationDetail(navigationDetail, "lanes:direct-failed");
+                    }
                 }
-                return finishOperations(operations, fidSucceeded || sdkSucceeded);
+                return finishNavigationOperations(
+                        operations, fieldsSucceeded, navigationDetail.toString());
             } finally {
                 Binder.restoreCallingIdentity(identity);
             }
@@ -1199,6 +1344,25 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
 
     private Bundle finishOperations(
             List<InstrumentProxyContract.Operation> operations, boolean anyPlaneSucceeded) {
+        return finishOperations(operations, anyPlaneSucceeded,
+                "all available Instrument planes failed");
+    }
+
+    private Bundle finishNavigationOperations(
+            List<InstrumentProxyContract.Operation> operations, boolean groupsSucceeded,
+            String navigationDetail) {
+        return finishOperations(operations, groupsSucceeded,
+                "one or more required Instrument navigation field groups failed",
+                navigationDetail);
+    }
+
+    private Bundle finishOperations(List<InstrumentProxyContract.Operation> operations,
+            boolean anyPlaneSucceeded, String failure) {
+        return finishOperations(operations, anyPlaneSucceeded, failure, "");
+    }
+
+    private Bundle finishOperations(List<InstrumentProxyContract.Operation> operations,
+            boolean anyPlaneSucceeded, String failure, String navigationDetail) {
         for (InstrumentProxyContract.Operation operation : operations) {
             if (!succeeded(operation)) {
                 instrument = null;
@@ -1206,10 +1370,11 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             }
         }
         if (anyPlaneSucceeded) {
-            return InstrumentProxyContract.operationResult(operations, "");
+            return InstrumentProxyContract.operationResult(
+                    operations, "", false, "", navigationDetail);
         }
         return InstrumentProxyContract.operationResult(
-                operations, "all available Instrument planes failed");
+                operations, failure, false, "", navigationDetail);
     }
 
     private boolean hasCapability(int capability) {
@@ -1227,6 +1392,20 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             if (!succeeded(operations.get(index))) return false;
         }
         return true;
+    }
+
+    private static void recoverFailedOperation(
+            List<InstrumentProxyContract.Operation> operations, int index) {
+        InstrumentProxyContract.Operation operation = operations.get(index);
+        if (!succeeded(operation)) {
+            operations.set(index, operation.recoveredByFallback());
+        }
+    }
+
+    private static void appendNavigationDetail(StringBuilder detail, String value) {
+        if (detail == null || value == null || value.isEmpty()) return;
+        if (detail.length() > 0) detail.append(',');
+        detail.append(value);
     }
 
     private static InstrumentProxyContract.Operation operation(

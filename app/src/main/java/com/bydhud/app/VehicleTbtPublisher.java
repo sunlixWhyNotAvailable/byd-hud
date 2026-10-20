@@ -3,12 +3,8 @@ package com.bydhud.app;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
-import android.content.ComponentName;
-import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.os.Handler;
 import android.os.SystemClock;
 import android.util.Log;
@@ -33,6 +29,9 @@ final class VehicleTbtPublisher {
     private static final String TAG = "BydHudVehicleTbt";
     private static final String AMAP_ACTION = NativeEtaTransportPolicy.AMAP_ACTION;
     private static final String AMAP_PACKAGE = NativeEtaTransportPolicy.AMAP_PACKAGE_NAME;
+    private static final String LEGACY_AMAP_PACKAGE =
+            NativeEtaTransportPolicy.LEGACY_AMAP_PACKAGE_NAME;
+    private static final int HUD_CHECK_SKIPPED = -2;
     private static final int FLAG_RECEIVER_INCLUDE_BACKGROUND = 0x01000000;
     private static final int FID_NAV_STATUS = 1_138_753_594;
     private static final int FID_SIMPLE_ICON = 1_139_806_224;
@@ -92,6 +91,7 @@ final class VehicleTbtPublisher {
     private boolean lastGuidanceHasAmapFallback;
     private boolean handoffPendingInstrumentRecovery;
     private boolean hasLastInstrumentSemantic;
+    private boolean lastInstrumentNavigationFieldsIncluded = true;
     private boolean hasLastAmapSemantic;
     private String lastAmapSemanticKey = "";
     private volatile int hudCheckInstrumentResult;
@@ -100,12 +100,18 @@ final class VehicleTbtPublisher {
     private volatile int hudCheckLightIndex = -1;
     private boolean hudCheckLightOwned;
     private long hudCheckLightLastAttemptMs;
-    private NativeEtaTransportPolicy.ReceiverState amapReceiverState =
-            NativeEtaTransportPolicy.ReceiverState.UNKNOWN;
+    private NativeEtaTransportPolicy.Endpoint amapEndpoint =
+            NativeEtaTransportPolicy.Endpoint.UNKNOWN;
     private String amapReceiverReason = "not-resolved";
+    private String amapEndpointReason = "not-resolved";
+    private long amapSelectionRevision;
+    private long amapSessionRevision;
+    private boolean amapTransitionPending;
+    private boolean amapSelectionDirty;
     private DirectTbtFrame latestNativeEtaFrame;
     private Trace latestNativeEtaTrace;
     private NativeEtaSnapshot latestNativeEta;
+    private HudState latestManualState;
     private String lastNativeEtaSemanticKey = "";
     private boolean nativeEtaTickScheduled;
     private boolean nativeEtaInFlight;
@@ -129,8 +135,9 @@ final class VehicleTbtPublisher {
     }
 
     String hudCheckStatus(String language) {
-        String result = "Instrument: " + checkResultText(hudCheckInstrumentResult, language)
-                + " · AMap: " + checkResultText(hudCheckAmapResult, language);
+        String result = "Instrument: " + checkResultText(
+                hudCheckInstrumentResult, language, false)
+                + " · AMap: " + checkResultText(hudCheckAmapResult, language, true);
         if (hudCheckLightIndex >= 0) {
             result += ("uk".equals(language) ? " · Світлофор: "
                     : "ru".equals(language) ? " · Светофор: " : " · Traffic light: ")
@@ -140,12 +147,28 @@ final class VehicleTbtPublisher {
     }
 
     private static String checkResultText(int result, String language) {
-        if (result > 0) return "uk".equals(language) ? "надіслано" : "ru".equals(language) ? "отправлено" : "sent";
+        return checkResultText(result, language, false);
+    }
+
+    private static String checkResultText(int result, String language, boolean dispatchOnly) {
+        if (result == HUD_CHECK_SKIPPED) {
+            return "uk".equals(language) ? "пропущено"
+                    : "ru".equals(language) ? "пропущено" : "skipped";
+        }
+        if (result > 0) {
+            if (dispatchOnly) {
+                return "uk".equals(language) ? "передано"
+                        : "ru".equals(language) ? "отправлено" : "dispatched";
+            }
+            return "uk".equals(language) ? "надіслано"
+                    : "ru".equals(language) ? "отправлено" : "sent";
+        }
         if (result < 0) return "uk".equals(language) ? "недоступно/помилка" : "ru".equals(language) ? "недоступно/ошибка" : "unavailable/error";
         return "uk".equals(language) ? "очікування" : "ru".equals(language) ? "ожидание" : "waiting";
     }
 
     private static String checkResultText(int result, boolean ukrainian) {
+        if (result == HUD_CHECK_SKIPPED) return ukrainian ? "пропущено" : "skipped";
         if (result > 0) return ukrainian ? "надіслано" : "sent";
         if (result < 0) return ukrainian ? "недоступно/помилка" : "unavailable/error";
         return ukrainian ? "очікування" : "waiting";
@@ -245,12 +268,15 @@ final class VehicleTbtPublisher {
                         ownerPackage, ownerGeneration,
                         "route-generation-replaced", null, null);
                 lastGuidanceHasAmapFallback = false;
+                invalidateAmapSession("route-generation-replaced");
+                instrument.fenceNavigationOutput(() -> { });
                 sendTerminalGuidanceClear(replaced);
                 sendAmapTerminal(replaced);
                 ownerGeneration = generation;
                 ++routeToken;
                 resetNativeEtaState("route-generation-replaced");
-                resolveAmapReceiver("route-generation-replaced");
+                resetAmapEndpointForFreshSession("route-generation-replaced");
+                resolveAmapReceiver("route-generation-replaced", false, false);
                 Trace started = trace(owner, generation, reason, null, null);
                 sendStatus(STATUS_ACTIVE, started);
                 record(started, "lifecycle", "begin", "navigation",
@@ -284,7 +310,9 @@ final class VehicleTbtPublisher {
                     !replacingDirectWithManual);
         }
         resetNativeEtaState("route-start");
-        resolveAmapReceiver("route-start");
+        invalidateAmapSession("route-start");
+        resetAmapEndpointForFreshSession("route-start");
+        resolveAmapReceiver("route-start", false, false);
         ownerPackage = owner;
         ownerGeneration = generation;
         routeActive = true;
@@ -292,6 +320,7 @@ final class VehicleTbtPublisher {
         instrument.setOutputDemand(true, "route:" + sourceForOwner(owner));
         handoffPendingInstrumentRecovery = false;
         hasInstrumentGuidance = false;
+        latestManualState = null;
         resetGuidanceDedup();
         teardownEligible = false;
         ownerHasHudPriority = hasHudPriority;
@@ -328,13 +357,17 @@ final class VehicleTbtPublisher {
                 || current.equals(successor)) {
             return false;
         }
+        boolean interruptedPolicyTransition = amapTransitionPending;
+        if (interruptedPolicyTransition) {
+            invalidateAmapSession("direct-owner-replaced");
+        }
         ownerPackage = successor;
         ownerGeneration = successorGeneration;
         ownerHasHudPriority = successorHasHudPriority;
         instrument.setOutputDemand(true, "handoff:" + sourceForOwner(successor));
         ++routeToken;
+        long successorRouteToken = routeToken;
         resetNativeEtaState("direct-owner-replaced");
-        resolveAmapReceiver("direct-owner-replaced");
         teardownEligible = false;
         teardownOwner = "";
         teardownGeneration = Long.MIN_VALUE;
@@ -343,17 +376,27 @@ final class VehicleTbtPublisher {
         hasInstrumentGuidance = false;
         lastGuidanceHasAmapFallback = false;
         handoffPendingInstrumentRecovery = successorFrame == null;
+        hasInstrumentStatus = true;
+        lastInstrumentStatus = STATUS_ACTIVE;
 
         Trace successorTrace = trace(successor, successorGeneration,
                 reason, successorFrame, null);
-        sendStatus(STATUS_ACTIVE, successorTrace);
+        latestNativeEtaFrame = successorFrame;
+        latestNativeEtaTrace = successorFrame == null ? null : successorTrace;
         if (successorFrame != null) {
             lastGuidanceHasAmapFallback = true;
-            sendInstrumentFrame(successorFrame, successorTrace);
-            NativeEtaSnapshot etaSnapshot = updateNativeEta(
-                    successorFrame, successorTrace, reason);
-            dispatchNativeEtaSnapshot(etaSnapshot, successorFrame,
-                    successorTrace, reason, false, true);
+        }
+        boolean policyStable = resolveAmapReceiver(
+                "direct-owner-replaced", true, interruptedPolicyTransition);
+        if (policyStable && routeToken == successorRouteToken) {
+            sendStatus(STATUS_ACTIVE, successorTrace);
+            if (successorFrame != null) {
+                sendInstrumentFrame(successorFrame, successorTrace);
+                NativeEtaSnapshot etaSnapshot = updateNativeEta(
+                        successorFrame, successorTrace, reason);
+                dispatchNativeEtaSnapshot(etaSnapshot, successorFrame,
+                        successorTrace, reason, false, true);
+            }
         }
         if (switchDashboard) {
             dispatchDashboard(successor, successorGeneration,
@@ -387,6 +430,7 @@ final class VehicleTbtPublisher {
             beginRoute(packageName, generation, false, false);
         }
         if (!routeActive || !matches(packageName, generation)) return;
+        latestManualState = null;
         boolean hasGuidance = frame.hasGuidance();
         if (hasGuidance) handoffPendingInstrumentRecovery = false;
         Trace trace = trace(packageName, generation, reason, frame, null);
@@ -404,7 +448,8 @@ final class VehicleTbtPublisher {
         DirectTbtFrame frame = latestNativeEtaFrame == null
                 ? DirectTbtFrame.empty() : latestNativeEtaFrame.withoutGuidance();
         Trace trace = trace(packageName, generation, reason, frame, null);
-        sendInstrumentGuidance(0, -1, "", LanePayload.EMPTY, trace, true);
+        sendInstrumentGuidance(0, -1, "", LanePayload.EMPTY, trace,
+                instrumentNavigationFieldsAllowed(), true);
         NativeEtaSnapshot etaSnapshot = updateNativeEta(frame, trace, reason);
         lastGuidanceHasAmapFallback = true;
         dispatchNativeEtaSnapshot(etaSnapshot, frame, trace, reason, false, true);
@@ -426,6 +471,7 @@ final class VehicleTbtPublisher {
             hudCheckProfileActive = false;
         }
         latestHudCheck = state.hudCheck;
+        latestManualState = state;
         if (state.hudCheck != null) {
             int lightIndex = state.hudCheck.isLiveCheck()
                     ? state.hudCheck.trafficLightIndex : -1;
@@ -442,15 +488,16 @@ final class VehicleTbtPublisher {
                 || trace.compatibilityProfile == ManeuverCompatibilityProfile.BAIDU;
         lastGuidanceHasAmapFallback = publishBroadcast;
         sendInstrumentGuidance(
-                trace.nativeId, distance, road, trace.lanes, trace, true);
+                trace.nativeId, distance, road, trace.lanes, trace,
+                instrumentNavigationFieldsAllowed(), true);
         if (publishBroadcast) {
             sendAmapFrame(trace.amapIcon, trace.roundaboutExit,
                     distance, road, DirectTbtFrame.TravelMetrics.unavailable(), trace, true);
         } else {
             if (state.hudCheck != null) {
-                hudCheckAmapResult = -1;
+                hudCheckAmapResult = -2;
                 hudCheckAmapReason = "no-exact-mapping";
-                recordHudCheck(trace, "AMap", -1, hudCheckAmapReason);
+                recordHudCheck(trace, "AMap", HUD_CHECK_SKIPPED, hudCheckAmapReason);
             }
             record(trace, "amap_broadcast", "skip", "no_exact_mapping",
                     null, 0, 0L, "");
@@ -490,6 +537,8 @@ final class VehicleTbtPublisher {
         String endedOwner = ownerPackage;
         long endedGeneration = ownerGeneration;
         Trace trace = trace(endedOwner, endedGeneration, reason, null, null);
+        invalidateAmapSession("route-end:" + safe(reason));
+        instrument.fenceNavigationOutput(() -> { });
         ++routeToken;
         resetNativeEtaState("route-end:" + safe(reason));
         handoffPendingInstrumentRecovery = false;
@@ -511,6 +560,7 @@ final class VehicleTbtPublisher {
         teardownReason = safe(reason);
         teardownManeuverCompatibilityProfile = trace.compatibilityProfile;
         latestHudCheck = null;
+        latestManualState = null;
         hudCheckProfileActive = false;
         hudCheckDiagnostics.reset();
         instrument.setOutputDemand(false, "route-end:" + safe(reason));
@@ -720,6 +770,12 @@ final class VehicleTbtPublisher {
     private void sendStatus(int status, Trace trace) {
         hasInstrumentStatus = true;
         lastInstrumentStatus = status;
+        if (!instrumentNavigationFieldsAllowed()) {
+            record(trace, "instrument", "skip", "navigation_status", ints(status),
+                    0, 0L, amapTransitionPending
+                            ? "endpoint-transition" : "new-amap-selected");
+            return;
+        }
         instrument.sendNavigationStatus(status,
                 result -> ownerHandler.post(() -> recordInstrumentResult(
                         result, trace, status, 0, -1, "")));
@@ -730,10 +786,17 @@ final class VehicleTbtPublisher {
         logManeuverMapping(trace);
         int distance = Math.max(0, frame.getDistanceMeters());
         sendInstrumentGuidance(
-                trace.nativeId, distance, roadTextForTest(frame), trace.lanes, trace, true);
+                trace.nativeId, distance, roadTextForTest(frame), trace.lanes, trace,
+                instrumentNavigationFieldsAllowed(), true);
     }
 
     private void sendTerminalGuidanceClear(Trace trace) {
+        sendTerminalGuidanceClear(trace,
+                NativeEtaTransportPolicy.includesInstrumentNavigationFields(amapEndpoint));
+    }
+
+    private void sendTerminalGuidanceClear(Trace trace,
+            boolean includeNavigationFields) {
         handoffPendingInstrumentRecovery = false;
         hasInstrumentGuidance = true;
         lastInstrumentIcon = 0;
@@ -742,15 +805,16 @@ final class VehicleTbtPublisher {
         lastInstrumentLaneDirections = new int[0];
         lastInstrumentLaneRecommendations = new int[0];
         lastInstrumentCompatibilityProfile = trace.compatibilityProfile;
+        lastInstrumentNavigationFieldsIncluded = includeNavigationFields;
         instrument.sendTerminalGuidanceClear(
-                trace.compatibilityProfile,
+                trace.compatibilityProfile, includeNavigationFields,
                 result -> ownerHandler.post(() -> recordInstrumentResult(
                         result, trace, 0, 0, -1, "")));
     }
 
     private void sendInstrumentGuidance(
             int icon, int distance, String road, LanePayload lanes,
-            Trace trace, boolean deduplicate) {
+            Trace trace, boolean includeNavigationFields, boolean deduplicate) {
         hasInstrumentGuidance = true;
         boolean extendedBaiduIcon = trace != null
                 && trace.compatibilityProfile == ManeuverCompatibilityProfile.BAIDU
@@ -767,6 +831,7 @@ final class VehicleTbtPublisher {
                 && lastInstrumentIcon == nextIcon
                 && lastInstrumentDistance == nextDistance
                 && lastInstrumentRoad.equals(nextRoad)
+                && lastInstrumentNavigationFieldsIncluded == includeNavigationFields
                 && Arrays.equals(lastInstrumentLaneDirections, nextLanes.directions)
                 && Arrays.equals(lastInstrumentLaneRecommendations,
                         nextLanes.recommendations);
@@ -783,23 +848,39 @@ final class VehicleTbtPublisher {
         lastInstrumentLaneDirections = nextLanes.directions.clone();
         lastInstrumentLaneRecommendations = nextLanes.recommendations.clone();
         lastInstrumentCompatibilityProfile = nextProfile;
+        lastInstrumentNavigationFieldsIncluded = includeNavigationFields;
         int sentIcon = lastInstrumentIcon;
         int sentDistance = lastInstrumentDistance;
         String sentRoad = lastInstrumentRoad;
         int[] sentLaneDirections = lastInstrumentLaneDirections.clone();
         int[] sentLaneRecommendations = lastInstrumentLaneRecommendations.clone();
         if (trace.hudCheck != null && !sameGuidance) {
-            hudCheckInstrumentResult = 0;
-            hudCheckInstrumentReason = "pending";
-            recordHudCheck(trace, "Instrument", 0, hudCheckInstrumentReason);
+            hudCheckInstrumentResult = includeNavigationFields ? 0 : HUD_CHECK_SKIPPED;
+            hudCheckInstrumentReason = includeNavigationFields
+                    ? "pending" : "navigation-fields-skipped";
+            recordHudCheck(trace, "Instrument", hudCheckInstrumentResult,
+                    hudCheckInstrumentReason);
+        }
+        if (!includeNavigationFields) {
+            record(trace, "instrument", "skip", "navigation_guidance",
+                    guidanceBytes(sentIcon, sentDistance, sentRoad, nextLanes),
+                    0, 0L, amapTransitionPending
+                            ? "endpoint-transition;lanes-preserved"
+                            : "new-amap-selected;lanes-preserved");
         }
         instrument.sendGuidance(
                 nextProfile, sentIcon, sentDistance, sentRoad,
-                sentLaneDirections, sentLaneRecommendations,
+                sentLaneDirections, sentLaneRecommendations, includeNavigationFields,
                 result -> ownerHandler.post(() -> recordInstrumentGuidanceResult(
                         result, trace, sentIcon, sentDistance, sentRoad,
-                        sentLaneDirections, sentLaneRecommendations)));
+                        sentLaneDirections, sentLaneRecommendations,
+                        includeNavigationFields)));
         hasLastInstrumentSemantic = true;
+    }
+
+    private boolean instrumentNavigationFieldsAllowed() {
+        return !amapTransitionPending
+                && NativeEtaTransportPolicy.includesInstrumentNavigationFields(amapEndpoint);
     }
 
     void refreshNativeEta() {
@@ -820,19 +901,14 @@ final class VehicleTbtPublisher {
     }
 
     void onPackageChanged(String packageName) {
-        if (!AMAP_PACKAGE.equals(packageName)) return;
-        resolveAmapReceiver("package-change");
-        if (!routeActive || latestNativeEtaFrame == null) return;
-        DirectTbtFrame frame = latestNativeEtaFrame;
-        resetNativeEtaCaches("package-change");
-        lastNativeEtaSemanticKey = "";
-        hasLastAmapSemantic = false;
-        Trace trace = trace(ownerPackage, ownerGeneration,
-                "native-eta-package-change", frame, null);
-        NativeEtaSnapshot snapshot = updateNativeEta(
-                frame, trace, "package-change");
-        dispatchNativeEtaSnapshot(snapshot, frame, trace,
-                "package-change", false, true);
+        if (!NativeEtaTransportPolicy.isAmapPackageName(packageName)) return;
+        boolean selectedPackageChanged = packageName.equals(
+                NativeEtaTransportPolicy.packageNameFor(amapEndpoint));
+        if (!resolveAmapReceiver(
+                "package-change:" + packageName, true, selectedPackageChanged)) return;
+        if (!routeActive) return;
+        if (selectedPackageChanged) resetAmapPolicyCaches("package-change:" + packageName);
+        replayCurrentRouteState("package-change:" + packageName);
     }
 
     private NativeEtaSnapshot updateNativeEta(
@@ -857,9 +933,9 @@ final class VehicleTbtPublisher {
                 nowWallMs, TimeZone.getDefault(), options.nativeEta24Hour,
                 java.util.Locale.getDefault());
         NativeEtaTransportPolicy.Writer writer = NativeEtaTransportPolicy.writerFor(
-                options.etaOutputMode, amapReceiverState);
+                options.etaOutputMode, amapEndpoint);
         String semanticKey = nativeEtaSemanticKey(
-                options, data, formatted, writer);
+                options, data, formatted, writer, amapEndpoint);
         boolean semanticChanged = !semanticKey.equals(lastNativeEtaSemanticKey);
         if (semanticChanged) nativeEtaAdmissionRevision.incrementAndGet();
         NativeEtaSnapshot snapshot = new NativeEtaSnapshot(
@@ -878,6 +954,7 @@ final class VehicleTbtPublisher {
             DirectTbtFrame frame, Trace trace, String reason,
             boolean periodic, boolean publishAmapGuidance) {
         if (!routeActive || frame == null || trace == null) return;
+        if (amapTransitionPending) return;
         NativeEtaTransportPolicy.Writer writer = snapshot == null
                 ? NativeEtaTransportPolicy.Writer.NONE : snapshot.writer;
         if (publishAmapGuidance
@@ -1143,12 +1220,14 @@ final class VehicleTbtPublisher {
     private static String nativeEtaSemanticKey(
             DirectTbtPayload.Options options, NativeEtaData data,
             NativeEtaFormatter.Formatted formatted,
-            NativeEtaTransportPolicy.Writer writer) {
+            NativeEtaTransportPolicy.Writer writer,
+            NativeEtaTransportPolicy.Endpoint endpoint) {
         return options.etaOutputMode + "|" + options.routeMetricsMode + "|"
                 + options.wholeRouteMetrics + "|" + options.showEta + "|"
                 + options.showRemainingTime + "|" + options.showRemainingDistance + "|"
                 + options.nativeEta24Hour + "|" + java.util.Locale.getDefault() + "|"
-                + writer + "|" + data.remainingSeconds + "|" + data.remainingMeters + "|"
+                + endpoint + "|" + writer + "|" + data.remainingSeconds + "|"
+                + data.remainingMeters + "|"
                 + formatted.arrivalClock + "|" + formatted.arrivalQualifier + "|"
                 + formatted.routeRemainTimeAuto + "|" + formatted.etaText + "|"
                 + formatted.durationDays + "|" + formatted.durationHours + "|"
@@ -1167,6 +1246,8 @@ final class VehicleTbtPublisher {
                 + " showTime=" + snapshot.options.showRemainingTime
                 + " showDistance=" + snapshot.options.showRemainingDistance
                 + " reason=" + safe(reason)
+                + " endpoint=" + amapEndpoint
+                + " package=" + NativeEtaTransportPolicy.packageNameFor(amapEndpoint)
                 + " receiver=" + amapReceiverReason
                 + " metrics=" + snapshot.data.diagnostics
                 + " arrival=" + snapshot.formatted.arrivalClock
@@ -1179,7 +1260,7 @@ final class VehicleTbtPublisher {
     }
 
     private void ensureNativeEtaTick() {
-        if (nativeEtaTickScheduled || !routeActive) return;
+        if (nativeEtaTickScheduled || !routeActive || amapTransitionPending) return;
         nativeEtaTickScheduled = true;
         ownerHandler.postDelayed(nativeEtaTick, NATIVE_ETA_PERIOD_MS);
     }
@@ -1222,65 +1303,211 @@ final class VehicleTbtPublisher {
         lastNativeEtaSemanticKey = "";
     }
 
-    private void resolveAmapReceiver(String reason) {
-        AmapReceiverResolution resolution = resolveAmapReceiver(context);
-        amapReceiverState = resolution.state;
-        amapReceiverReason = resolution.reason;
-        log("native_eta receiver=" + amapReceiverState + " reason="
-                + amapReceiverReason + " trigger=" + safe(reason));
+    private void invalidateAmapSession(String reason) {
+        boolean wasPending = amapTransitionPending;
+        ++amapSessionRevision;
+        ++amapSelectionRevision;
+        amapTransitionPending = false;
+        amapSelectionDirty = false;
+        if (wasPending) {
+            log("amap_endpoint transition_cancel session=" + amapSessionRevision
+                    + " reason=" + safe(reason) + " selected=" + amapEndpoint);
+        }
+    }
+
+    private void resetAmapEndpointForFreshSession(String trigger) {
+        amapEndpoint = NativeEtaTransportPolicy.Endpoint.UNKNOWN;
+        amapEndpointReason = "fresh-session-unresolved";
+        amapReceiverReason = "endpoint=UNKNOWN;fresh-session-unresolved";
+        log("amap_endpoint session_reset selected=" + amapEndpoint
+                + " reason=" + amapEndpointReason + " trigger=" + safe(trigger));
+    }
+
+    private boolean isCurrentAmapTransition(long selectionRevision,
+            long sessionRevision, String sessionOwner, long sessionGeneration) {
+        return amapTransitionPending
+                && selectionRevision == amapSelectionRevision
+                && sessionRevision == amapSessionRevision
+                && routeActive && matches(sessionOwner, sessionGeneration);
+    }
+
+    private boolean resolveAmapReceiver(String trigger, boolean allowTransition,
+            boolean forceRetirement) {
+        AmapReceiverResolution probed = resolveAmapReceiver(context);
+        NativeEtaTransportPolicy.Endpoint next = probed.endpoint;
+        String reason = probed.reason;
+        if (next == NativeEtaTransportPolicy.Endpoint.UNKNOWN
+                && amapEndpoint != NativeEtaTransportPolicy.Endpoint.UNKNOWN) {
+            next = amapEndpoint;
+            reason = "query-unknown-retained:" + reason;
+        }
+        if (amapTransitionPending) {
+            amapSelectionDirty = true;
+            log("amap_endpoint refresh_deferred selected=" + amapEndpoint
+                    + " probed=" + probed.endpoint + " reason=" + reason
+                    + " trigger=" + safe(trigger));
+            return false;
+        }
+        boolean changed = next != amapEndpoint;
+        if (routeActive && allowTransition && (changed || forceRetirement)) {
+            beginAmapEndpointTransition(next, reason, trigger);
+            return false;
+        }
+        applyAmapEndpoint(next, reason, trigger);
+        return true;
+    }
+
+    private void beginAmapEndpointTransition(
+            NativeEtaTransportPolicy.Endpoint next, String reason, String trigger) {
+        amapTransitionPending = true;
+        amapSelectionDirty = false;
+        long revision = ++amapSelectionRevision;
+        long sessionRevision = amapSessionRevision;
+        String sessionOwner = ownerPackage;
+        long sessionGeneration = ownerGeneration;
+        ownerHandler.removeCallbacks(nativeEtaTick);
+        nativeEtaTickScheduled = false;
+        resetNativeEtaCaches("endpoint-transition-start:" + trigger);
+        NativeEtaTransportPolicy.Endpoint previous = amapEndpoint;
+        String previousPackage = NativeEtaTransportPolicy.packageNameFor(previous);
+        boolean includePreviousNavigation =
+                NativeEtaTransportPolicy.includesInstrumentNavigationFields(previous);
+        Trace transition = trace(ownerPackage, ownerGeneration,
+                "amap-endpoint-transition:" + trigger, latestNativeEtaFrame,
+                latestManualState);
+        log("amap_endpoint transition_start revision=" + revision
+                + " from=" + previous + " to=" + next
+                + " reason=" + safe(reason) + " trigger=" + safe(trigger));
+        instrument.fenceNavigationOutput(() -> ownerHandler.post(() -> {
+            if (!isCurrentAmapTransition(revision, sessionRevision,
+                    sessionOwner, sessionGeneration)) return;
+            if (!previousPackage.isEmpty()) {
+                sendAmapTerminal(transition, previousPackage);
+            }
+            Runnable afterRetirement = () -> {
+                if (!isCurrentAmapTransition(revision, sessionRevision,
+                        sessionOwner, sessionGeneration)) return;
+                amapTransitionPending = false;
+                if (amapSelectionDirty) {
+                    amapSelectionDirty = false;
+                    if (!resolveAmapReceiver("transition-recheck", true, false)) return;
+                } else {
+                    applyAmapEndpoint(next, reason, "transition:" + trigger);
+                }
+                resetAmapPolicyCaches("endpoint-transition:" + trigger);
+                replayCurrentRouteState("amap-policy-replay:" + trigger);
+                log("amap_endpoint transition_complete revision=" + revision
+                        + " selected=" + amapEndpoint + " package="
+                        + NativeEtaTransportPolicy.packageNameFor(amapEndpoint)
+                        + " reason=" + amapEndpointReason);
+            };
+            Runnable clearGuidance = () -> instrument.sendTerminalGuidanceClear(
+                    transition.compatibilityProfile, includePreviousNavigation, result ->
+                            ownerHandler.post(() -> {
+                        if (!isCurrentAmapTransition(revision, sessionRevision,
+                                sessionOwner, sessionGeneration)) return;
+                        recordInstrumentResult(result, transition, 0, 0, -1, "");
+                        log("amap_endpoint transition_guidance_clear revision=" + revision
+                                + " outcome=" + checkResultReason(result));
+                        afterRetirement.run();
+                    }));
+            if (includePreviousNavigation) {
+                instrument.sendNavigationStatus(STATUS_IDLE, result -> ownerHandler.post(() -> {
+                    if (!isCurrentAmapTransition(revision, sessionRevision,
+                            sessionOwner, sessionGeneration)) return;
+                    recordInstrumentResult(result, transition, STATUS_IDLE, 0, -1, "");
+                    log("amap_endpoint transition_status_clear revision=" + revision
+                            + " outcome=" + checkResultReason(result));
+                    clearGuidance.run();
+                }));
+            } else {
+                clearGuidance.run();
+            }
+        }));
+    }
+
+    private void resetAmapPolicyCaches(String reason) {
+        resetNativeEtaCaches(reason);
+        lastNativeEtaSemanticKey = "";
+        resetGuidanceDedup();
+        hasLastInstrumentSemantic = false;
+        hasLastAmapSemantic = false;
+    }
+
+    private void replayCurrentRouteState(String reason) {
+        if (!routeActive || amapTransitionPending) return;
+        if (hasInstrumentStatus) {
+            sendStatus(lastInstrumentStatus,
+                    trace(ownerPackage, ownerGeneration, reason,
+                            latestNativeEtaFrame, latestManualState));
+        }
+        if (MANUAL_OWNER.equals(ownerPackage) && latestManualState != null) {
+            publishManualFrame(ownerPackage, ownerGeneration, latestManualState, reason);
+        } else if (latestNativeEtaFrame != null) {
+            publishFrame(ownerPackage, ownerGeneration, latestNativeEtaFrame, reason);
+        } else {
+            replayInstrumentStateSelected();
+        }
+    }
+
+    private void applyAmapEndpoint(NativeEtaTransportPolicy.Endpoint endpoint,
+            String reason, String trigger) {
+        amapEndpoint = endpoint;
+        amapEndpointReason = safe(reason);
+        amapReceiverReason = "endpoint=" + endpoint + ";" + amapEndpointReason;
+        log("amap_endpoint selected=" + endpoint
+                + " package=" + NativeEtaTransportPolicy.packageNameFor(endpoint)
+                + " instrumentNavigation="
+                + NativeEtaTransportPolicy.includesInstrumentNavigationFields(endpoint)
+                + " nativeEta=" + NativeEtaTransportPolicy.writerFor(
+                        nativeEtaOutputMode, endpoint)
+                + " reason=" + amapEndpointReason + " trigger=" + safe(trigger));
     }
 
     private static AmapReceiverResolution resolveAmapReceiver(Context context) {
-        PackageManager packageManager = context.getPackageManager();
+        AmapPackageResolution current = resolveAmapPackage(context, AMAP_PACKAGE);
+        if (current.state == NativeEtaTransportPolicy.ReceiverState.AVAILABLE) {
+            return new AmapReceiverResolution(NativeEtaTransportPolicy.Endpoint.NEW,
+                    "new-" + current.reason);
+        }
+        if (current.state == NativeEtaTransportPolicy.ReceiverState.UNKNOWN) {
+            return new AmapReceiverResolution(NativeEtaTransportPolicy.Endpoint.UNKNOWN,
+                    "new-" + current.reason);
+        }
+        AmapPackageResolution legacy = resolveAmapPackage(context, LEGACY_AMAP_PACKAGE);
+        NativeEtaTransportPolicy.Endpoint endpoint = NativeEtaTransportPolicy.endpointFor(
+                current.state, legacy.state);
+        String reason = endpoint == NativeEtaTransportPolicy.Endpoint.LEGACY
+                ? "legacy-" + legacy.reason
+                : endpoint == NativeEtaTransportPolicy.Endpoint.NONE
+                        ? "new-" + current.reason + ";legacy-" + legacy.reason
+                        : "legacy-" + legacy.reason;
+        return new AmapReceiverResolution(endpoint, reason);
+    }
+
+    private static AmapPackageResolution resolveAmapPackage(
+            Context context, String packageName) {
         try {
-            PackageInfo packageInfo = packageManager.getPackageInfo(AMAP_PACKAGE, 0);
-            ApplicationInfo applicationInfo = packageInfo.applicationInfo;
-            if (applicationInfo == null || !applicationInfo.enabled) {
-                return new AmapReceiverResolution(
-                        NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
-                        "package-disabled");
-            }
-            List<ResolveInfo> receivers = packageManager.queryBroadcastReceivers(
-                    new Intent(AMAP_ACTION).setPackage(AMAP_PACKAGE),
-                    PackageManager.MATCH_DISABLED_COMPONENTS);
-            if (receivers == null) {
-                return new AmapReceiverResolution(
+            ApplicationInfo applicationInfo = context.getPackageManager()
+                    .getApplicationInfo(packageName, 0);
+            if (applicationInfo == null) {
+                return new AmapPackageResolution(
                         NativeEtaTransportPolicy.ReceiverState.UNKNOWN,
-                        "receiver-query-null");
+                        "application-info-null");
             }
-            for (ResolveInfo resolved : receivers) {
-                ActivityInfo receiver = resolved == null ? null : resolved.activityInfo;
-                if (receiver == null || !AMAP_PACKAGE.equals(receiver.packageName)) continue;
-                if (!receiver.exported) continue;
-                ComponentName component = new ComponentName(
-                        receiver.packageName, receiver.name);
-                int componentState = packageManager.getComponentEnabledSetting(component);
-                boolean enabled = componentState == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                        || (componentState == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
-                                && receiver.enabled);
-                if (!enabled) {
-                    continue;
-                }
-                if (receiver.permission != null
-                        && context.checkSelfPermission(receiver.permission)
-                        != PackageManager.PERMISSION_GRANTED) {
-                    continue;
-                }
-                return new AmapReceiverResolution(
-                        NativeEtaTransportPolicy.ReceiverState.AVAILABLE,
-                        "enabled-accessible-receiver");
-            }
-            return new AmapReceiverResolution(
-                    NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
-                    "no-enabled-accessible-receiver");
+            return new AmapPackageResolution(
+                    applicationInfo.enabled
+                            ? NativeEtaTransportPolicy.ReceiverState.AVAILABLE
+                            : NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
+                    applicationInfo.enabled ? "package-enabled" : "package-disabled");
         } catch (PackageManager.NameNotFoundException absent) {
-            return new AmapReceiverResolution(
+            return new AmapPackageResolution(
                     NativeEtaTransportPolicy.ReceiverState.UNAVAILABLE,
                     "package-absent");
         } catch (RuntimeException uncertain) {
-            return new AmapReceiverResolution(
+            return new AmapPackageResolution(
                     NativeEtaTransportPolicy.ReceiverState.UNKNOWN,
-                    uncertain.getClass().getSimpleName());
+                    "query-" + uncertain.getClass().getSimpleName());
         }
     }
 
@@ -1309,6 +1536,12 @@ final class VehicleTbtPublisher {
     private void sendAmapFrame(int amapIcon, int roundaboutExit, int distance,
             String road, DirectTbtFrame.TravelMetrics metrics, Trace trace,
             boolean deduplicate, NativeEtaSnapshot etaSnapshot) {
+        String recipientPackage = NativeEtaTransportPolicy.packageNameFor(amapEndpoint);
+        if (amapTransitionPending || recipientPackage.isEmpty()) {
+            skipAmapFrame(trace, amapTransitionPending
+                    ? "endpoint-transition" : "endpoint-" + amapEndpoint);
+            return;
+        }
         boolean amapOwnsNativeEta = etaSnapshot != null
                 && etaSnapshot.writer == NativeEtaTransportPolicy.Writer.AMAP;
         int routeDistance = amapOwnsNativeEta
@@ -1329,6 +1562,9 @@ final class VehicleTbtPublisher {
                         routeTime, routeDistance))
                 + "|maneuverProfile:" + (trace == null
                         ? ManeuverCompatibilityProfile.AMAP : trace.compatibilityProfile)
+                + "|endpoint:" + amapEndpoint
+                + "|instrumentNavigation:" + NativeEtaTransportPolicy
+                        .includesInstrumentNavigationFields(amapEndpoint)
                 + "|etaMode:" + nativeEtaOutputMode
                 + "|etaStrings:" + durationText + "|" + arrivalText
                 + (etaSnapshot == null ? "" : "|native:" + etaSnapshot.semanticKey
@@ -1339,7 +1575,7 @@ final class VehicleTbtPublisher {
             return;
         }
         Intent intent = new Intent(AMAP_ACTION);
-        intent.setPackage(AMAP_PACKAGE);
+        intent.setPackage(recipientPackage);
         addStockAmapFlags(intent);
         intent.putExtra("KEY_TYPE", 10001);
         intent.putExtra("TYPE", 0);
@@ -1367,9 +1603,19 @@ final class VehicleTbtPublisher {
     }
 
     private void sendAmapTerminal(Trace trace) {
+        String recipientPackage = NativeEtaTransportPolicy.packageNameFor(amapEndpoint);
+        if (recipientPackage.isEmpty()) {
+            record(trace, "amap_broadcast", "skip", "endpoint-" + amapEndpoint,
+                    null, 0, 0L, "reason=" + amapEndpointReason);
+            return;
+        }
+        sendAmapTerminal(trace, recipientPackage);
+    }
+
+    private void sendAmapTerminal(Trace trace, String recipientPackage) {
         handoffPendingInstrumentRecovery = false;
         Intent intent = new Intent(AMAP_ACTION);
-        intent.setPackage(AMAP_PACKAGE);
+        intent.setPackage(recipientPackage);
         addStockAmapFlags(intent);
         intent.putExtra("KEY_TYPE", 10019);
         intent.putExtra("EXTRA_STATE", 9);
@@ -1385,6 +1631,17 @@ final class VehicleTbtPublisher {
         sendAmap(intent, "terminal", trace,
                 amapBytes(10019, -1, 0, -1, "", -1, -1));
         resetGuidanceDedup();
+    }
+
+    private void skipAmapFrame(Trace trace, String reason) {
+        hudCheckAmapResult = -2;
+        hudCheckAmapReason = safe(reason);
+        recordHudCheck(trace, "AMap", hudCheckAmapResult, hudCheckAmapReason);
+        if (trace != null && MANUAL_OWNER.equals(trace.owner)) {
+            MainActivity.publishSharedUiStateChange();
+        }
+        record(trace, "amap_broadcast", "skip", reason, null, 0, 0L,
+                "endpoint=" + amapEndpoint + " selection=" + amapEndpointReason);
     }
 
     @SuppressLint("WrongConstant")
@@ -1457,8 +1714,9 @@ final class VehicleTbtPublisher {
 
     private static boolean successfulCheckResult(InstrumentProxyManager.Result result) {
         if (result == null || !result.available || !result.error.isEmpty()
-                || result.operations.isEmpty()) return false;
+                || result.operations.isEmpty() || result.intentionallySkipped) return false;
         for (InstrumentProxyContract.Operation operation : result.operations) {
+            if (operation.recoveredByFallback) continue;
             if (operation.result != 0 || !operation.error.isEmpty()) return false;
         }
         return true;
@@ -1470,9 +1728,9 @@ final class VehicleTbtPublisher {
     }
 
     void resumeAfterShanghai() {
-        hasLastAmapSemantic = false;
-        hasLastInstrumentSemantic = false;
-        replayInstrumentState();
+        resetAmapPolicyCaches("shanghai-resume");
+        if (!resolveAmapReceiver("shanghai-resume", true, false)) return;
+        replayCurrentRouteState("shanghai-resume");
     }
 
     private void replayNativeEtaInstrument(String reason) {
@@ -1484,6 +1742,11 @@ final class VehicleTbtPublisher {
     }
 
     private void replayInstrumentState() {
+        if (!resolveAmapReceiver("proxy-ready", true, false)) return;
+        replayInstrumentStateSelected();
+    }
+
+    private void replayInstrumentStateSelected() {
         if (hudCheckLightOwned && hudCheckLightIndex < 0) {
             publishHudCheckLight(-1, "hud-check-ready-clear", true);
         }
@@ -1511,10 +1774,7 @@ final class VehicleTbtPublisher {
         trace.routeToken = routeToken;
         trace.hudCheck = latestHudCheck;
         if (hasInstrumentStatus) {
-            int status = lastInstrumentStatus;
-            instrument.sendNavigationStatus(status,
-                    result -> ownerHandler.post(() -> recordInstrumentResult(
-                            result, trace, status, 0, -1, "")));
+            sendStatus(lastInstrumentStatus, trace);
         }
         if (hasInstrumentGuidance) {
             int icon = lastInstrumentIcon;
@@ -1522,12 +1782,9 @@ final class VehicleTbtPublisher {
             String road = lastInstrumentRoad;
             int[] laneDirections = lastInstrumentLaneDirections.clone();
             int[] laneRecommendations = lastInstrumentLaneRecommendations.clone();
-            instrument.sendGuidance(
-                    trace.compatibilityProfile,
-                    icon, distance, road, laneDirections, laneRecommendations,
-                    result -> ownerHandler.post(() -> recordInstrumentGuidanceResult(
-                            result, trace, icon, distance, road,
-                            laneDirections, laneRecommendations)));
+            sendInstrumentGuidance(icon, distance, road,
+                    new LanePayload(laneDirections, laneRecommendations), trace,
+                    instrumentNavigationFieldsAllowed(), false);
         }
         if (routeActive && MANUAL_OWNER.equals(ownerPackage) && hudCheckLightIndex >= 0) {
             publishHudCheckLight(hudCheckLightIndex, "hud-check-ready-replay", true);
@@ -1590,6 +1847,20 @@ final class VehicleTbtPublisher {
     private void recordInstrumentResult(
             InstrumentProxyManager.Result result, Trace trace,
             int status, int icon, int distance, String road) {
+        if (trace == null) return;
+        if (result != null && !result.navigationDetail.isEmpty()) {
+            record(trace, "instrument_proxy", "navigation_detail", "route_fields",
+                    result.navigationDetail.getBytes(StandardCharsets.UTF_8),
+                    result.error.isEmpty() ? 0 : -1, 0L, result.error);
+        }
+        if (result != null && result.intentionallySkipped) {
+            record(trace, "instrument_proxy", "skip",
+                    status > 0 ? "navigation_status" : "guidance",
+                    status > 0 ? ints(status)
+                            : guidanceBytes(icon, distance, road, trace.lanes),
+                    0, 0L, safe(result.skipReason));
+            return;
+        }
         if (result == null || !result.available || result.operations.isEmpty()) {
             String error = result == null ? "no result"
                     : result.error.isEmpty() ? "proxy unavailable" : result.error;
@@ -1616,7 +1887,8 @@ final class VehicleTbtPublisher {
     private void recordInstrumentGuidanceResult(
             InstrumentProxyManager.Result result, Trace trace,
             int icon, int distance, String road,
-            int[] laneDirections, int[] laneRecommendations) {
+            int[] laneDirections, int[] laneRecommendations,
+            boolean includeNavigationFields) {
         recordInstrumentResult(result, trace, 0, icon, distance, road);
         if (trace == null || !matches(trace.owner, trace.generation)
                 || trace.routeToken != routeToken) return;
@@ -1624,27 +1896,53 @@ final class VehicleTbtPublisher {
                 && lastInstrumentCompatibilityProfile == trace.compatibilityProfile
                 && lastInstrumentDistance == distance
                 && lastInstrumentRoad.equals(road)
+                && lastInstrumentNavigationFieldsIncluded
+                        == includeNavigationFields
                 && Arrays.equals(lastInstrumentLaneDirections, laneDirections)
                 && Arrays.equals(lastInstrumentLaneRecommendations, laneRecommendations);
-        int outcome = successfulCheckResult(result) ? 1 : -1;
-        String outcomeReason = checkResultReason(result);
+        boolean lanesSucceeded = laneOperationsSucceededForTest(
+                result == null ? null : result.operations);
+        int outcome = includeNavigationFields
+                ? successfulCheckResult(result) ? 1
+                        : result != null && result.available && result.intentionallySkipped
+                                ? HUD_CHECK_SKIPPED : -1
+                : result == null || !result.available || !lanesSucceeded
+                        ? -1 : HUD_CHECK_SKIPPED;
+        String outcomeReason = includeNavigationFields
+                ? result != null && result.available && result.intentionallySkipped
+                        ? "skipped:" + safe(result.skipReason)
+                        : checkResultReason(result)
+                : outcome == HUD_CHECK_SKIPPED
+                        ? "navigation-fields-skipped;"
+                                + (result != null && result.intentionallySkipped
+                                        ? safe(result.skipReason) : "lanes-preserved")
+                        : checkResultReason(result);
         recordHudCheck(trace, "Instrument", outcome, outcomeReason);
         if (MANUAL_OWNER.equals(trace.owner) && latestGuidance) {
+            boolean changed = hudCheckInstrumentResult != outcome
+                    || !outcomeReason.equals(hudCheckInstrumentReason);
             hudCheckInstrumentReason = outcomeReason;
-            if (hudCheckInstrumentResult != outcome) {
+            if (changed) {
                 hudCheckInstrumentResult = outcome;
                 MainActivity.publishSharedUiStateChange();
             }
         }
-        if (laneOperationsSucceededForTest(result == null ? null : result.operations)) return;
-        if (latestGuidance) {
+        if (!lanesSucceeded && latestGuidance) {
             hasLastInstrumentSemantic = false;
         }
     }
 
     private static String checkResultReason(InstrumentProxyManager.Result result) {
-        if (successfulCheckResult(result)) return "sent";
         if (result == null || !result.available) return "proxy-unavailable";
+        if (result.intentionallySkipped) {
+            return "skipped:" + safe(result.skipReason);
+        }
+        if (successfulCheckResult(result)) {
+            for (InstrumentProxyContract.Operation operation : result.operations) {
+                if (operation.recoveredByFallback) return "sdk-recovered";
+            }
+            return "sent";
+        }
         return "invoke-failed";
     }
 
@@ -1654,7 +1952,8 @@ final class VehicleTbtPublisher {
     }
 
     private void recordHudCheck(HudCheckState sample, String plane, int result, String reason) {
-        String line = hudCheckDiagnostics.changed(sample, plane, result, reason);
+        String line = hudCheckDiagnostics.changed(
+                sample, plane, result, reason, amapEndpoint, amapEndpointReason);
         if (line != null) log(line);
     }
 
@@ -1741,7 +2040,7 @@ final class VehicleTbtPublisher {
         try {
             context.sendBroadcast(intent);
             if ("frame".equals(operation)) {
-                hudCheckAmapReason = "sent";
+                hudCheckAmapReason = "dispatch-only";
                 recordHudCheck(trace, "AMap", 1, hudCheckAmapReason);
             }
             if (MANUAL_OWNER.equals(trace.owner) && "frame".equals(operation)
@@ -2016,10 +2315,20 @@ final class VehicleTbtPublisher {
     }
 
     private static final class AmapReceiverResolution {
+        final NativeEtaTransportPolicy.Endpoint endpoint;
+        final String reason;
+
+        AmapReceiverResolution(NativeEtaTransportPolicy.Endpoint endpoint, String reason) {
+            this.endpoint = endpoint;
+            this.reason = safe(reason);
+        }
+    }
+
+    private static final class AmapPackageResolution {
         final NativeEtaTransportPolicy.ReceiverState state;
         final String reason;
 
-        AmapReceiverResolution(NativeEtaTransportPolicy.ReceiverState state,
+        AmapPackageResolution(NativeEtaTransportPolicy.ReceiverState state,
                 String reason) {
             this.state = state;
             this.reason = safe(reason);

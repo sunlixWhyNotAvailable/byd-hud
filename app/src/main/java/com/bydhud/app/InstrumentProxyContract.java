@@ -8,7 +8,7 @@ import java.util.List;
 
 /** Fixed IPC and diagnostic contract shared by the app and its shell helper. */
 final class InstrumentProxyContract {
-    static final int PROTOCOL_VERSION = 9;
+    static final int PROTOCOL_VERSION = 10;
     static final int CAP_SYSTEM_CONTEXT = 1;
     static final int CAP_DIRECT_FID = 1 << 1;
     static final int CAP_INSTRUMENT_SDK = 1 << 2;
@@ -47,6 +47,10 @@ final class InstrumentProxyContract {
     private static final String KEY_RESULTS = "results";
     private static final String KEY_DURATIONS = "durations";
     private static final String KEY_ERRORS = "errors";
+    private static final String KEY_RECOVERED = "recovered";
+    private static final String KEY_INTENTIONALLY_SKIPPED = "intentionally_skipped";
+    private static final String KEY_SKIP_REASON = "skip_reason";
+    private static final String KEY_NAVIGATION_DETAIL = "navigation_detail";
 
     private InstrumentProxyContract() {
     }
@@ -71,25 +75,46 @@ final class InstrumentProxyContract {
     }
 
     static Bundle operationResult(List<Operation> operations, String error) {
+        return operationResult(operations, error, false);
+    }
+
+    static Bundle operationResult(
+            List<Operation> operations, String error, boolean intentionallySkipped) {
+        return operationResult(operations, error, intentionallySkipped, "");
+    }
+
+    static Bundle operationResult(List<Operation> operations, String error,
+            boolean intentionallySkipped, String skipReason) {
+        return operationResult(operations, error, intentionallySkipped, skipReason, "");
+    }
+
+    static Bundle operationResult(List<Operation> operations, String error,
+            boolean intentionallySkipped, String skipReason, String navigationDetail) {
         List<Operation> safeOperations = operations == null
                 ? Collections.emptyList() : operations;
         String[] names = new String[safeOperations.size()];
         int[] results = new int[safeOperations.size()];
         long[] durations = new long[safeOperations.size()];
         String[] errors = new String[safeOperations.size()];
+        boolean[] recovered = new boolean[safeOperations.size()];
         for (int index = 0; index < safeOperations.size(); index++) {
             Operation operation = safeOperations.get(index);
             names[index] = operation.name;
             results[index] = operation.result;
             durations[index] = operation.durationMs;
             errors[index] = operation.error;
+            recovered[index] = operation.recoveredByFallback;
         }
         Bundle result = new Bundle();
         result.putStringArray(KEY_NAMES, names);
         result.putIntArray(KEY_RESULTS, results);
         result.putLongArray(KEY_DURATIONS, durations);
         result.putStringArray(KEY_ERRORS, errors);
+        result.putBooleanArray(KEY_RECOVERED, recovered);
         result.putString(KEY_ERROR, safe(error));
+        result.putBoolean(KEY_INTENTIONALLY_SKIPPED, intentionallySkipped);
+        result.putString(KEY_SKIP_REASON, safe(skipReason));
+        result.putString(KEY_NAVIGATION_DETAIL, safe(navigationDetail));
         return result;
     }
 
@@ -99,6 +124,18 @@ final class InstrumentProxyContract {
 
     static String error(Bundle result) {
         return result == null ? "no result" : safe(result.getString(KEY_ERROR));
+    }
+
+    static boolean intentionallySkipped(Bundle result) {
+        return result != null && result.getBoolean(KEY_INTENTIONALLY_SKIPPED, false);
+    }
+
+    static String skipReason(Bundle result) {
+        return result == null ? "" : safe(result.getString(KEY_SKIP_REASON));
+    }
+
+    static String navigationDetail(Bundle result) {
+        return result == null ? "" : safe(result.getString(KEY_NAVIGATION_DETAIL));
     }
 
     static boolean hasExpectedConnectionIdentity(Bundle result,
@@ -150,12 +187,14 @@ final class InstrumentProxyContract {
         if (names == null || results == null || durations == null || errors == null) {
             return Collections.emptyList();
         }
+        boolean[] recovered = result.getBooleanArray(KEY_RECOVERED);
         int count = Math.min(Math.min(names.length, results.length),
                 Math.min(durations.length, errors.length));
         List<Operation> parsed = new ArrayList<>(count);
         for (int index = 0; index < count; index++) {
             parsed.add(new Operation(names[index], results[index],
-                    durations[index], errors[index]));
+                    durations[index], errors[index],
+                    recovered != null && index < recovered.length && recovered[index]));
         }
         return parsed;
     }
@@ -251,12 +290,23 @@ final class InstrumentProxyContract {
         final int result;
         final long durationMs;
         final String error;
+        final boolean recoveredByFallback;
 
         Operation(String name, int result, long durationMs, String error) {
+            this(name, result, durationMs, error, false);
+        }
+
+        Operation(String name, int result, long durationMs, String error,
+                boolean recoveredByFallback) {
             this.name = safe(name);
             this.result = result;
             this.durationMs = Math.max(0L, durationMs);
             this.error = safe(error);
+            this.recoveredByFallback = recoveredByFallback;
+        }
+
+        Operation recoveredByFallback() {
+            return new Operation(name, result, durationMs, error, true);
         }
     }
 
