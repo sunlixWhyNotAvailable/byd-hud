@@ -272,8 +272,16 @@ final class NavAppDisplayController {
         if (WazeSurfaceActivity.isActive() || !"com.waze".equals(persistedDashboardPackage())
                 || !TARGET_SURFACE.equals(dashboardPrefs().getString(KEY_TARGET_KIND, ""))) return;
         NavAppDisplayState previous = lastState("com.waze");
-        if (previous.taskId >= 0 && previous.taskId != taskId) return;
+        if (taskId >= 0 && previous.taskId >= 0 && previous.taskId != taskId) return;
         long generation = projectionGenerationForPackage("com.waze");
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (generation == projectionGenerationForPackage("com.waze")) {
+                    onSurfaceTaskFinished(taskId);
+                }
+            });
+            return;
+        }
         String failure = ClusterProjectionService.finishSurfaceProjection("com.waze");
         clearReturnedProjectionIntent("com.waze", generation, "surface-finished");
         remember(new NavAppDisplayState("com.waze", -1, NavAppDisplayState.DISPLAY_UNKNOWN,
@@ -391,6 +399,29 @@ final class NavAppDisplayController {
         }
     }
 
+    private NavAppDisplayState recoverSurfaceForMove(String packageName,
+            NavAppDisplayState state, int targetDisplay, String reason,
+            BooleanSupplier requestCurrent) {
+        // Only a successful task inventory can establish absence; an ADB error cannot.
+        if (state.taskId >= 0 || !"Surface task missing".equals(state.status)
+                || !usesSurfaceTarget(packageName)
+                || (requestCurrent != null && !requestCurrent.getAsBoolean())) return state;
+        int display = targetDisplay >= 0 ? targetDisplay
+                : ClusterProjectionService.projectedDisplayIdForPackage(packageName);
+        display = Math.max(MAIN_DISPLAY_ID, display);
+        boolean ready = NavHudLiveSender.get(context).ensureWazeSurfaceOnDisplayBlocking(
+                display, reason, WAZE_SURFACE_HANDOFF_TIMEOUT_MS, true, requestCurrent);
+        log(packageName, "surface_recovery ready=" + ready
+                + " target=" + display + " task=" + WazeSurfaceActivity.activeTaskId()
+                + " reason=" + safe(reason));
+        if (!ready || (requestCurrent != null && !requestCurrent.getAsBoolean())) {
+            return remember(new NavAppDisplayState(packageName, -1,
+                    NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                    "Surface recovery failed or cancelled"));
+        }
+        return checkDisplay(packageName, "surface-recovered:" + safe(reason));
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     void moveToDashboard(String packageName, String reason) {
         moveToDashboard(
@@ -475,6 +506,7 @@ final class NavAppDisplayController {
                     return;
                 }
                 NavAppDisplayState current = checkDisplay(normalized, source + "-toggle-precheck");
+                current = recoverSurfaceForMove(normalized, current, -1, reason, requestCurrent);
                 if (!requestCurrent.getAsBoolean()) return;
                 DashboardProjectionPolicy.ObservedDisplay observed = observedDisplay(normalized, current);
                 if (!SteeringTransferPolicy.canToggleTask(current, observed)) {
@@ -1031,6 +1063,9 @@ final class NavAppDisplayController {
                             ? "independent-dashboard-precheck"
                             : "independent-return-precheck")
                     : admittedState;
+            if (!isShutdownReturnReason(reason) && isShutdownReturnCurrent(shutdownToken)) {
+                current = recoverSurfaceForMove(packageName, current, -1, reason, requestCurrent);
+            }
             if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
                 remember(new NavAppDisplayState(packageName, current.taskId, current.displayId,
                         current.visible, "steering transfer blocked: request changed"));
@@ -1710,6 +1745,10 @@ final class NavAppDisplayController {
             }
             NavAppDisplayState current = admittedState == null
                     ? checkDisplay(normalized, reason) : admittedState;
+            if (admittedState == null && !isShutdownReturnReason(reason)) {
+                current = recoverSurfaceForMove(
+                        normalized, current, targetDisplay, reason, requestCurrent);
+            }
             if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
                 return remember(new NavAppDisplayState(normalized, current.taskId, current.displayId,
                         current.visible, label + " blocked: request changed"));

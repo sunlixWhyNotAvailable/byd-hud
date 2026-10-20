@@ -77,9 +77,9 @@
         </activity>
         <activity
             android:name=".WazeSurfaceActivity"
-            android:autoRemoveFromRecents="true"
+            android:autoRemoveFromRecents="false"
             android:configChanges="density|orientation|screenSize|smallestScreenSize|uiMode"
-            android:excludeFromRecents="true"
+            android:excludeFromRecents="false"
             android:exported="false"
             android:launchMode="singleTask"
             android:taskAffinity="com.bydhud.app.waze_surface"

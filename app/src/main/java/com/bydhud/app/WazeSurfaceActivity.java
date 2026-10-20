@@ -72,7 +72,10 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         }
         SurfaceLog.event("activity_finish_requested", "reason", reason,
                 "active", activity != null);
-        if (activity != null) activity.runOnUiThread(activity::finish);
+        if (activity != null) activity.runOnUiThread(() -> {
+            activity.closeReason = reason == null ? "requested-close" : reason;
+            activity.finish();
+        });
     }
 
     static int activeTaskId() {
@@ -148,6 +151,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
     private volatile long surfaceEpoch;
     private boolean suppressGestureUntilNextDown;
     private volatile boolean visible;
+    private String closeReason;
 
     static void attachHostBridge(HostBridge bridge) {
         WazeSurfaceActivity activity;
@@ -195,15 +199,20 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
 
     @Override
     protected void onDestroy() {
+        SurfaceLog.event("visible_surface_activity_destroyed",
+                "task", getTaskId(), "display", getWindowManager().getDefaultDisplay().getDisplayId(),
+                "changingConfigurations", isChangingConfigurations(),
+                "finishing", isFinishing(),
+                "closeReason", closeReason == null ? "system" : closeReason);
         synchronized (BRIDGE_LOCK) {
             if (active.get() == this) active = new WeakReference<>(null);
         }
         NavHudLiveSender.get(this).onWazeSurfaceActivityDestroyed(
                 getTaskId(), instanceId, isChangingConfigurations());
-        if (isFinishing() && !isChangingConfigurations()) {
+        // System task trimming can also set isFinishing(); it must not retire projection intent.
+        if (closeReason != null && !isChangingConfigurations()) {
             NavAppDisplayController.get(this).onSurfaceTaskFinished(getTaskId());
         }
-        SurfaceLog.event("visible_surface_activity_destroyed");
         super.onDestroy();
     }
 
@@ -239,6 +248,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
 
     @Override
     public void onBackPressed() {
+        closeReason = "surface-back";
         NavHudLiveSender.get(this).onWazeSurfaceBackPressed(instanceId);
         finish();
     }

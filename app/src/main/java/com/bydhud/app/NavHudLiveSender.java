@@ -2488,10 +2488,13 @@ final class NavHudLiveSender {
     }
 
     private void requestWazeSurfaceActivity(String reason) {
+        int projectedDisplay = ClusterProjectionService.projectedDisplayIdForPackage(WAZE_PACKAGE);
+        requestWazeSurfaceActivity(reason, projectedDisplay > 0 ? projectedDisplay : 0);
+    }
+
+    private void requestWazeSurfaceActivity(String reason, int displayId) {
         if (!shouldUseWazeSurface() || wazeSurfaceLaunchPending
                 || WazeSurfaceActivity.isActive()) return;
-        int projectedDisplay = ClusterProjectionService.projectedDisplayIdForPackage(WAZE_PACKAGE);
-        int displayId = projectedDisplay > 0 ? projectedDisplay : 0;
         if (!WazeSurfaceActivity.launch(context, displayId)) {
             if (WazeSurfaceActivity.isActive()) {
                 log("waze surface launch failed; existing host preserved task="
@@ -2980,15 +2983,33 @@ final class NavHudLiveSender {
 
     boolean ensureWazeSurfaceOnDisplayBlocking(
             int targetDisplay, String reason, long timeoutMs) {
+        return ensureWazeSurfaceOnDisplayBlocking(
+                targetDisplay, reason, timeoutMs, false, () -> true);
+    }
+
+    boolean ensureWazeSurfaceOnDisplayBlocking(
+            int targetDisplay, String reason, long timeoutMs,
+            boolean recoverMissing, BooleanSupplier requestCurrent) {
         if (targetDisplay < 0 || timeoutMs <= 0L
                 || Looper.myLooper() == handler.getLooper()) return false;
         long deadline = SystemClock.elapsedRealtime() + timeoutMs;
+        int expectedRoute = wazeRouteGeneration;
+        BooleanSupplier current = () -> SystemClock.elapsedRealtime() < deadline
+                && expectedRoute == wazeRouteGeneration
+                && (!recoverMissing || !HudPrefs.isUserShutdownActive(context))
+                && (requestCurrent == null || requestCurrent.getAsBoolean());
         SurfaceHandoffStart start = new SurfaceHandoffStart();
         handler.post(() -> {
             try {
-                if (SystemClock.elapsedRealtime() >= deadline) return;
+                if (!current.getAsBoolean()) return;
                 start.routeGeneration = wazeRouteGeneration;
                 start.required = shouldUseWazeSurface();
+                if (recoverMissing && !start.required) return;
+                if (recoverMissing && !WazeSurfaceActivity.isActive()) {
+                    log("surface_recovery_requested target=" + targetDisplay
+                            + " route=" + expectedRoute + " reason=" + safeReason(reason));
+                    requestWazeSurfaceActivity("transfer-recovery:" + safeReason(reason), targetDisplay);
+                }
                 // Only an explicit return owns foreground. Routes/route updates never do.
                 if (start.required && targetDisplay == 0
                         && NavAppDisplayController.isUserRequestedReturnForTest(reason)
@@ -3005,11 +3026,12 @@ final class NavHudLiveSender {
         });
         try {
             if (!start.ready.await(timeoutMs, TimeUnit.MILLISECONDS) || !start.accepted) return false;
+            if (!current.getAsBoolean()) return false;
             if (!start.required) {
                 return WazeSurfaceActivity.isActive()
                         && WazeSurfaceActivity.activeDisplayId() == targetDisplay;
             }
-            while (SystemClock.elapsedRealtime() < deadline) {
+            while (current.getAsBoolean()) {
                 if (start.routeGeneration != wazeRouteGeneration || wazeSurfaceDismissedForRoute
                         || wazeSurfaceFailureRouteGeneration == start.routeGeneration) return false;
                 if (wazeSurfaceReadyForHandoff(true, wazeSurfaceActive,
@@ -3188,6 +3210,7 @@ final class NavHudLiveSender {
         wazeSurfaceDismissedForRoute = true;
         wazeSurfaceRouteGeneration = -1;
         WazeSurfaceActivity.finishActive(reason);
+        NavAppDisplayController.get(context).onSurfaceTaskFinished(-1);
         //Stopping the main host during an active route invokes Waze onAppStop and ends navigation.
         if (!wasSurface || !active || !WAZE_PACKAGE.equals(activePackage)
                 || !wazeDirectNavigating) return;
@@ -3283,6 +3306,7 @@ final class NavHudLiveSender {
         wazeSurfaceRouteGeneration = -1;
         wazeSurfaceFailureRouteGeneration = -1;
         WazeSurfaceActivity.finishActive(reason);
+        NavAppDisplayController.get(context).onSurfaceTaskFinished(-1);
     }
 
     private void onWazeDirectFrame(String ownerPackage, int sessionGeneration,
