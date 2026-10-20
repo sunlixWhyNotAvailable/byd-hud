@@ -3,6 +3,8 @@ package com.bydhud.app;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Configuration;
+import android.hardware.display.DisplayManager;
 import android.content.ServiceConnection;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -27,11 +29,15 @@ import androidx.car.app.IAppManager;
 import androidx.car.app.ICarApp;
 import androidx.car.app.ICarHost;
 import androidx.car.app.IOnDoneCallback;
+import androidx.car.app.OnDoneCallback;
 import androidx.car.app.ISurfaceCallback;
 import androidx.car.app.SessionInfo;
 import androidx.car.app.SessionInfoIntentEncoder;
 import androidx.car.app.SurfaceContainer;
 import androidx.car.app.model.Alert;
+import androidx.car.app.model.Action;
+import androidx.car.app.model.ActionStrip;
+import androidx.car.app.model.OnClickDelegate;
 import androidx.car.app.model.CarIcon;
 import androidx.car.app.model.CarText;
 import androidx.car.app.model.Distance;
@@ -43,6 +49,10 @@ import androidx.car.app.navigation.model.Lane;
 import androidx.car.app.navigation.model.LaneDirection;
 import androidx.car.app.navigation.model.Maneuver;
 import androidx.car.app.navigation.model.NavigationTemplate;
+import androidx.car.app.navigation.model.MapController;
+import androidx.car.app.navigation.model.MapWithContentTemplate;
+import androidx.car.app.navigation.model.PanModeDelegate;
+import androidx.car.app.navigation.model.RoutePreviewNavigationTemplate;
 import androidx.car.app.navigation.model.RoutingInfo;
 import androidx.car.app.navigation.model.Step;
 import androidx.car.app.navigation.model.TravelEstimate;
@@ -659,9 +669,17 @@ public final class WazeDirectChannel {
 
     private void createSession(int expectedGeneration) throws Exception {
         ICarApp app = requireCarApp();
-        app.onAppCreate(carHost, new Intent(), context.getResources().getConfiguration(),
+        app.onAppCreate(carHost, new Intent(), surfaceConfiguration(),
                 new DoneCallback(expectedGeneration, "onAppCreate",
                         ignored -> startSession(expectedGeneration)));
+    }
+
+    private Configuration surfaceConfiguration() {
+        int displayId = mode == Mode.MAIN_SURFACE ? WazeSurfaceActivity.activeDisplayId() : -1;
+        DisplayManager manager = context.getSystemService(DisplayManager.class);
+        android.view.Display display = manager == null ? null : manager.getDisplay(displayId);
+        Context displayContext = display == null ? context : context.createDisplayContext(display);
+        return new Configuration(displayContext.getResources().getConfiguration());
     }
 
     private void startSession(int expectedGeneration) throws Exception {
@@ -769,6 +787,9 @@ public final class WazeDirectChannel {
             return;
         }
         Template template = ((TemplateWrapper) value).getTemplate();
+        if (mode == Mode.MAIN_SURFACE && carHost != null) {
+            carHost.appHost.updateMapControls(template);
+        }
         if (!(template instanceof NavigationTemplate)) {
             log("template=" + typeName(template));
             return;
@@ -2081,6 +2102,11 @@ public final class WazeDirectChannel {
         private final Rect visibleArea = new Rect();
         private boolean surfaceDeliveryAttempted;
         private boolean surfaceDelivered;
+        private boolean surfaceDeliveryPending;
+        private long surfaceDeliveryRevision;
+        private PanModeDelegate panModeDelegate;
+        private OnClickDelegate recenterAction;
+        private boolean panMode;
 
         AppHost(int expectedGeneration) {
             this.expectedGeneration = expectedGeneration;
@@ -2099,9 +2125,7 @@ public final class WazeDirectChannel {
         public void setSurfaceCallback(ISurfaceCallback callback) {
             postBinder(expectedGeneration, () -> {
                 if (surfaceCallback != callback && surfaceCallback != null) {
-                    notifySurfaceDestroyed("callback-replaced");
-                    surfaceDeliveryAttempted = false;
-                    surfaceDelivered = false;
+                    resetSurfaceDelivery("callback-replaced");
                 }
                 surfaceCallback = callback;
                 log("surface callback present=" + (callback != null) + " mode=" + mode);
@@ -2111,16 +2135,20 @@ public final class WazeDirectChannel {
 
         void clearSurfaceSession(String reason) {
             WazeSurfaceActivity.detachHostBridge(this);
-            notifySurfaceDestroyed(reason);
+            resetSurfaceDelivery(reason);
             surfaceCallback = null;
             surface = null;
             visibleArea.setEmpty();
             surfaceDeliveryAttempted = false;
             surfaceDelivered = false;
+            panModeDelegate = null;
+            recenterAction = null;
+            panMode = false;
+            if (mode == Mode.MAIN_SURFACE) WazeSurfaceActivity.setRecenterAvailable(false);
         }
 
         void prepareSurfaceHandoff(String reason) {
-            notifySurfaceDestroyed("display-handoff:" + safeText(reason));
+            resetSurfaceDelivery("display-handoff:" + safeText(reason));
             surface = null;
             visibleArea.setEmpty();
             surfaceDeliveryAttempted = false;
@@ -2134,6 +2162,20 @@ public final class WazeDirectChannel {
             runOnChannel(() -> {
                 if (!isCurrent(expectedGeneration) || mode != Mode.MAIN_SURFACE
                         || value == null || !value.isValid()) return;
+                boolean changed = surface != value || surfaceWidth != width || surfaceHeight != height
+                        || surfaceDpi != dpi || activityInstanceId != instanceId
+                        || activityDisplayId != displayId || activitySurfaceEpoch != surfaceEpoch;
+                if (changed) {
+                    resetSurfaceDelivery("surface-geometry-changed");
+                    if (carApp != null) {
+                        try {
+                            carApp.onConfigurationChanged(surfaceConfiguration(),
+                                    new DoneCallback(expectedGeneration, "surfaceConfiguration", null));
+                        } catch (Exception error) {
+                            log("surface configuration failed: " + error);
+                        }
+                    }
+                }
                 surface = value;
                 surfaceWidth = Math.max(1, width);
                 surfaceHeight = Math.max(1, height);
@@ -2149,7 +2191,10 @@ public final class WazeDirectChannel {
         @Override
         public void onSurfaceDestroyed(Runnable completion) {
             runOnChannel(() -> {
+                surfaceDeliveryRevision++;
+                surfaceDeliveryPending = false;
                 notifySurfaceDestroyed("activity-surface-destroyed", completion);
+                surfaceDeliveryAttempted = false;
                 surface = null;
                 surfaceDelivered = false;
                 int callbackGeneration = sessionGeneration;
@@ -2173,27 +2218,123 @@ public final class WazeDirectChannel {
 
         @Override
         public void onScroll(float distanceX, float distanceY) {
-            dispatchSurfaceInput("scroll", callback -> callback.onScroll(distanceX, distanceY));
+            dispatchSurfaceInput("scroll", callback -> callback.onScroll(distanceX, distanceY), true);
         }
 
         @Override
         public void onFling(float velocityX, float velocityY) {
-            dispatchSurfaceInput("fling", callback -> callback.onFling(velocityX, velocityY));
+            dispatchSurfaceInput("fling", callback -> callback.onFling(velocityX, velocityY), true);
         }
 
         @Override
         public void onScale(float focusX, float focusY, float scaleFactor) {
-            dispatchSurfaceInput("scale",
-                    callback -> callback.onScale(focusX, focusY, scaleFactor));
+            if (!Float.isFinite(scaleFactor) || scaleFactor <= 0f) return;
+            dispatchSurfaceInput("scale focus=" + focusX + "," + focusY + " factor=" + scaleFactor,
+                    callback -> callback.onScale(focusX, focusY, scaleFactor), true);
+        }
+
+        @Override
+        public void onRecenter() {
+            runOnChannel(() -> {
+                if (!isCurrent(expectedGeneration) || mode != Mode.MAIN_SURFACE) return;
+                OnClickDelegate action = recenterAction;
+                if (action == null) {
+                    log("surface recenter unavailable");
+                    return;
+                }
+                try {
+                    action.sendClick(mapControlResult("recenter", () -> setPanMode(false)));
+                } catch (RuntimeException error) {
+                    log("surface recenter failed: " + error);
+                }
+            });
+        }
+
+        void updateMapControls(Template template) {
+            ActionStrip actions = null;
+            PanModeDelegate pan = null;
+            if (template instanceof NavigationTemplate) {
+                NavigationTemplate navigation = (NavigationTemplate) template;
+                actions = navigation.getMapActionStrip();
+                pan = navigation.getPanModeDelegate();
+            } else if (template instanceof MapWithContentTemplate) {
+                MapController map = ((MapWithContentTemplate) template).getMapController();
+                if (map != null) {
+                    actions = map.getMapActionStrip();
+                    pan = map.getPanModeDelegate();
+                }
+            } else if (template instanceof RoutePreviewNavigationTemplate) {
+                RoutePreviewNavigationTemplate route = (RoutePreviewNavigationTemplate) template;
+                actions = route.getMapActionStrip();
+                pan = route.getPanModeDelegate();
+            }
+            panModeDelegate = pan;
+            recenterAction = null;
+            if (actions != null) for (Action action : actions.getActions()) {
+                CarIcon carIcon = action.getIcon();
+                IconCompat icon = carIcon == null ? null : carIcon.getIcon();
+                if (icon == null || icon.getType() != IconCompat.TYPE_RESOURCE) continue;
+                try {
+                    // Resolve Waze's own action by resource name, never by an APK-specific integer.
+                    String resource = context.getPackageManager()
+                            .getResourcesForApplication(icon.getResPackage())
+                            .getResourceEntryName(icon.getResId());
+                    if (resource.contains("recenter") && action.isEnabled()) {
+                        recenterAction = action.getOnClickDelegate();
+                        break;
+                    }
+                } catch (Exception error) {
+                    log("surface map action unavailable: " + error.getClass().getSimpleName());
+                }
+            }
+            WazeSurfaceActivity.setRecenterAvailable(recenterAction != null);
+        }
+
+        private OnDoneCallback mapControlResult(String operation, Runnable success) {
+            return new OnDoneCallback() {
+                @Override public void onSuccess(Bundleable result) {
+                    postBinder(expectedGeneration, () -> {
+                        log("surface control=" + operation + " result=ok");
+                        if (success != null) success.run();
+                    });
+                }
+                @Override public void onFailure(Bundleable failure) {
+                    postBinder(expectedGeneration, () -> {
+                        if ("pan=true".equals(operation)) panMode = false;
+                        log("surface control=" + operation + " result=failed detail=" + failure);
+                    });
+                }
+            };
+        }
+
+        private void setPanMode(boolean enabled) {
+            if (panMode == enabled || panModeDelegate == null) return;
+            try {
+                panModeDelegate.sendPanModeChanged(enabled,
+                        mapControlResult("pan=" + enabled, null));
+                panMode = enabled;
+            } catch (RuntimeException error) {
+                log("surface pan mode failed: " + error);
+            }
+        }
+
+        private void resetSurfaceDelivery(String reason) {
+            surfaceDeliveryRevision++;
+            surfaceDeliveryPending = false;
+            notifySurfaceDestroyed(reason);
+            surfaceDeliveryAttempted = false;
+            surfaceDelivered = false;
         }
 
         private void deliverSurfaceIfReady() {
             ISurfaceCallback surfaceCallbackValue = surfaceCallback;
             Surface value = surface;
-            if (surfaceDelivered || mode != Mode.MAIN_SURFACE
+            if (surfaceDelivered || surfaceDeliveryPending || mode != Mode.MAIN_SURFACE
                     || surfaceCallbackValue == null || value == null
                     || !value.isValid()) return;
             surfaceDeliveryAttempted = true;
+            surfaceDeliveryPending = true;
+            long deliveredRevision = surfaceDeliveryRevision;
             long deliveredInstanceId = activityInstanceId;
             int deliveredDisplayId = activityDisplayId;
             long deliveredSurfaceEpoch = activitySurfaceEpoch;
@@ -2202,11 +2343,13 @@ public final class WazeDirectChannel {
                                 value, surfaceWidth, surfaceHeight, surfaceDpi)),
                         new DoneCallback(expectedGeneration, "onSurfaceAvailable", ignored -> {
                             if (surfaceCallbackValue != surfaceCallback || surface != value
+                                    || deliveredRevision != surfaceDeliveryRevision
                                     || !value.isValid()
                                     || deliveredInstanceId != activityInstanceId
                                     || deliveredDisplayId != activityDisplayId
                                     || deliveredSurfaceEpoch != activitySurfaceEpoch) return;
                             surfaceDelivered = true;
+                            surfaceDeliveryPending = false;
                             sendVisibleArea();
                             int callbackGeneration = sessionGeneration;
                             callback(() -> listener.onSurfaceReady(
@@ -2215,8 +2358,11 @@ public final class WazeDirectChannel {
                                     deliveredSurfaceEpoch));
                             log("surface delivered width=" + surfaceWidth
                                     + " height=" + surfaceHeight + " dpi=" + surfaceDpi);
+                        }, () -> {
+                            if (deliveredRevision == surfaceDeliveryRevision) surfaceDeliveryPending = false;
                         }));
             } catch (Throwable error) {
+                surfaceDeliveryPending = false;
                 log("surface delivery failed: " + error);
                 int callbackGeneration = sessionGeneration;
                 callback(() -> listener.onSurfaceUnavailable(
@@ -2261,10 +2407,16 @@ public final class WazeDirectChannel {
         }
 
         private void dispatchSurfaceInput(String type, SurfaceInput input) {
+            dispatchSurfaceInput(type, input, false);
+        }
+
+        private void dispatchSurfaceInput(String type, SurfaceInput input, boolean manualPan) {
             runOnChannel(() -> {
                 ISurfaceCallback callback = surfaceCallback;
-                if (callback == null) return;
+                if (!isCurrent(expectedGeneration) || mode != Mode.MAIN_SURFACE
+                        || !surfaceDelivered || callback == null) return;
                 try {
+                    if (manualPan) setPanMode(true);
                     input.run(callback);
                     log("surface input type=" + type);
                 } catch (Throwable error) {

@@ -77,6 +77,7 @@
         </activity>
         <activity
             android:name=".WazeSurfaceActivity"
+            android:label="Waze Surface"
             android:autoRemoveFromRecents="false"
             android:configChanges="density|orientation|screenSize|smallestScreenSize|uiMode"
             android:excludeFromRecents="false"

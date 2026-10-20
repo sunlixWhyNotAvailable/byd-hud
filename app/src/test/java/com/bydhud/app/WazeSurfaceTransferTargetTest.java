@@ -6,6 +6,14 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 
 public class WazeSurfaceTransferTargetTest {
+    @Test public void mapsTouchFocusAndDeltasToTheActualSurfaceBuffer() {
+        assertEquals(960f, WazeSurfaceActivity.surfaceCoordinate(480f, 960, 1920), 0.001f);
+        assertEquals(270f, WazeSurfaceActivity.surfaceCoordinate(540f, 1080, 540), 0.001f);
+        assertEquals(-40f, WazeSurfaceActivity.surfaceCoordinate(-20f, 960, 1920), 0.001f);
+        assertEquals(75f, WazeSurfaceActivity.surfaceCoordinate(75f, 1920, 1920), 0.001f);
+        assertEquals(75f, WazeSurfaceActivity.surfaceCoordinate(75f, 0, 0), 0.001f);
+    }
+
     // Task-tree input: Routes and HUD settings on the tablet, Surface on the projection.
     private static final String TASKS = """
             Display #0

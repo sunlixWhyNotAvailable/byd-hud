@@ -329,6 +329,19 @@ final class NavAppDisplayController {
                 "unknown");
     }
 
+    NavAppDisplayState transferStateForUi(NavAppDisplayState scanned) {
+        if (!usesSurfaceTarget(scanned.packageName)) return scanned;
+        // The navigator scan sees Routes on the tablet, not our independently moved window.
+        return new NavAppDisplayState(scanned.packageName, WazeSurfaceActivity.activeTaskId(),
+                WazeSurfaceActivity.activeDisplayId(), WazeSurfaceActivity.isVisible(),
+                "surface-window");
+    }
+
+    void onSurfaceWindowChanged() {
+        remember(transferStateForUi(new NavAppDisplayState(
+                "com.waze", -1, NavAppDisplayState.DISPLAY_UNKNOWN, false, "surface-window")));
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     NavAppDisplayState checkDisplay(String packageName, String reason) {
         String normalized = normalizePackage(packageName);

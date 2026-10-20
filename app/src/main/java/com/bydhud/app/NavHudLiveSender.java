@@ -2359,10 +2359,7 @@ final class NavHudLiveSender {
                 wazeTbtRouteStartedAtMs = SystemClock.elapsedRealtime();
             }
             wazeDirectFrameReceived = false;
-            wazeSurfaceEnabledForRoute = HudPrefs.isWazeCustomSurfaceEnabled(context);
-            wazeSurfaceTransferForRoute = wazeSurfaceEnabledForRoute;
-            wazeSurfaceDismissedForRoute = false;
-            wazeSurfaceFailureRouteGeneration = -1;
+            rearmWazeSurfaceForRoute();
         }
         wazeDirectNavigating = true;
         wazeDirectHandshakeAvailable = true;
@@ -2402,7 +2399,8 @@ final class NavHudLiveSender {
                     "surface-recovery:" + latestWazeSurfaceFrameReason);
         }
         if (hudOwner) {
-            maybeLaunchWazeSurface("navigation-started:" + safeReason(reason));
+            if (newRoute) showWazeSurfaceForNewRoute("navigation-started:" + safeReason(reason));
+            else maybeLaunchWazeSurface("navigation-started:" + safeReason(reason));
         }
     }
 
@@ -2464,16 +2462,29 @@ final class NavHudLiveSender {
         });
     }
 
-    void onWazeSurfaceBackPressed(long instanceId) {
-        handler.post(() -> {
-            if (instanceId != wazeSurfaceInstanceId) return;
-            wazeSurfaceDismissedForRoute = true;
-            fallbackFromWazeSurface("surface-back");
-        });
+    private void rearmWazeSurfaceForRoute() {
+        wazeSurfaceEnabledForRoute = HudPrefs.isWazeCustomSurfaceEnabled(context);
+        wazeSurfaceTransferForRoute = wazeSurfaceEnabledForRoute;
+        wazeSurfaceDismissedForRoute = false;
+        wazeSurfaceFailureRouteGeneration = -1;
+        wazeSurfaceRouteGeneration = wazeRouteGeneration;
     }
 
     private void maybeLaunchWazeSurface(String reason) {
         requestWazeSurfaceActivity(reason);
+    }
+
+    private void showWazeSurfaceForNewRoute(String reason) {
+        if (!shouldUseWazeSurface()) return;
+        if (WazeSurfaceActivity.isActive()) {
+            wazeSurfaceDirectChannel.start(reason, WazeDirectChannel.Mode.MAIN_SURFACE);
+            if (!WazeSurfaceActivity.isVisible()) {
+                WazeSurfaceActivity.launch(context, WazeSurfaceActivity.activeDisplayId());
+                log("surface_foreground reason=new-route task=" + WazeSurfaceActivity.activeTaskId());
+            }
+        } else {
+            requestWazeSurfaceActivity(reason);
+        }
     }
 
     private void onWazeAppForegroundEventOnMain(
@@ -2516,12 +2527,17 @@ final class NavHudLiveSender {
     }
 
     private boolean shouldUseWazeSurface() {
+        return isWazeSurfaceRouteEligible() && !wazeSurfaceDismissedForRoute;
+    }
+
+    private boolean isWazeSurfaceRouteEligible() {
         return active
                 && WAZE_PACKAGE.equals(activePackage)
                 && wazeDirectNavigating
+                && !wazeDirectRouteTerminalFence
+                && !wazeDirectRouteEnded
                 && NavCapturePrefs.isHudEnabled(context, WAZE_PACKAGE)
-                && wazeSurfaceEnabledForRoute
-                && !wazeSurfaceDismissedForRoute;
+                && wazeSurfaceEnabledForRoute;
     }
 
     private boolean isCurrentWazeSurfaceFrame(DirectTbtFrame frame,
@@ -3003,6 +3019,10 @@ final class NavHudLiveSender {
             try {
                 if (!current.getAsBoolean()) return;
                 start.routeGeneration = wazeRouteGeneration;
+                if (recoverMissing && isWazeSurfaceRouteEligible()) {
+                    wazeSurfaceDismissedForRoute = false;
+                    wazeSurfaceFailureRouteGeneration = -1;
+                }
                 start.required = shouldUseWazeSurface();
                 if (recoverMissing && !start.required) return;
                 if (recoverMissing && !WazeSurfaceActivity.isActive()) {
@@ -4589,6 +4609,8 @@ final class NavHudLiveSender {
             return;
         }
         if (result.freshRouteAccepted) {
+            // A retained navigation boolean is not the identity of the new producer/route.
+            rearmWazeSurfaceForRoute();
             wazeLegacyDirectRearmPending = false;
             wazeLegacyDirectSessionFloor = -1;
             wazeLegacySurfaceRearmPending = false;
@@ -4640,6 +4662,9 @@ final class NavHudLiveSender {
                 && !wazeSurfaceDirectChannel.isActive()) {
             wazeSurfaceDirectChannel.start(
                     "route-lifecycle-surface-ensure", WazeDirectChannel.Mode.MAIN_SURFACE);
+        }
+        if (result.freshRouteAccepted && hudEnabled) {
+            showWazeSurfaceForNewRoute("accepted-fresh-route:" + safeReason(reason));
         }
     }
 

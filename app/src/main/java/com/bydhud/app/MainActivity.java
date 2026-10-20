@@ -326,7 +326,7 @@ public final class MainActivity extends ComponentActivity {
             }
             boolean moveFinished = dashboardMoveInProgress && !moveInProgress;
             dashboardMoveInProgress = moveInProgress;
-            if (moveInProgress || moveFinished) {
+            if (moveInProgress || moveFinished || displayController.usesSurfaceTarget(WAZE_PACKAGE)) {
                 //The Apps rows are cache-backed; publish only the move gate/status change here.
                 publishSharedUiStateChange();
             }
@@ -1128,8 +1128,8 @@ public final class MainActivity extends ComponentActivity {
     private ComposeAppRow composeRow(ActiveAppRow app, String hudPackage,
             Set<String> logOnlyPackages, Set<String> observedPackages, boolean supportedSection) {
         NavAppDisplayController controller = NavAppDisplayController.get(this);
-        NavAppDisplayState displayState = new NavAppDisplayState(
-                app.packageName, app.taskId, app.displayId, app.visible, "task-scan");
+        NavAppDisplayState displayState = controller.transferStateForUi(new NavAppDisplayState(
+                app.packageName, app.taskId, app.displayId, app.visible, "task-scan"));
         DashboardProjectionPolicy.ObservedDisplay observedDisplay =
                 DashboardProjectionPolicy.classifyObservedDisplay(
                         app.packageName,
@@ -4015,8 +4015,8 @@ public final class MainActivity extends ComponentActivity {
             return null;
         }
         NavAppDisplayController controller = NavAppDisplayController.get(this);
-        NavAppDisplayState state = new NavAppDisplayState(
-                normalized, app.taskId, app.displayId, app.visible, "task-scan");
+        NavAppDisplayState state = controller.transferStateForUi(new NavAppDisplayState(
+                normalized, app.taskId, app.displayId, app.visible, "task-scan"));
         DashboardProjectionPolicy.ObservedDisplay observedDisplay =
                 DashboardProjectionPolicy.classifyObservedDisplay(
                 normalized,
