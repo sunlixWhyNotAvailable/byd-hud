@@ -3,10 +3,6 @@ package com.bydhud.app;
 //keeps the legacy projection service entry point available for systems that bind to it directly.
 
 import android.annotation.SuppressLint;
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -47,8 +43,6 @@ public final class ClusterProjectionService extends Service
     static final String VIRTUAL_DISPLAY_NAME = "bydhud_remote_dashboard";
 
     private static final String TAG = "BydHudClusterProjection";
-    private static final String CHANNEL_ID = "byd_hud_cluster_projection";
-    private static final int NOTIFICATION_ID = 4304;
     private static final int VIRTUAL_WIDTH = DashboardProjectionPolicy.VIRTUAL_WIDTH;
     private static final int VIRTUAL_HEIGHT = DashboardProjectionPolicy.VIRTUAL_BASE_HEIGHT;
     private static final int VIRTUAL_DENSITY = DashboardProjectionPolicy.VIRTUAL_DENSITY;
@@ -415,7 +409,7 @@ public final class ClusterProjectionService extends Service
     public void onCreate() {
         super.onCreate();
         instance = this;
-        startForeground(NOTIFICATION_ID, buildNotification("Dashboard projection idle"));
+        HudForegroundNotification.start(this, "Dashboard projection idle", 0);
         log("service created");
     }
 
@@ -476,6 +470,7 @@ public final class ClusterProjectionService extends Service
         if (instance == this) {
             instance = null;
         }
+        HudForegroundNotification.stop(this);
         log("service destroyed");
         super.onDestroy();
     }
@@ -2728,52 +2723,12 @@ public final class ClusterProjectionService extends Service
         }
     }
 
-    //builds this artifact here so callers do not duplicate protocol or UI construction details.
-    private Notification buildNotification(String text) {
-        createNotificationChannel();
-        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
-        if (launchIntent == null) {
-            launchIntent = new Intent();
-        }
-        PendingIntent pendingIntent = PendingIntent.getActivity(
-                this,
-                0,
-                launchIntent,
-                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID);
-        return builder
-                .setSmallIcon(android.R.drawable.ic_dialog_map)
-                .setContentTitle("BYD HUD dashboard")
-                .setContentText(text)
-                .setContentIntent(pendingIntent)
-                .setOngoing(true)
-                .build();
-    }
-
-    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateNotification(String text) {
-        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (manager != null) {
-            manager.notify(NOTIFICATION_ID, buildNotification(text));
-        }
+        HudForegroundNotification.update(this, text);
     }
 
-    //builds this artifact here so callers do not duplicate protocol or UI construction details.
-    private void createNotificationChannel() {
-        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (manager == null || manager.getNotificationChannel(CHANNEL_ID) != null) {
-            return;
-        }
-        NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID,
-                "BYD HUD dashboard projection",
-                NotificationManager.IMPORTANCE_LOW);
-        manager.createNotificationChannel(channel);
-    }
-
-    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopForegroundCompat() {
-        stopForeground(STOP_FOREGROUND_REMOVE);
+        HudForegroundNotification.stop(this);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

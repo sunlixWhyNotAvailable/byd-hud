@@ -175,6 +175,8 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
 
     private SurfaceView surfaceView;
     private ImageButton recenterButton;
+    private Drawable recenterDrawable;
+    private boolean stockRecenterIconAttempted;
     private GestureDetector gestureDetector;
     private ScaleGestureDetector scaleDetector;
     private volatile Surface surface;
@@ -208,8 +210,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         }
         if (activity != null) activity.runOnUiThread(() -> {
             synchronized (BRIDGE_LOCK) { if (hostBridge != null || active.get() != activity) return; }
-            activity.recenterButton.setEnabled(false);
-            activity.recenterButton.setVisibility(View.INVISIBLE);
+            activity.updateRecenterControl(null, false);
         });
     }
 
@@ -220,14 +221,39 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
             synchronized (BRIDGE_LOCK) {
                 if (active.get() != activity || hostBridge != owner) return;
             }
-            Drawable drawable = null;
-            try { if (icon != null) drawable = icon.loadDrawable(activity); }
-            catch (RuntimeException error) { SurfaceLog.error("recenter_icon_failed", error); }
-            activity.recenterButton.setImageDrawable(drawable);
-            activity.recenterButton.setVisibility(drawable == null ? View.INVISIBLE : View.VISIBLE);
-            activity.recenterButton.setEnabled(available && drawable != null);
-            activity.recenterButton.setAlpha(available ? 1f : 0.5f);
+            activity.updateRecenterControl(icon, available);
         });
+    }
+
+    private void updateRecenterControl(IconCompat icon, boolean available) {
+        try {
+            if (icon != null) {
+                Drawable drawable = icon.loadDrawable(this);
+                if (drawable != null) recenterDrawable = drawable;
+            }
+            // Waze supplies the click action conditionally; its icon must not depend on that action.
+            if (recenterDrawable == null && !stockRecenterIconAttempted) {
+                stockRecenterIconAttempted = true;
+                Context waze = createPackageContext("com.waze", 0)
+                        .createConfigurationContext(getResources().getConfiguration());
+                int id = waze.getResources().getIdentifier(
+                        "ic_icon_recenter_button", "drawable", "com.waze");
+                if (id != 0) recenterDrawable = waze.getDrawable(id);
+                SurfaceLog.event("recenter_stock_icon", "resource", id,
+                        "loaded", recenterDrawable != null);
+            }
+        } catch (Exception error) {
+            SurfaceLog.error("recenter_icon_failed", error);
+        }
+        boolean enabled = available && recenterDrawable != null;
+        if (recenterButton.isEnabled() != enabled) {
+            SurfaceLog.event("recenter_control", "enabled", enabled,
+                    "actionAvailable", available, "iconLoaded", recenterDrawable != null);
+        }
+        recenterButton.setImageDrawable(recenterDrawable);
+        recenterButton.setVisibility(recenterDrawable == null ? View.INVISIBLE : View.VISIBLE);
+        recenterButton.setEnabled(enabled);
+        recenterButton.setAlpha(enabled ? 1f : 0.5f);
     }
 
     @Override
@@ -258,6 +284,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         recenterButton.setVisibility(View.INVISIBLE);
         recenterButton.setEnabled(false);
         boolean dark = HudPrefs.isDarkTheme(this);
+        recenterButton.setImageTintList(ColorStateList.valueOf(dark ? 0xfff1f6ff : 0xff121a23));
         GradientDrawable background = new GradientDrawable();
         background.setColor(dark ? 0xff172231 : 0xfff0f5fb);
         background.setCornerRadius(dp(8));
@@ -279,6 +306,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         synchronized (BRIDGE_LOCK) {
             active = new WeakReference<>(this);
         }
+        updateRecenterControl(null, false);
         NavHudLiveSender.get(this).onWazeSurfaceActivityCreated(
                 getTaskId(), instanceId, ACTION_OPEN.equals(getIntent().getAction()));
         HostBridge bridge = bridge();

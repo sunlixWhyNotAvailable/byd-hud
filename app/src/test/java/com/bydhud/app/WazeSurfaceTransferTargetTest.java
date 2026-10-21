@@ -8,6 +8,54 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertFalse;
 
 public class WazeSurfaceTransferTargetTest {
+    @Test public void recentersOnceWithFreshControlsAndCancelsOnGestureOrRendererChange() {
+        WazeSurfacePanState state = new WazeSurfacePanState();
+        state.request(true);
+        long first = state.beginRecenter();
+        assertTrue(first > 0);
+        assertEquals(0, state.beginRecenter());
+        assertEquals(0, state.recenterControlsRequest());
+        assertFalse(state.sendRecenter(first));
+        state.request(false);
+        assertTrue(state.recenterPanExited());
+        assertEquals(first, state.recenterControlsRequest());
+        assertTrue(state.sendRecenter(first));
+        assertFalse(state.sendRecenter(first));
+        assertTrue(state.finishRecenter(first));
+
+        long gestureCancelled = state.beginRecenter();
+        state.request(true);
+        assertFalse(state.recenterPending());
+        assertFalse(state.sendRecenter(gestureCancelled));
+        long rendererCancelled = state.beginRecenter();
+        state.rendererChanged();
+        assertFalse(state.recenterPending());
+        assertFalse(state.recenterPanExited());
+        assertFalse(state.finishRecenter(rendererCancelled));
+        state.request(false);
+        long current = state.beginRecenter();
+        assertFalse(state.finishRecenter(first));
+        assertFalse(state.sendRecenter(rendererCancelled));
+        assertTrue(state.sendRecenter(current));
+        assertTrue(state.finishRecenter(current));
+
+        state.request(true);
+        state.next();
+        long timedOut = state.beginRecenter();
+        state.request(false);
+        WazeSurfacePanState.Request lateExit = state.next();
+        assertTrue(state.finishRecenter(timedOut));
+        assertTrue(state.isPanning());
+        assertFalse(state.complete(lateExit, true));
+        long retry = state.beginRecenter();
+        state.request(false);
+        WazeSurfacePanState.Request newExit = state.next();
+        assertFalse(newExit.enabled);
+        assertTrue(state.complete(newExit, true));
+        assertTrue(state.recenterPanExited());
+        assertTrue(state.sendRecenter(retry));
+    }
+
     @Test public void restoresPanForNewRendererAndIgnoresOldAcknowledgments() {
         WazeSurfacePanState state = new WazeSurfacePanState();
         state.request(true);

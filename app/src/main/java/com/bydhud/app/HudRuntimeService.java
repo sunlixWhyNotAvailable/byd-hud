@@ -3,12 +3,10 @@ package com.bydhud.app;
 //keeps the persistent foreground runtime alive so capture and HUD output continue outside the UI.
 
 import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.app.AppOpsManager;
-import android.app.ActivityOptions;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -28,8 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 //anchors the HudRuntimeService android entry point so lifecycle recovery stays separate from business logic.
 public final class HudRuntimeService extends Service {
     private static final String TAG = "BydHudRuntimeService";
-    private static final String CHANNEL_ID = "byd_hud_runtime";
-    private static final int NOTIFICATION_ID = 4302;
+    private static final String CHANNEL_ID = HudForegroundNotification.CHANNEL_ID;
     private static final int LOCATION_ACCESS_NOTIFICATION_ID = 4303;
     static final String ACTION_VEHICLE_POSITION_ACCESS = "com.bydhud.app.action.VEHICLE_POSITION_ACCESS";
 
@@ -42,7 +39,6 @@ public final class HudRuntimeService extends Service {
     private static final AtomicBoolean START_IN_FLIGHT = new AtomicBoolean(false);
     private static final Handler POSITION_MAIN_HANDLER = new Handler(Looper.getMainLooper());
     private static volatile HudRuntimeService activeService;
-    private static int wazeSurfaceDisplay = -1;
     private static volatile boolean vehiclePositionPermissionGranted;
     private static volatile String requestedVehiclePositionRouteSource;
     private static volatile Runnable vehiclePositionListener;
@@ -134,13 +130,7 @@ public final class HudRuntimeService extends Service {
     }
 
     static void setWazeSurfaceReentryDisplay(int displayId) {
-        POSITION_MAIN_HANDLER.post(() -> {
-            if (wazeSurfaceDisplay == displayId) return;
-            wazeSurfaceDisplay = displayId;
-            HudRuntimeService service = activeService;
-            if (service != null && !service.runtimeDestroyed)
-                service.updateNotification(service.runtimeActiveWork ? "Runtime active" : "Runtime idle");
-        });
+        POSITION_MAIN_HANDLER.post(() -> HudForegroundNotification.setSurfaceDisplay(displayId));
     }
 
     public static VehiclePositionController.Snapshot getVehiclePositionSnapshot() {
@@ -391,7 +381,7 @@ public final class HudRuntimeService extends Service {
         }
         HudRuntimeUpgradeGuard.recordVersionStart(this, "service-create");
         HudGraphicPayload.setContext(this);
-        startForeground(NOTIFICATION_ID, buildNotification("Runtime active"),
+        HudForegroundNotification.start(this, "Runtime active",
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE);
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markStarted(this, "onCreate");
@@ -555,6 +545,7 @@ public final class HudRuntimeService extends Service {
         HudPrefs.setRuntimeServiceRunning(this, false);
         HudRuntimeState.markStopped(this, "destroyed");
         recordVehiclePositionState("off/no-source");
+        HudForegroundNotification.stop(this);
         log("runtime destroyed");
         super.onDestroy();
     }
@@ -721,8 +712,8 @@ public final class HudRuntimeService extends Service {
         try {
             int type = enabled ? ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
                     : ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE;
-            startForeground(NOTIFICATION_ID,
-                    buildNotification(runtimeActiveWork ? "Runtime active" : "Runtime idle"), type);
+            HudForegroundNotification.start(this,
+                    runtimeActiveWork ? "Runtime active" : "Runtime idle", type);
             locationForegroundActive = enabled;
             return true;
         } catch (RuntimeException ignored) {
@@ -742,64 +733,16 @@ public final class HudRuntimeService extends Service {
         return null;
     }
 
-    //builds this artifact here so callers do not duplicate protocol or UI construction details.
-    private Notification buildNotification(String text) {
-        createNotificationChannel();
-        Intent launchIntent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(
-                this,
-                0,
-                launchIntent,
-                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT,
-                MainActivityDisplayGuard.tabletOptions());
-        Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID);
-        if (wazeSurfaceDisplay >= 0) {
-            Intent surface = new Intent(this, WazeSurfaceActivity.class)
-                    .setAction(WazeSurfaceActivity.ACTION_OPEN)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                            | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            ActivityOptions options = ActivityOptions.makeBasic();
-            options.setLaunchDisplayId(wazeSurfaceDisplay);
-            PendingIntent openSurface = PendingIntent.getActivity(this, 1, surface,
-                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_CANCEL_CURRENT, options.toBundle());
-            String language = HudPrefs.uiLanguage(this);
-            String title = "uk".equals(language) ? "Відкрити Waze Surface"
-                    : "ru".equals(language) ? "Открыть Waze Surface" : "Open Waze Surface";
-            builder.addAction(new Notification.Action.Builder(null, title, openSurface).build());
-        }
-        return builder
-                .setSmallIcon(R.drawable.ic_hud_notification)
-                .setContentTitle("BYD HUD")
-                .setContentText(text)
-                .setContentIntent(pendingIntent)
-                .setOngoing(true)
-                .build();
-    }
-
-    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateNotification(String text) {
-        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (manager != null) {
-            manager.notify(NOTIFICATION_ID, buildNotification(text));
-        }
+        HudForegroundNotification.update(this, text);
     }
 
-    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private void createNotificationChannel() {
-        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (manager == null || manager.getNotificationChannel(CHANNEL_ID) != null) {
-            return;
-        }
-        NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID,
-                "BYD HUD runtime",
-                NotificationManager.IMPORTANCE_LOW);
-        manager.createNotificationChannel(channel);
+        HudForegroundNotification.ensureChannel(this);
     }
 
-    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopForegroundCompat() {
-        stopForeground(STOP_FOREGROUND_REMOVE);
+        HudForegroundNotification.stop(this);
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.

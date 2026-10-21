@@ -306,7 +306,7 @@ public final class WazeDirectChannel {
                 ? -1 : carHost.appHost.surfaceDeliveryRevision;
         return new DoneCallback(expectedGeneration, "getTemplate", null, completion,
                 (response, ingress) -> {
-                    onTemplate(expectedGeneration, response, ingress, surfaceRevision);
+                    onTemplate(expectedGeneration, response, ingress, surfaceRevision, 0);
                     recordTemplateResponse("getTemplate");
                 });
     }
@@ -741,6 +741,8 @@ public final class WazeDirectChannel {
         WazeStartAdmission.Permit expectedPermit = connectionPermit;
         long surfaceRevision = carHost == null || !carHost.appHost.surfaceDelivered
                 ? -1 : carHost.appHost.surfaceDeliveryRevision;
+        long recenterRequest = carHost == null ? 0
+                : carHost.appHost.panState.recenterControlsRequest();
         try {
             appManager.getTemplate(new DoneCallback(
                     expectedGeneration, "getTemplate",
@@ -748,7 +750,7 @@ public final class WazeDirectChannel {
                     () -> completeTemplateRequest(
                             expectedGeneration, expectedPermit, request),
                     (response, ingress) -> {
-                        onTemplate(expectedGeneration, response, ingress, surfaceRevision);
+                        onTemplate(expectedGeneration, response, ingress, surfaceRevision, recenterRequest);
                         recordTemplateResponse("getTemplate");
                     }));
         } catch (Throwable t) {
@@ -772,9 +774,9 @@ public final class WazeDirectChannel {
     }
 
     private void onTemplate(int expectedGeneration, Bundleable response,
-            IngressStamp ingress, long surfaceRevision) throws Exception {
+            IngressStamp ingress, long surfaceRevision, long recenterRequest) throws Exception {
         ingress.diagnostic.normalizing(SystemClock.elapsedRealtime());
-        try { parseTemplate(expectedGeneration, response, ingress, surfaceRevision); }
+        try { parseTemplate(expectedGeneration, response, ingress, surfaceRevision, recenterRequest); }
         finally {
             if (ingress.diagnostic.normalizationEnd < 0) {
                 ingress.diagnostic.normalized(SystemClock.elapsedRealtime());
@@ -783,7 +785,7 @@ public final class WazeDirectChannel {
     }
 
     private void parseTemplate(int expectedGeneration, Bundleable response,
-            IngressStamp ingress, long surfaceRevision) throws Exception {
+            IngressStamp ingress, long surfaceRevision, long recenterRequest) throws Exception {
         if (suspended) return;
         Object value = response == null ? null : response.get();
         if (!(value instanceof TemplateWrapper)) {
@@ -794,7 +796,7 @@ public final class WazeDirectChannel {
         if (mode == Mode.MAIN_SURFACE && carHost != null
                 && carHost.appHost.surfaceDelivered
                 && surfaceRevision == carHost.appHost.surfaceDeliveryRevision) {
-            carHost.appHost.updateMapControls(template);
+            carHost.appHost.updateMapControls(template, recenterRequest);
         }
         if (!(template instanceof NavigationTemplate)) {
             log("template=" + typeName(template));
@@ -1033,6 +1035,8 @@ public final class WazeDirectChannel {
     }
 
     private void endNavigation(String reason, boolean notifyListener) {
+        if (carHost != null) carHost.appHost.finishRecenter(
+                carHost.appHost.panState.pendingRecenter(), "navigation_end:" + safeText(reason));
         resetTripState();
         acceptedRouteFrame = false;
         cancelAlertWatchdog();
@@ -2113,7 +2117,7 @@ public final class WazeDirectChannel {
         private PanModeDelegate panModeDelegate;
         private OnClickDelegate recenterAction;
         private IconCompat recenterIcon;
-        private long controlsRevision;
+        private Runnable recenterTimeout;
         private final WazeSurfacePanState panState = new WazeSurfacePanState();
 
         AppHost(int expectedGeneration) {
@@ -2152,7 +2156,6 @@ public final class WazeDirectChannel {
             panModeDelegate = null;
             recenterAction = null;
             recenterIcon = null;
-            controlsRevision++;
             panState.request(false);
         }
 
@@ -2247,15 +2250,25 @@ public final class WazeDirectChannel {
         public void onRecenter() {
             runOnChannel(() -> {
                 if (!isCurrent(expectedGeneration) || mode != Mode.MAIN_SURFACE || !surfaceDelivered) return;
-                OnClickDelegate action = recenterAction;
-                if (action == null) {
-                    log("surface recenter unavailable");
-                    return;
-                }
-                try {
-                    action.sendClick(mapControlResult("recenter", () -> setPanMode(false)));
-                } catch (RuntimeException error) {
-                    log("surface recenter failed: " + error);
+                long operation = panState.beginRecenter();
+                if (operation == 0) return;
+                log("surface recenter tap operation=" + operation
+                        + " instance=" + activityInstanceId + " display=" + activityDisplayId
+                        + " epoch=" + activitySurfaceEpoch + " pan=" + panState.isPanning());
+                recenterTimeout = () -> finishRecenter(operation, "timeout");
+                channelHandler.postDelayed(recenterTimeout, HEALTH_PROBE_TIMEOUT_MS);
+                publishMapControls();
+                if (panState.isPanning()) {
+                    if (panModeDelegate == null) {
+                        finishRecenter(operation, "pan_delegate_unavailable");
+                        return;
+                    }
+                    recenterAction = null;
+                    setPanMode(false);
+                } else if (recenterAction != null) {
+                    sendRecenter(operation);
+                } else {
+                    finishRecenter(operation, "action_unavailable");
                 }
             });
         }
@@ -2269,18 +2282,23 @@ public final class WazeDirectChannel {
 
         private void publishMapControls() {
             WazeSurfaceActivity.setRecenterControl(this, recenterIcon,
-                    surfaceDelivered && recenterAction != null);
+                    surfaceDelivered && !panState.recenterPending()
+                            && (recenterAction != null
+                            || (panState.isPanning() && panModeDelegate != null)));
         }
 
         private void invalidateMapControls() {
-            controlsRevision++;
+            finishRecenter(panState.pendingRecenter(), "renderer_changed");
             panState.rendererChanged();
             panModeDelegate = null;
             recenterAction = null;
             publishMapControls();
         }
 
-        void updateMapControls(Template template) {
+        void updateMapControls(Template template, long recenterRequest) {
+            // A template requested before pan exit cannot supply the centering action.
+            if (panState.recenterPending() && (recenterRequest == 0
+                    || recenterRequest != panState.recenterControlsRequest())) return;
             ActionStrip actions = null;
             PanModeDelegate pan = null;
             if (template instanceof NavigationTemplate) {
@@ -2298,7 +2316,10 @@ public final class WazeDirectChannel {
                 actions = route.getMapActionStrip();
                 pan = route.getPanModeDelegate();
             }
-            if (pan == null && panModeDelegate != null) panState.rendererChanged();
+            if (pan == null && panModeDelegate != null) {
+                finishRecenter(panState.pendingRecenter(), "map_controls_removed");
+                panState.rendererChanged();
+            }
             panModeDelegate = pan;
             recenterAction = null;
             if (actions != null) for (Action action : actions.getActions()) {
@@ -2321,30 +2342,45 @@ public final class WazeDirectChannel {
             }
             publishMapControls();
             reconcilePanMode();
+            if (recenterRequest != 0 && recenterRequest == panState.recenterControlsRequest()) {
+                log("surface recenter fresh_controls operation=" + recenterRequest
+                        + " action=" + (recenterAction != null));
+                if (recenterAction != null) sendRecenter(recenterRequest);
+            }
         }
 
-        private OnDoneCallback mapControlResult(String operation, Runnable success) {
-            long revision = controlsRevision;
-            return new OnDoneCallback() {
-                @Override public void onSuccess(Bundleable result) {
-                    postBinder(expectedGeneration, () -> {
-                        if (revision != controlsRevision) return;
-                        log("surface control=" + operation + " result=ok");
-                        if (success != null) success.run();
-                    });
-                }
-                @Override public void onFailure(Bundleable failure) {
-                    postBinder(expectedGeneration, () -> {
-                        if (revision != controlsRevision) return;
-                        log("surface control=" + operation + " result=failed detail=" + failure);
-                    });
-                }
-            };
+        private void sendRecenter(long operation) {
+            OnClickDelegate action = recenterAction;
+            if (action == null || !panState.sendRecenter(operation)) return;
+            log("surface recenter native_click operation=" + operation);
+            try {
+                action.sendClick(new OnDoneCallback() {
+                    @Override public void onSuccess(Bundleable result) {
+                        postBinder(expectedGeneration, () -> finishRecenter(operation, "native_ack"));
+                    }
+                    @Override public void onFailure(Bundleable failure) {
+                        postBinder(expectedGeneration, () ->
+                                finishRecenter(operation, "native_rejected:" + failure));
+                    }
+                });
+            } catch (RuntimeException error) {
+                finishRecenter(operation, "native_exception:" + error);
+            }
+        }
+
+        private void finishRecenter(long operation, String result) {
+            if (!panState.finishRecenter(operation)) return;
+            if (recenterTimeout != null) channelHandler.removeCallbacks(recenterTimeout);
+            recenterTimeout = null;
+            log("surface recenter operation=" + operation + " result=" + result);
+            publishMapControls();
         }
 
         private void setPanMode(boolean enabled) {
+            boolean changed = panState.isPanning() != enabled;
             panState.request(enabled);
             reconcilePanMode();
+            if (changed) publishMapControls();
         }
 
         private void reconcilePanMode() {
@@ -2357,14 +2393,27 @@ public final class WazeDirectChannel {
                     @Override public void onFailure(Bundleable failure) { complete(false); }
                     private void complete(boolean success) {
                         postBinder(expectedGeneration, () -> {
-                            if (panState.complete(request, success))
-                                log("surface pan=" + request.enabled + " result=" + success);
+                            completePanMode(request, success);
                         });
                     }
                 });
             } catch (RuntimeException error) {
-                panState.complete(request, false);
+                completePanMode(request, false);
                 log("surface pan mode failed: " + error);
+            }
+        }
+
+        private void completePanMode(WazeSurfacePanState.Request request, boolean success) {
+            if (!panState.complete(request, success)) return;
+            log("surface pan=" + request.enabled + " result=" + success);
+            if (!request.enabled && panState.recenterPending()) {
+                if (!success) {
+                    finishRecenter(panState.pendingRecenter(), "pan_exit_rejected");
+                } else if (panState.recenterPanExited()) {
+                    recenterAction = null;
+                    log("surface recenter pan_exited operation=" + panState.pendingRecenter());
+                    fetchTemplate(expectedGeneration);
+                }
             }
         }
 
@@ -2470,8 +2519,8 @@ public final class WazeDirectChannel {
                 if (!isCurrent(expectedGeneration) || mode != Mode.MAIN_SURFACE
                         || !surfaceDelivered || callback == null) return;
                 try {
+                    finishRecenter(panState.pendingRecenter(), "user_gesture");
                     if (manualPan) {
-                        controlsRevision++;
                         setPanMode(true);
                     }
                     input.run(callback);

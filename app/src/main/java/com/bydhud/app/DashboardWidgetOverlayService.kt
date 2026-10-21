@@ -1,9 +1,5 @@
 package com.bydhud.app
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -114,10 +110,7 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
         super.onCreate()
         controllerInstance = DashboardWidgetController.serviceCreated(this)
         MainActivity.requestRuntimeStatusRefresh(this, false, "widget-service")
-        getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, "BYD HUD dashboard widget", NotificationManager.IMPORTANCE_LOW)
-        )
-        startForeground(NOTIFICATION_ID, notification())
+        HudForegroundNotification.start(this, "widget", 0)
         savedStateController.performAttach()
         savedStateController.performRestore(null)
         lifecycleRegistry.currentState = Lifecycle.State.RESUMED
@@ -322,20 +315,8 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
         if (startId == null) stopSelf() else stopSelf(startId)
     }
 
-    private fun notification(): Notification {
-        val language = DashboardWidgetController.uiLanguage
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            MainActivityDisplayGuard.tabletOptions())
-        return Notification.Builder(this, CHANNEL)
-            .setSmallIcon(R.drawable.ic_hud_notification)
-            .setContentTitle(language.choose("Віджет приборки · BYD HUD", "Dashboard widget · BYD HUD", "Виджет приборки · BYD HUD"))
-            .setContentText(language.choose("Натисніть, щоб відкрити BYD HUD", "Tap to open BYD HUD", "Нажмите, чтобы открыть BYD HUD"))
-            .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).build()
-    }
-
     internal fun updateNotification() {
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
+        HudForegroundNotification.update(this, null)
     }
 
     override fun onDestroy() {
@@ -344,12 +325,11 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
         if (::menuView.isInitialized) menuView.disposeComposition()
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         DashboardWidgetController.serviceDestroyed(this, controllerInstance)
+        HudForegroundNotification.stop(this)
         super.onDestroy()
     }
 
     private companion object {
-        const val CHANNEL = "byd_hud_dashboard_widget"
-        const val NOTIFICATION_ID = 4303
         const val INACTIVITY_TIMEOUT_MS = 5_000L
 
         fun overlayParams() = WindowManager.LayoutParams(
