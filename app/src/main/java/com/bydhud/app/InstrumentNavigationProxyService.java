@@ -118,7 +118,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private IBinder.DeathRecipient clientDeath;
     private final Runnable recoverClient = this::recoverClient;
     private final ShellLogcatCapture logcatCapture = new ShellLogcatCapture();
-    private java.lang.Process recoveryCommand;
+    private final ShellRecoveryCommand recoveryCommand;
+    private final Object recoveryLogLock = new Object();
     private final java.util.Map<String, java.lang.Process> workProcesses = new java.util.concurrent.ConcurrentHashMap<>();
 
     InstrumentNavigationProxyService(
@@ -129,6 +130,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         this.allowedUid = allowedUid;
         this.launchToken = launchToken;
         this.appVersionCode = appVersionCode;
+        recoveryCommand = new ShellRecoveryCommand(10_000L, this::logRecovery);
         this.systemContext = systemContext;
     }
 
@@ -220,7 +222,11 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     synchronized (operationLock) {
                         connected = client == requestClient && requestClient.asBinder().isBinderAlive();
                     }
-                    if (connected) recoveryHandler.removeCallbacks(recoverClient);
+                    if (connected) {
+                        recoveryHandler.removeCallbacks(recoverClient);
+                        recoveryCommand.cancel("client_connected");
+                        logRecovery("client_connected");
+                    }
                 } else {
                     InstrumentProxyStartupLog.record(generation,
                             InstrumentProxyStartupLog.Stage.CONNECT_REJECTED,
@@ -1466,11 +1472,19 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 stop("owner installation changed");
                 return;
             }
-            if (recoveryCommand == null || !recoveryCommand.isAlive()) recoveryCommand =
-                    new ProcessBuilder("/system/bin/am", "start-foreground-service", "--user", "current",
+            ProcessBuilder command = new ProcessBuilder(
+                    "/system/bin/cmd", "activity", "start-foreground-service", "--user", "current",
                     "-n", "com.bydhud.app/.HudRuntimeService", "-a",
                     "com.bydhud.app.action.RECOVER_SHELL_RUNTIME")
-                    .redirectErrorStream(true).redirectOutput(new java.io.File("/dev/null")).start();
+                    .redirectErrorStream(true);
+            java.io.File commandLog = recoveryLogFile();
+            command.redirectOutput(commandLog == null
+                    ? ProcessBuilder.Redirect.to(new java.io.File("/dev/null"))
+                    : ProcessBuilder.Redirect.appendTo(commandLog));
+            synchronized (operationLock) {
+                if (stopped || connected || !recoveryEnabled) return;
+                recoveryCommand.start(command);
+            }
             Intent handoff = new Intent(InstrumentProxyContract.ACTION_CONNECTED)
                     .setComponent(new ComponentName("com.bydhud.app", "com.bydhud.app.InstrumentProxyReceiver"))
                     .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES | Intent.FLAG_RECEIVER_FOREGROUND)
@@ -1479,9 +1493,11 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     .putExtra(InstrumentProxyContract.EXTRA_NONCE, nonce)
                     .putExtra(InstrumentProxyContract.EXTRA_BINDER, new InstrumentProxyBinder(asBinder()));
             systemContext.sendBroadcast(handoff);
-            Log.i(TAG, "background recovery requested generation=" + generation);
+            logRecovery("handoff_requested");
         } catch (Exception error) {
             Log.w(TAG, "background recovery failed", error);
+            logRecovery("request_failed error=" + error.getClass().getSimpleName()
+                    + " message=" + String.valueOf(error.getMessage()).replace('\n', ' ').replace('\r', ' '));
             if (error instanceof PackageManager.NameNotFoundException) { stop("owner removed"); return; }
         }
         if (!stopped && !connected && recoveryEnabled) recoveryHandler.postDelayed(recoverClient, 2_000L);
@@ -1489,6 +1505,44 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
 
     boolean isConnected() {
         return connected;
+    }
+
+    private java.io.File recoveryLogFile() {
+        String day = new java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US)
+                .format(new java.util.Date());
+        java.io.File directory = new java.io.File("/storage/emulated/" + (allowedUid / 100000)
+                + "/Documents/" + NavigationLogStorage.ROOT_DIR + "/" + day + "/logs");
+        try {
+            if (!directory.isDirectory() && !directory.mkdirs()) {
+                throw new java.io.IOException("Cannot create " + directory);
+            }
+            java.io.File file = new java.io.File(directory, "shell-runtime-recovery-" + generation + ".log");
+            // Failed diagnostic storage must not prevent the service-start command.
+            try (java.io.FileOutputStream ignored = new java.io.FileOutputStream(file, true)) { }
+            return file;
+        } catch (java.io.IOException | RuntimeException error) {
+            Log.w(TAG, "recovery journal unavailable", error);
+            return null;
+        }
+    }
+
+    private void logRecovery(String event) {
+        String line = "shell_runtime_recovery generation=" + generation + " " + event;
+        Log.i(TAG, line);
+        synchronized (recoveryLogLock) {
+            try {
+                java.io.File file = recoveryLogFile();
+                if (file == null) return;
+                String timestamp = new java.text.SimpleDateFormat(
+                        "yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(new java.util.Date());
+                try (java.io.FileOutputStream output = new java.io.FileOutputStream(file, true)) {
+                    output.write((timestamp + " " + line + "\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+            } catch (java.io.IOException | RuntimeException error) {
+                Log.w(TAG, "recovery journal write failed", error);
+            }
+        }
     }
 
     void stopIfUnconnected() {
@@ -1508,7 +1562,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         stopped = true;
         recoveryEnabled = false;
         recoveryHandler.removeCallbacks(recoverClient);
-        if (recoveryCommand != null) recoveryCommand.destroy();
+        recoveryCommand.close();
         Bundle capture = logcatCapture.state();
         if (capture.getBoolean("running")) logcatCapture.stop(capture.getString("id", ""));
         InstrumentProxyStartupLog.record(generation,
