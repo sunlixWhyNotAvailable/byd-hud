@@ -8,6 +8,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.app.AppOpsManager;
+import android.app.ActivityOptions;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -41,6 +42,7 @@ public final class HudRuntimeService extends Service {
     private static final AtomicBoolean START_IN_FLIGHT = new AtomicBoolean(false);
     private static final Handler POSITION_MAIN_HANDLER = new Handler(Looper.getMainLooper());
     private static volatile HudRuntimeService activeService;
+    private static int wazeSurfaceDisplay = -1;
     private static volatile boolean vehiclePositionPermissionGranted;
     private static volatile String requestedVehiclePositionRouteSource;
     private static volatile Runnable vehiclePositionListener;
@@ -128,6 +130,16 @@ public final class HudRuntimeService extends Service {
             } else {
                 service.reconcileVehiclePosition();
             }
+        });
+    }
+
+    static void setWazeSurfaceReentryDisplay(int displayId) {
+        POSITION_MAIN_HANDLER.post(() -> {
+            if (wazeSurfaceDisplay == displayId) return;
+            wazeSurfaceDisplay = displayId;
+            HudRuntimeService service = activeService;
+            if (service != null && !service.runtimeDestroyed)
+                service.updateNotification(service.runtimeActiveWork ? "Runtime active" : "Runtime idle");
         });
     }
 
@@ -741,6 +753,20 @@ public final class HudRuntimeService extends Service {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT,
                 MainActivityDisplayGuard.tabletOptions());
         Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID);
+        if (wazeSurfaceDisplay >= 0) {
+            Intent surface = new Intent(this, WazeSurfaceActivity.class)
+                    .setAction(WazeSurfaceActivity.ACTION_OPEN)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            ActivityOptions options = ActivityOptions.makeBasic();
+            options.setLaunchDisplayId(wazeSurfaceDisplay);
+            PendingIntent openSurface = PendingIntent.getActivity(this, 1, surface,
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_CANCEL_CURRENT, options.toBundle());
+            String language = HudPrefs.uiLanguage(this);
+            String title = "uk".equals(language) ? "Відкрити Waze Surface"
+                    : "ru".equals(language) ? "Открыть Waze Surface" : "Open Waze Surface";
+            builder.addAction(new Notification.Action.Builder(null, title, openSurface).build());
+        }
         return builder
                 .setSmallIcon(R.drawable.ic_hud_notification)
                 .setContentTitle("BYD HUD")

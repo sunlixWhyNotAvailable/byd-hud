@@ -4,14 +4,18 @@ import android.app.Activity;
 import android.app.ActivityOptions;
 import android.app.ActivityManager;
 import android.content.Context;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.Drawable;
 import android.content.res.ColorStateList;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.GestureDetector;
 import android.view.Gravity;
@@ -25,7 +29,8 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
-import android.widget.Button;
+import android.widget.ImageButton;
+import androidx.core.graphics.drawable.IconCompat;
 
 import java.lang.ref.WeakReference;
 import java.util.concurrent.CountDownLatch;
@@ -35,6 +40,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class WazeSurfaceActivity extends Activity implements SurfaceHolder.Callback {
     private static final String TAG = "BYD_HUD_WAZE_SURFACE";
     private static final long SURFACE_DESTROY_ACK_TIMEOUT_MS = 250L;
+    static final String ACTION_OPEN = "com.bydhud.app.action.OPEN_WAZE_SURFACE";
     interface HostBridge {
         void onSurfaceReady(Surface surface, int width, int height, int dpi, Rect visibleArea,
                 long activityInstanceId, int displayId, long surfaceEpoch);
@@ -45,6 +51,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         void onFling(float velocityX, float velocityY);
         void onScale(float focusX, float focusY, float scaleFactor);
         void onRecenter();
+        void onControlsRequested();
     }
 
     private static final Object BRIDGE_LOCK = new Object();
@@ -73,16 +80,35 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         }
     }
 
-    static void finishActive(String reason) {
-        WazeSurfaceActivity activity;
-        synchronized (BRIDGE_LOCK) {
-            activity = active.get();
-        }
-        SurfaceLog.event("activity_finish_requested", "reason", reason,
-                "active", activity != null);
-        if (activity != null) activity.runOnUiThread(() -> {
-            activity.closeReason = reason == null ? "requested-close" : reason;
-            activity.finish();
+    static void finishActive(Context context, String reason) {
+        WazeSurfaceActivity expected;
+        synchronized (BRIDGE_LOCK) { expected = active.get(); }
+        new Handler(Looper.getMainLooper()).post(() -> {
+            WazeSurfaceActivity activity;
+            synchronized (BRIDGE_LOCK) {
+                activity = active.get();
+                if (activity != expected) return;
+            }
+            SurfaceLog.event("activity_finish_requested", "reason", reason,
+                    "active", activity != null);
+            if (activity != null) {
+                activity.closeReason = reason == null ? "requested-close" : reason;
+                activity.finishAndRemoveTask();
+            }
+            ActivityManager manager = (ActivityManager) context.getSystemService(ACTIVITY_SERVICE);
+            if (manager == null) return;
+            ComponentName surfaceComponent = new ComponentName(context, WazeSurfaceActivity.class);
+            for (ActivityManager.AppTask task : manager.getAppTasks()) {
+                try {
+                    ActivityManager.RecentTaskInfo info = task.getTaskInfo();
+                    if (surfaceComponent.equals(info.baseActivity)
+                            || (info.baseActivity == null && info.baseIntent != null
+                            && surfaceComponent.equals(info.baseIntent.getComponent())))
+                        task.finishAndRemoveTask();
+                } catch (RuntimeException error) {
+                    SurfaceLog.error("surface_task_remove_failed", error);
+                }
+            }
         });
     }
 
@@ -148,7 +174,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
     }
 
     private SurfaceView surfaceView;
-    private Button recenterButton;
+    private ImageButton recenterButton;
     private GestureDetector gestureDetector;
     private ScaleGestureDetector scaleDetector;
     private volatile Surface surface;
@@ -168,20 +194,40 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
             hostBridge = bridge;
             activity = active.get();
         }
-        if (activity != null) activity.runOnUiThread(activity::dispatchSurfaceState);
+        if (activity != null) activity.runOnUiThread(() -> {
+            activity.dispatchSurfaceState();
+            bridge.onControlsRequested();
+        });
     }
 
     static void detachHostBridge(HostBridge bridge) {
+        WazeSurfaceActivity activity;
         synchronized (BRIDGE_LOCK) {
             if (hostBridge == bridge) hostBridge = null;
+            activity = active.get();
         }
+        if (activity != null) activity.runOnUiThread(() -> {
+            synchronized (BRIDGE_LOCK) { if (hostBridge != null || active.get() != activity) return; }
+            activity.recenterButton.setEnabled(false);
+            activity.recenterButton.setVisibility(View.INVISIBLE);
+        });
     }
 
-    static void setRecenterAvailable(boolean available) {
+    static void setRecenterControl(HostBridge owner, IconCompat icon, boolean available) {
         WazeSurfaceActivity activity;
         synchronized (BRIDGE_LOCK) { activity = active.get(); }
-        if (activity != null) activity.runOnUiThread(
-                () -> activity.recenterButton.setEnabled(available));
+        if (activity != null) activity.runOnUiThread(() -> {
+            synchronized (BRIDGE_LOCK) {
+                if (active.get() != activity || hostBridge != owner) return;
+            }
+            Drawable drawable = null;
+            try { if (icon != null) drawable = icon.loadDrawable(activity); }
+            catch (RuntimeException error) { SurfaceLog.error("recenter_icon_failed", error); }
+            activity.recenterButton.setImageDrawable(drawable);
+            activity.recenterButton.setVisibility(drawable == null ? View.INVISIBLE : View.VISIBLE);
+            activity.recenterButton.setEnabled(available && drawable != null);
+            activity.recenterButton.setAlpha(available ? 1f : 0.5f);
+        });
     }
 
     @Override
@@ -205,30 +251,26 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         surfaceView.getHolder().addCallback(this);
         root.addView(surfaceView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        recenterButton = new Button(this);
+        recenterButton = new ImageButton(this);
         String language = HudPrefs.uiLanguage(this);
-        recenterButton.setText("uk".equals(language) ? "Центрувати"
+        recenterButton.setContentDescription("uk".equals(language) ? "Центрувати"
                 : "ru".equals(language) ? "Центрировать" : "Center");
-        recenterButton.setAllCaps(false);
-        recenterButton.setTextSize(14f);
+        recenterButton.setVisibility(View.INVISIBLE);
         recenterButton.setEnabled(false);
         boolean dark = HudPrefs.isDarkTheme(this);
-        recenterButton.setTextColor(new ColorStateList(
-                new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{}},
-                new int[]{dark ? 0xffaab8ca : 0xff526274, dark ? 0xfff1f6ff : 0xff121a23}));
         GradientDrawable background = new GradientDrawable();
         background.setColor(dark ? 0xff172231 : 0xfff0f5fb);
         background.setCornerRadius(dp(8));
         background.setStroke(dp(1), dark ? 0xff40536a : 0xff6d7d8f);
         recenterButton.setBackground(new RippleDrawable(
                 ColorStateList.valueOf(dark ? 0x402f86f6 : 0x242f86f6), background, null));
-        recenterButton.setPadding(dp(16), 0, dp(16), 0);
+        recenterButton.setPadding(dp(8), dp(8), dp(8), dp(8));
         recenterButton.setOnClickListener(view -> {
             HostBridge bridge = bridge();
             if (bridge != null) bridge.onRecenter();
         });
         FrameLayout.LayoutParams buttonLayout = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(44), Gravity.BOTTOM | Gravity.LEFT);
+                dp(44), dp(44), Gravity.BOTTOM | Gravity.LEFT);
         buttonLayout.setMargins(dp(14), dp(14), dp(14), dp(14));
         root.addView(recenterButton, buttonLayout);
 
@@ -237,7 +279,10 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         synchronized (BRIDGE_LOCK) {
             active = new WeakReference<>(this);
         }
-        NavHudLiveSender.get(this).onWazeSurfaceActivityCreated(getTaskId(), instanceId);
+        NavHudLiveSender.get(this).onWazeSurfaceActivityCreated(
+                getTaskId(), instanceId, ACTION_OPEN.equals(getIntent().getAction()));
+        HostBridge bridge = bridge();
+        if (bridge != null) bridge.onControlsRequested();
         NavAppDisplayController.get(this).onSurfaceWindowChanged();
         SurfaceLog.event("visible_surface_activity_created");
     }
@@ -290,6 +335,12 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        setIntent(intent);
+        if (ACTION_OPEN.equals(intent.getAction())) {
+            NavHudLiveSender.get(this).onWazeSurfaceActivityCreated(getTaskId(), instanceId, true);
+        }
+        HostBridge bridge = bridge();
+        if (bridge != null) bridge.onControlsRequested();
         SurfaceLog.event("visible_surface_activity_reused");
         dispatchSurfaceState();
     }
@@ -327,11 +378,11 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
     public void onConfigurationChanged(Configuration configuration) {
         super.onConfigurationChanged(configuration);
         FrameLayout.LayoutParams layout = (FrameLayout.LayoutParams) recenterButton.getLayoutParams();
+        layout.width = dp(44);
         layout.height = dp(44);
         layout.setMargins(dp(14), dp(14), dp(14), dp(14));
         recenterButton.setLayoutParams(layout);
-        recenterButton.setPadding(dp(16), 0, dp(16), 0);
-        recenterButton.setTextSize(14f);
+        recenterButton.setPadding(dp(8), dp(8), dp(8), dp(8));
         if (surface == null || !surface.isValid()) return;
         Rect frame = surfaceView.getHolder().getSurfaceFrame();
         surfaceChanged(surfaceView.getHolder(), 0, frame.width(), frame.height());

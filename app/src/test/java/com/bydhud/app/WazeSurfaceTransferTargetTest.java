@@ -4,8 +4,33 @@ import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
 public class WazeSurfaceTransferTargetTest {
+    @Test public void restoresPanForNewRendererAndIgnoresOldAcknowledgments() {
+        WazeSurfacePanState state = new WazeSurfacePanState();
+        state.request(true);
+        WazeSurfacePanState.Request old = state.next();
+        assertTrue(old.enabled);
+        assertNull(state.next());
+        state.rendererChanged();
+        WazeSurfacePanState.Request restored = state.next();
+        assertTrue(restored.enabled);
+        assertFalse(state.complete(old, false));
+        assertNull(state.next());
+        assertTrue(state.complete(restored, true));
+        state.request(false);
+        WazeSurfacePanState.Request centered = state.next();
+        assertFalse(centered.enabled);
+        assertTrue(state.complete(centered, false));
+        WazeSurfacePanState.Request retry = state.next();
+        assertFalse(retry.enabled);
+        assertFalse(state.complete(centered, true));
+        assertTrue(state.complete(retry, true));
+        assertNull(state.next());
+    }
+
     @Test public void mapsTouchFocusAndDeltasToTheActualSurfaceBuffer() {
         assertEquals(960f, WazeSurfaceActivity.surfaceCoordinate(480f, 960, 1920), 0.001f);
         assertEquals(270f, WazeSurfaceActivity.surfaceCoordinate(540f, 1080, 540), 0.001f);

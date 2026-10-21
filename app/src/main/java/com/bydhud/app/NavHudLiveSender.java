@@ -2364,6 +2364,7 @@ final class NavHudLiveSender {
         wazeDirectNavigating = true;
         wazeDirectHandshakeAvailable = true;
         wazeDirectRouteEnded = false;
+        updateWazeSurfaceReentry();
         long now = SystemClock.elapsedRealtime();
         NavRouteStateStore.get(context).updateFromVisualRouteEvidence(
                 WAZE_PACKAGE, "waze_direct", "navigation_started", now);
@@ -2404,8 +2405,14 @@ final class NavHudLiveSender {
         }
     }
 
-    void onWazeSurfaceActivityCreated(int taskId, long instanceId) {
+    void onWazeSurfaceActivityCreated(int taskId, long instanceId, boolean explicitReentry) {
         handler.post(() -> {
+            if (instanceId != WazeSurfaceActivity.activeInstanceId()) return;
+            if (explicitReentry && isWazeSurfaceRouteEligible()) {
+                wazeSurfaceDismissedForRoute = false;
+                wazeSurfaceFailureRouteGeneration = -1;
+                log("surface_foreground reason=notification task=" + taskId);
+            }
             wazeSurfaceTaskId = taskId;
             wazeSurfaceInstanceId = instanceId;
             if (wazeSurfaceReadyInstanceId != instanceId) {
@@ -2415,7 +2422,7 @@ final class NavHudLiveSender {
             }
             if (!shouldUseWazeSurface()) {
                 log("waze surface activity rejected route/config no longer eligible");
-                WazeSurfaceActivity.finishActive("not-eligible");
+                WazeSurfaceActivity.finishActive(context, "not-eligible");
                 return;
             }
             wazeSurfaceRouteGeneration = wazeRouteGeneration;
@@ -2423,6 +2430,7 @@ final class NavHudLiveSender {
                     "surface-activity-created", WazeDirectChannel.Mode.MAIN_SURFACE);
             log("waze surface activity created task=" + taskId
                     + " clusterSession=" + wazeDirectChannel.sessionGeneration());
+            updateWazeSurfaceReentry();
         });
     }
 
@@ -2430,6 +2438,7 @@ final class NavHudLiveSender {
         handler.post(() -> {
             if (instanceId != wazeSurfaceInstanceId) return;
             wazeSurfaceVisible = visible;
+            updateWazeSurfaceReentry();
             log("waze surface activity visible=" + visible + " task=" + wazeSurfaceTaskId);
             if (visible && shouldUseWazeSurface()
                     && wazeSurfaceDirectChannel.isActive()
@@ -2621,6 +2630,7 @@ final class NavHudLiveSender {
     }
 
     private void refreshActiveWazeMapSourceMode() {
+        updateWazeSurfaceReentry();
         boolean ownedSurface = isCurrentWazeSurfaceWindow(
                 wazeSurfaceReadyInstanceId, wazeSurfaceReadyEpoch)
                 && wazeSurfaceReadyInstanceId == wazeSurfaceInstanceId
@@ -2629,6 +2639,17 @@ final class NavHudLiveSender {
                 isRuntimeEnabled() && !HudPrefs.isUserShutdownActive(context),
                 wazeDirectChannel.isActive(), wazeSurfaceDirectChannel.isActive(),
                 ownedSurface, WazeSurfaceActivity.isVisible()));
+    }
+
+    private void updateWazeSurfaceReentry() {
+        int display = -1;
+        if (isWazeSurfaceRouteEligible() && isRuntimeEnabled()
+                && !HudPrefs.isUserShutdownActive(context)) {
+            display = WazeSurfaceActivity.activeDisplayId();
+            if (display < 0) display = Math.max(0,
+                    ClusterProjectionService.projectedDisplayIdForPackage(WAZE_PACKAGE));
+        }
+        HudRuntimeService.setWazeSurfaceReentryDisplay(display);
     }
 
     static HudMapProfile.Source wazeMapSourceMode(boolean runtimeEnabled,
@@ -3229,7 +3250,7 @@ final class NavHudLiveSender {
         wazeSurfaceInstanceId = 0L;
         wazeSurfaceDismissedForRoute = true;
         wazeSurfaceRouteGeneration = -1;
-        WazeSurfaceActivity.finishActive(reason);
+        WazeSurfaceActivity.finishActive(context, reason);
         NavAppDisplayController.get(context).onSurfaceTaskFinished(-1);
         //Stopping the main host during an active route invokes Waze onAppStop and ends navigation.
         if (!wasSurface || !active || !WAZE_PACKAGE.equals(activePackage)
@@ -3325,7 +3346,8 @@ final class NavHudLiveSender {
         wazeSurfaceInstanceId = 0L;
         wazeSurfaceRouteGeneration = -1;
         wazeSurfaceFailureRouteGeneration = -1;
-        WazeSurfaceActivity.finishActive(reason);
+        WazeSurfaceActivity.finishActive(context, reason);
+        updateWazeSurfaceReentry();
         NavAppDisplayController.get(context).onSurfaceTaskFinished(-1);
     }
 
