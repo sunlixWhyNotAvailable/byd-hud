@@ -97,6 +97,10 @@ Java_com_bydhud_mapcapture_WazeHudStyle_attach(JNIEnv* env, jclass, jstring mapI
     // Read-only libc++ long-string view for the stock registry lookup; no ownership transfer.
     struct StringView { size_t capacity, size; const char* data; } key{(strlen(id) + 1) | 1u, strlen(id), id};
     Shared registry = reinterpret_cast<Shared(*)()>(base + 0x2c81e7c)();
+    if (!registry.object) {
+        env->ReleaseStringUTFChars(mapId, id);
+        error(env, "HUD style: map registry unavailable"); return;
+    }
     Shared api = reinterpret_cast<Shared(*)(void*, const void*)>(base + 0x2c82600)(registry.object, &key);
     env->ReleaseStringUTFChars(mapId, id);
     if (!api.object || read<uintptr_t>(api.object, 0) != base + 0x42cbcd0) {

@@ -153,7 +153,8 @@ final class WazeHudMap {
                 return result;
             } catch (Throwable error) {
                 renderFailed = true;
-                MAIN.post(() -> fail("hud_render_" + method, error));
+                if (stopped) BackgroundCapture.failure("hud_render_" + method, error);
+                else MAIN.post(() -> fail("hud_render_" + method, error));
                 // Do not let our scene terminate Waze's shared render thread.
                 if (method.equals("l")) return false;
                 return null;
@@ -176,7 +177,8 @@ final class WazeHudMap {
             }
             catch (Throwable error) {
                 renderFailed = true;
-                MAIN.post(() -> fail("hud_output_" + method, error));
+                if (stopped) BackgroundCapture.failure("hud_output_" + method, error);
+                else MAIN.post(() -> fail("hud_output_" + method, error));
                 return method.equals("l") ? false : null;
             }
         });
@@ -224,19 +226,27 @@ final class WazeHudMap {
             cleanup("hud_source_unsubscribe", () -> invoke(field(manager, "b"), "j", field(manager, "k")));
             cleanup("hud_manager_remove", () -> invoke(executor, "e", manager));
             // FIFO on the real render executor: remove our manager, detach its EGL target, then clear its map.
-            cleanup("hud_renderer_dispose", () -> invoke(executor, "execute", (Runnable) () -> {
-                cleanup("hud_surface_detach", () -> invoke(wrapper, "i"));
-                cleanup("hud_native_clear", () -> invoke(renderer, "f"));
-                MAIN.post(() -> {
-                    cleanup("hud_renderer_events_cancel", () -> invoke(type("kotlinx.coroutines.ai"), "i", field(renderer, "b")));
-                    closeOutput();
+            try {
+                if (!((Thread) executor).isAlive() || Boolean.TRUE.equals(field(executor, "d")))
+                    throw new IllegalStateException("Render executor stopped before HUD disposal");
+                invoke(executor, "execute", (Runnable) () -> {
+                    cleanup("hud_surface_detach", () -> invoke(wrapper, "i"));
+                    cleanup("hud_native_clear", () -> invoke(renderer, "f"));
+                    MAIN.post(this::finishOutput);
                 });
-            }));
+            } catch (Throwable error) {
+                BackgroundCapture.failure("hud_renderer_dispose", error);
+                finishOutput();
+            }
         } else {
-            cleanup("hud_renderer_events_cancel", () -> { if (renderer != null) invoke(type("kotlinx.coroutines.ai"), "i", field(renderer, "b")); });
-            closeOutput();
+            finishOutput();
         }
         BackgroundCapture.event("hud_map_stopped", renderer, "mapId=" + mapId);
+    }
+
+    private void finishOutput() {
+        cleanup("hud_renderer_events_cancel", () -> { if (renderer != null) invoke(type("kotlinx.coroutines.ai"), "i", field(renderer, "b")); });
+        closeOutput();
     }
 
     private void closeOutput() {

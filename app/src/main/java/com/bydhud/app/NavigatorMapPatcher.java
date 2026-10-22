@@ -79,7 +79,7 @@ public final class NavigatorMapPatcher {
     private static final String HUD_CAPABILITY = "bydhud-waze525-independent-hud-v1";
     private static final String HUD_NATIVE = "lib/arm64-v8a/libbydhud_hudmap.so";
     private static final String WAZE_NATIVE_SHA = "79df676abb007443c98a7a435e9aec967ad67d22082b564f869de6b9c61f5858";
-    private static final String HUD_NATIVE_SHA = "e5dae7bd973d8b7fcdf519bc7e416eab6084f07de427bbb34f49aedc02cd3844";
+    private static final String HUD_NATIVE_SHA = "8924bb9e3a0a1d47ba6d42abf284301fcbcbd4a5fab1d500d2546581d6ccbb1c";
 
     private static final String BRIDGE = "Lcom/bydhud/mapcapture/CaptureBridge;";
     private static final String BACKGROUND = "Lcom/bydhud/mapcapture/BackgroundCapture;";
@@ -1086,8 +1086,7 @@ public final class NavigatorMapPatcher {
         }
         for (String type : payload.classes) {
             if (BACKGROUND_D8_ACCESS.equals(type) || SCHEDULER_D8_ACCESS.equals(type)
-                    || JOURNAL_D8_ACCESS.equals(type) || SURFACE_D8_ACCESS.equals(type)
-                    || (PAYLOAD_PREFIX + "WazeHudMap-IA;").equals(type)) continue;
+                    || JOURNAL_D8_ACCESS.equals(type) || SURFACE_D8_ACCESS.equals(type)) continue;
             String name = type.substring(PAYLOAD_PREFIX.length(), type.length() - 1);
             int nested = name.indexOf('$');
             String root = nested < 0 ? name : name.substring(0, nested);

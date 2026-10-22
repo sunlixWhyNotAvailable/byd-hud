@@ -50,9 +50,13 @@ final class WazeSurfaceCopy {
                 result.complete(bitmap, status);
             }, handler);
         } catch (RuntimeException | OutOfMemoryError error) {
+            BackgroundCapture.failure("surface_copy_request", error);
             if (p.timeout != null) handler.removeCallbacks(p.timeout);
             if (pending == p) pending = null;
-            if (p.bitmap != null) p.bitmap.recycle();
+            try { if (p.bitmap != null) p.bitmap.recycle(); }
+            catch (RuntimeException | OutOfMemoryError cleanup) {
+                BackgroundCapture.failure("surface_copy_bitmap_cleanup", cleanup);
+            }
             result.complete(null, "surface_copy_exception_" + error.getClass().getSimpleName());
         }
     }
