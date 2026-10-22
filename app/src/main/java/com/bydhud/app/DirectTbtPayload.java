@@ -170,6 +170,8 @@ public final class DirectTbtPayload {
                 && navManeuverPng.length == 0;
         boolean destinationManeuver = !alert.isActive()
                 && safeFrame.getAmapManeuver() == 15;
+        boolean roundaboutManeuver = safeFrame.getAmapManeuver() == 22
+                || safeFrame.getAmapManeuver() == 25;
         boolean blankDestinationManeuver = destinationManeuver
                 && navManeuverPng.length == 0;
 
@@ -179,7 +181,7 @@ public final class DirectTbtPayload {
                 ? safeOptions.blankS72Png.clone() : navManeuverPng);
         int nativeManeuver = alert.isActive()
                 ? NATIVE_BLANK_ID
-                : (blankLaneManeuver || destinationManeuver
+                : ((blankLaneManeuver && !roundaboutManeuver) || destinationManeuver
                 ? NATIVE_BLANK_ID : safeFrame.getBydManeuver());
         if (hudCheckFormat != null) nativeManeuver = hudCheckRoadInfoCode;
         int distanceMeters = alert.isActive()
@@ -264,8 +266,7 @@ public final class DirectTbtPayload {
                 : navManeuverPng.length > 0 ? "current" : "empty";
         HudManeuverGeometry.Selection geometry = HudManeuverGeometry.select(
                 safeFrame, safeOptions.nativeManeuver, alert.isActive());
-        if (blankLaneManeuver && safeOptions.nativeManeuver
-                && safeFrame.getAmapManeuver() != 22 && safeFrame.getAmapManeuver() != 25) {
+        if (blankLaneManeuver && safeOptions.nativeManeuver && !roundaboutManeuver) {
             geometry = HudManeuverGeometry.LANE_ONLY;
         }
         if (spatial != null) {

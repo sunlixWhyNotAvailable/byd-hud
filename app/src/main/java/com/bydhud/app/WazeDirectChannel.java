@@ -1966,7 +1966,7 @@ public final class WazeDirectChannel {
         }
     }
 
-    private static int mapAmapToByd(int amap) {
+    private static int mapAmapToByd(int amap, RoundaboutExit exit) {
         switch (amap) {
             case 2:
             case 6:
@@ -1984,9 +1984,10 @@ public final class WazeDirectChannel {
                 return 8;
             case 9:
                 return 11;
-            case 15:
             case 22:
             case 25:
+                return HudManeuverMap.roundaboutToNative(amap, exit.getDirection());
+            case 15:
                 return 99;
             default:
                 return 0;
@@ -2951,10 +2952,11 @@ public final class WazeDirectChannel {
             Maneuver maneuver = step.getManeuver();
             int rawType = maneuver == null ? -1 : maneuver.getType();
             int amap = maneuver == null ? 0 : mapWazeToAmap(rawType);
+            RoundaboutExit exit = roundaboutExitDirection(maneuver);
             return new WazeStepData(rawType, amap,
-                    amap == 15 ? 99 : mapAmapToByd(amap),
+                    amap == 15 ? 99 : mapAmapToByd(amap, exit),
                     maneuver == null ? 0 : mapWazeToAmapBroadcast(rawType, amap),
-                    roundaboutExitNumber(maneuver), roundaboutExitDirection(maneuver),
+                    roundaboutExitNumber(maneuver), exit,
                     text(step.getRoad()),
                     text(step.getCue()), maneuver == null ? null : maneuver.getIcon(),
                     WazeLaneData.from(step));

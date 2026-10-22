@@ -525,6 +525,8 @@ public final class NavigatorMapCapture {
                     requestSourceModeRevision = activeSourceModeRevision;
                     lastRequestAtElapsedMs = now;
                     answer.putLong("id", pendingId);
+                    if ("com.waze".equals(ownerPackage)) answer.putString("requestedWazeSource",
+                            activeSourceMode == HudMapProfile.Source.WAZE_SURFACE ? "waze_surface" : "waze");
                     answer.putLong("requestNs", requestStartedNs);
                     answer.putLong("pollSkipCount", skippedPollCount);
                     answer.putLong("pollSkipElapsedMs", skippedPollStartedAtElapsedMs < 0L

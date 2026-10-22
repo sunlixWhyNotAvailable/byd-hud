@@ -144,6 +144,10 @@ public final class BackgroundCapture {
     }
     private static boolean active() { return LEASE.active(SystemClock.elapsedRealtime()); }
     private static void drive() {
+        if (CaptureBridge.waze525()) {
+            WazeHudMap.drive(CaptureBridge.context(), active());
+            return;
+        }
         // Surface callbacks may have arrived while owned output suppressed them.
         // Rebind any still-valid real host now so a later resume can use it.
         if (!active()) { release("lease_end", true); releaseFollowing(null,"lease_end"); failed = null; failedCars.clear(); return; }
@@ -192,6 +196,7 @@ public final class BackgroundCapture {
 
 
     static void captureWaze(android.os.Bundle request) {
+        if (CaptureBridge.waze525()) { WazeHudMap.capture(request); return; }
         MAIN.post(() -> {
             try {
                 if (!active()) { CaptureBridge.wazeUnavailable(request, "capture_inactive"); return; }
@@ -444,7 +449,7 @@ public final class BackgroundCapture {
         try { registerWazeSource(get(presenter,(CaptureBridge.waze525() ? "com.waze.car_lib.i.a.t" : "com.waze.car_lib.i.a.s"),"f"),"waze_surface"); }
         catch (Throwable e) { failure("car_source",e); }
     }
-    private static void registerWazeSource(Object manager, String mode) throws Exception {
+    static void registerWazeSource(Object manager, String mode) throws Exception {
         if (manager == null) return;
         Object renderer = get(manager,null,"a");
         synchronized (wazeSources) { wazeSources.put(renderer,mode); }
@@ -961,6 +966,7 @@ public final class BackgroundCapture {
         } catch (Throwable e) { failure("frame_identity",e); }
     }
     public static void wazeFrame(Object source) {
+        if (WazeHudMap.owns(source)) return;
         Target t=target;
         if (t==null || source!=t.frameSource) {
             lastVisibleWazeFrame=SystemClock.elapsedRealtime();
@@ -1024,7 +1030,7 @@ public final class BackgroundCapture {
             }
         }
     }
-    private static void event(String name, Object owner, String detail) {
+    static void event(String name, Object owner, String detail) {
         String eventOwner = identity(owner);
         String eventDetail = detail == null ? "" : detail;
         long elapsedNs = SystemClock.elapsedRealtimeNanos();
@@ -1053,7 +1059,7 @@ public final class BackgroundCapture {
             }
         }
     }
-    private static void failure(String action, Throwable e) {
+    static void failure(String action, Throwable e) {
         state = action + ": " + e;
         String trace=android.util.Log.getStackTraceString(e);
         event("background_error",null,action+": "+trace);

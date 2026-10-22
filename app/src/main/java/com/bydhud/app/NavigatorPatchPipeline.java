@@ -693,9 +693,16 @@ final class NavigatorPatchPipeline {
             reportStage(context, "MAP", "IN_PROGRESS", baseline.mapRevision);
             File payload = new File(transaction, "map-capture-payload.dex");
             PatchPayloadDex.extract(context, "Lcom/bydhud/mapcapture/", payload);
+            File hudNative = null;
+            if ("waze".equals(profile.id) && "5.25.0.1".equals(baseline.versionName)) {
+                hudNative = new File(transaction, "libbydhud_hudmap.so");
+                try (InputStream input = context.getAssets().open("mapcapture/waze525/libbydhud_hudmap.so")) {
+                    Files.copy(input, hudNative.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
             NavigatorMapPatcher.Inspection patchedMap = NavigatorMapPatcher.patch(
                     NavigatorApkSet.memberFiles(patched), new File(candidate, "members"),
-                    payload, profile.id, baseline.versionName);
+                    payload, hudNative, profile.id, baseline.versionName);
             if (!NavigatorPatchStore.PATCHED.equals(patchedMap.state)) {
                 throw new IOException(patchedMap.reason);
             }

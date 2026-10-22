@@ -28,7 +28,8 @@ public final class HudCheckState {
             new Maneuver("Sharp left", "Різко ліворуч", 6, 1, 6),
             new Maneuver("Left U-turn", "Розворот ліворуч", 8, 7, 8),
             new Maneuver("Right U-turn", "Розворот праворуч", 19, 8, 19),
-            new Maneuver("Roundabout right exit 2", "Коло, виїзд праворуч 2", 26, 99, 22, 26,
+            new Maneuver("Roundabout right exit 2", "Коло, виїзд праворуч 2", 26,
+                    HudManeuverMap.roundaboutToNative(22, RoundaboutExit.Direction.RIGHT), 22, 26,
                     RoundaboutExit.Direction.RIGHT, 2),
             new Maneuver("Exit ramp left", "З’їзд ліворуч", 71, 1, 2),
             new Maneuver("Exit ramp right", "З’їзд праворуч", 70, 2, 3)

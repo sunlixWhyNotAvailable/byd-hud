@@ -38,6 +38,7 @@ public final class CaptureBridge {
     private static volatile Context app;
     private static volatile boolean waze525;
     static boolean waze525() { return waze525; }
+    static Context context() { return app; }
     private static Handler worker;
     private static volatile long draws;
     private static volatile String lastError = "";
@@ -106,6 +107,7 @@ public final class CaptureBridge {
             hello.putString("build", app.getPackageName().equals("com.waze")
                     ? "map-probe-r11-render-demand-hud-consumer-v1" : "map-probe-r12-policy-watchdog-hud-consumer-v1");
             if (waze525) hello.putString("wazeCapture", "bydhud-waze525-embedded-v1");
+            if (waze525) hello.putString("wazeHudMap", "bydhud-waze525-independent-hud-v1");
             hello.putBoolean("fullSourceMemory", true);
             hello.putLong("captureProtocol", 2L);
             hello.putString("captureCapabilities", CapturePollPolicy.CAPABILITIES);
@@ -284,7 +286,8 @@ public final class CaptureBridge {
             wazeUnavailable(request, "invalid_surface_dimensions"); return;
         }
         if (!takeWaze(request)) return;
-        request.putString("frameSourceMode", BackgroundCapture.wazeSource(renderer));
+        request.putString("frameSourceMode", request.getBoolean("independentHudMap")
+                ? request.getString("requestedWazeSource", "waze") : BackgroundCapture.wazeSource(renderer));
         request.putLong("captureStartNs", SystemClock.elapsedRealtimeNanos());
         int edge = CapturePollPolicy.outputEdge(request.getInt("outputMaxEdge"), request.getBoolean("fullSourceMemory"));
         int[] size = PixelMath.size(width, height, edge);

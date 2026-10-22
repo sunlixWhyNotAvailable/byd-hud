@@ -13,6 +13,19 @@ final class HudManeuverMap {
     private HudManeuverMap() {
     }
 
+    // Normalized circle families: 22 is clockwise, 25 is counter-clockwise.
+    static int roundaboutToNative(int maneuver, RoundaboutExit.Direction direction) {
+        if (maneuver != 22 && maneuver != 25) return HudState.NATIVE_BLANK_ID;
+        boolean clockwise = maneuver == 22;
+        switch (direction) {
+            case LEFT: return clockwise ? 16 : 15;
+            case STRAIGHT: return clockwise ? 19 : 20;
+            case RIGHT: return clockwise ? 17 : 18;
+            case U_TURN: return clockwise ? 21 : 22;
+            default: return HudState.NATIVE_BLANK_ID;
+        }
+    }
+
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static int sourceToNative(int sourceId) {
         if (sourceId >= 29 && sourceId <= 69) {

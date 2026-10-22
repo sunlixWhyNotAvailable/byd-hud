@@ -12,16 +12,28 @@ public final class GMapsDirectManeuverMapRoundaboutTest {
     public void exactDirectionIsSeparateFromFallbackAndExpiresWithCircleContext() {
         GMapsDirectManeuverMap map = new GMapsDirectManeuverMap();
 
+        int[][] oemCodes = {
+                {32, 17}, {34, 19}, {36, 16}, {38, 21},
+                {40, 18}, {42, 20}, {44, 15}, {46, 22}
+        };
+        for (int[] code : oemCodes) {
+            assertEquals("Google wire maneuver " + code[0], code[1],
+                    map.map(code[0], 1).nativeManeuver);
+        }
+        map.reset();
+
         GMapsDirectManeuverMap.Result exact = map.map(37, 10);
         assertEquals("ROUNDABOUT_ENTER_AND_EXIT_CW_SLIGHT_LEFT",
                 GmapsWireParser.maneuverName(exact.wireValue));
         assertEquals(27, exact.fallbackSource);
+        assertEquals(16, exact.nativeManeuver);
         assertEquals(RoundaboutExit.Direction.LEFT, exact.roundaboutExit.getDirection());
         assertEquals(RoundaboutExit.Source.GMAPS_EXACT, exact.roundaboutExit.getSource());
         assertEquals(37, exact.roundaboutExit.getRawType());
         assertTrue(Double.isNaN(exact.roundaboutExit.getRawAngleDegrees()));
 
         GMapsDirectManeuverMap.Result exit = map.map(66, 11);
+        assertEquals(16, exit.nativeManeuver);
         assertEquals(RoundaboutExit.Direction.LEFT, exit.roundaboutExit.getDirection());
         assertEquals(RoundaboutExit.Source.GMAPS_CIRCLE_CONTEXT,
                 exit.roundaboutExit.getSource());
@@ -35,9 +47,11 @@ public final class GMapsDirectManeuverMapRoundaboutTest {
         GMapsDirectManeuverMap.Result newCircleExit = map.map(66, 22);
         assertFalse(newCircleExit.roundaboutExit.hasDirection());
         assertEquals(72, newCircleExit.fallbackSource);
+        assertEquals(99, newCircleExit.nativeManeuver);
 
         map.map(41, 30);
         GMapsDirectManeuverMap.Result counterClockwise = map.map(68, 31);
+        assertEquals(18, counterClockwise.nativeManeuver);
         assertEquals(RoundaboutExit.Direction.RIGHT,
                 counterClockwise.roundaboutExit.getDirection());
         assertEquals(RoundaboutExit.Source.GMAPS_CIRCLE_CONTEXT,

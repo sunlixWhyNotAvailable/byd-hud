@@ -2,7 +2,8 @@ package com.bydhud.app;
 
 /** Explicit HUD Check maneuver codes for the three source vocabularies. */
 final class HudCheckManeuverTable {
-    private static final int[] BYD = {11, 1, 2, 3, 5, 1, 7, 8, 99, 1, 2};
+    private static final int[] BYD = {11, 1, 2, 3, 5, 1, 7, 8,
+            HudManeuverMap.roundaboutToNative(22, RoundaboutExit.Direction.RIGHT), 1, 2};
     private static final int[] AMAP = {9, 2, 3, 4, 5, 6, 8, 19, 22, 65, 66};
 
     private HudCheckManeuverTable() {

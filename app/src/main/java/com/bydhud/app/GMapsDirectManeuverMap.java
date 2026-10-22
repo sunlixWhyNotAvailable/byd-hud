@@ -245,7 +245,10 @@ final class GMapsDirectManeuverMap {
 
     private static Result result(int wireValue, String name, int intermediate,
             int source, int amapBroadcastManeuver, RoundaboutExit roundaboutExit) {
-        return new Result(wireValue, name, intermediate, source, nativeFor(intermediate),
+        int nativeManeuver = intermediate == 22 || intermediate == 25
+                ? HudManeuverMap.roundaboutToNative(intermediate, roundaboutExit.getDirection())
+                : nativeFor(intermediate);
+        return new Result(wireValue, name, intermediate, source, nativeManeuver,
                 amapBroadcastManeuver, 0, roundaboutExit);
     }
 

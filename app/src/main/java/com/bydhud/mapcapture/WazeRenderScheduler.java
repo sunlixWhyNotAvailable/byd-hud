@@ -30,11 +30,14 @@ public final class WazeRenderScheduler {
         return MapsFollowing.get(owner, null, name);
     }
     public static void attach(Object manager, Object thread) {
+        attach(manager, thread, null);
+    }
+    static void attach(Object manager, Object thread, Object ownedRenderer) {
         detach();
         State s = new State();
         s.id = Integer.toHexString(System.identityHashCode(manager)) + "-" + SystemClock.elapsedRealtime();
         try {
-            s.manager = manager; s.thread = thread; s.renderer = get(manager, "a");
+            s.manager = manager; s.thread = thread; s.renderer = ownedRenderer == null ? get(manager, "a") : ownedRenderer;
             s.monitor = get(thread, "h"); s.commands = (Queue<?>)get(thread, "g");
             s.managers = (List<?>)get(thread, "e");
             s.events = (Queue<?>)get(manager, "d"); s.callbacks = (Queue<?>)get(manager, "f");

@@ -271,38 +271,43 @@ public class NativeRoadInfoTest {
     }
 
     @Test public void circleGeometryUsesKnownDirectionAndClearsUnknownWithoutChangingCircleSemantics() {
-        DirectTbtFrame circle = navigation(25, 99).withVehicleTbt(11, 2);
+        GMapsDirectManeuverMap mapper = new GMapsDirectManeuverMap();
+        int[][] oemCodes = {{44, 15}, {42, 20}, {40, 18}, {36, 16}, {34, 19}, {32, 17}};
         String previous = "";
-        for (RoundaboutExit.Direction direction : new RoundaboutExit.Direction[] {
-                RoundaboutExit.Direction.LEFT, RoundaboutExit.Direction.STRAIGHT, RoundaboutExit.Direction.RIGHT}) {
-            DirectTbtFrame frame = circle.withRoundaboutExit(RoundaboutExit.of(
-                    direction, RoundaboutExit.Source.GMAPS_EXACT, 25, Double.NaN));
+        for (int[] code : oemCodes) {
+            GMapsDirectManeuverMap.Result mapped = mapper.map(code[0], 1);
+            DirectTbtFrame frame = navigation(mapped.intermediate, mapped.nativeManeuver)
+                    .withVehicleTbt(mapped.amapBroadcastManeuver, mapped.roundaboutExitNumber,
+                            mapped.roundaboutExit);
             Map<Integer, Object> fields = road(DirectTbtPayload.prepare(frame, options(), NOW).build(0));
-            assertEquals(99L, fields.get(28));
+            assertEquals((long) code[1], fields.get(28));
+            DirectTbtFrame previousCode = navigation(mapped.intermediate, 99)
+                    .withVehicleTbt(mapped.amapBroadcastManeuver, mapped.roundaboutExitNumber,
+                            mapped.roundaboutExit);
+            Map<Integer, Object> baseline = road(DirectTbtPayload.prepare(previousCode, options(), NOW).build(0));
+            baseline.put(28, (long) code[1]);
+            assertFieldsEqual(baseline, fields);
             assertFalse(text(fields, 30).isEmpty());
             assertNotEquals(previous, text(fields, 30));
             previous = text(fields, 30);
-            assertEquals(11, frame.getAmapBroadcastManeuver());
-            assertEquals(2, frame.getRoundaboutExitNumber());
             DirectTbtFrame laneInput = new DirectTbtFrame(-1, 0, 0, 0,
                     "", "", "", null, null,
                     Collections.singletonList(new DirectTbtFrame.Lane(1, 1, "S*")),
                     DirectTbtFrame.AlertOverlay.inactive());
             Map<Integer, Object> withLanes = road(DirectTbtPayload.prepare(frame.withLanesFrom(laneInput),
                     new DirectTbtPayload.Options(false, true, true, true, true), NOW).build(0));
-            assertEquals(99L, withLanes.get(28));
+            assertEquals((long) code[1], withLanes.get(28));
             assertEquals(text(fields, 30), text(withLanes, 30));
         }
-        for (RoundaboutExit.Direction direction : new RoundaboutExit.Direction[] {
-                RoundaboutExit.Direction.UNKNOWN, RoundaboutExit.Direction.U_TURN}) {
-            Map<Integer, Object> fields = road(DirectTbtPayload.prepare(circle.withRoundaboutExit(
-                    RoundaboutExit.of(direction, direction == RoundaboutExit.Direction.UNKNOWN
-                            ? RoundaboutExit.Source.NONE : RoundaboutExit.Source.GMAPS_EXACT,
-                            25, Double.NaN)), options(), NOW).build(0));
+        for (int[] code : new int[][] {{56, 99}, {46, 22}}) {
+            GMapsDirectManeuverMap.Result mapped = mapper.map(code[0], 1);
+            DirectTbtFrame circle = navigation(mapped.intermediate, mapped.nativeManeuver)
+                    .withRoundaboutExit(mapped.roundaboutExit);
+            Map<Integer, Object> fields = road(DirectTbtPayload.prepare(circle, options(), NOW).build(0));
             assertGeometryCleared(fields);
             assertEquals("Main Street", text(fields, 10));
             assertEquals(60L, fields.get(9));
-            assertEquals(99L, fields.get(28));
+            assertEquals((long) code[1], fields.get(28));
         }
     }
 
@@ -357,7 +362,7 @@ public class NativeRoadInfoTest {
         assertEquals(state.stop(), state.stop().tick());
         HudCheckState basic = state.selectMode(HudCheckState.Mode.BASIC)
                 .step(HudCheckState.Field.MANEUVER, 8);
-        assertEquals(99, basic.liveFrame().getBydManeuver());
+        assertEquals(17, basic.liveFrame().getBydManeuver());
         assertEquals(RoundaboutExit.Direction.RIGHT, basic.liveFrame().getRoundaboutExit().getDirection());
         assertEquals(2, basic.liveFrame().getRoundaboutExitNumber());
         assertEquals(basic.liveGeometry().line, basic.withManeuverBitmap(true).liveGeometry().line);
@@ -575,7 +580,7 @@ public class NativeRoadInfoTest {
 
     @Test public void alternateTablesReachRoadInfoWithoutChangingCompanionCodes() {
         int[][] ids = {
-                {11, 1, 2, 3, 5, 1, 7, 8, 99, 1, 2},
+                {11, 1, 2, 3, 5, 1, 7, 8, 17, 1, 2},
                 {9, 2, 3, 4, 5, 6, 8, 19, 22, 65, 66},
                 {8, 1, 2, 3, 4, 5, 7, 18, 47, 42, 41}
         };
@@ -611,10 +616,11 @@ public class NativeRoadInfoTest {
                 int expected;
                 if (state.liveScenarioKey().startsWith("roundabout-native-")) {
                     expected = state.liveScenarioKey().equals("roundabout-native-11") ? 11 : 99;
-                } else if (table == HudCheckState.CodeTable.BYD) expected = 99;
-                else {
+                } else {
                     RoundaboutExit.Direction direction = state.liveFrame().getRoundaboutExit().getDirection();
-                    expected = table == HudCheckState.CodeTable.AMAP
+                    expected = table == HudCheckState.CodeTable.BYD
+                            ? direction == RoundaboutExit.Direction.RIGHT ? 17 : direction == RoundaboutExit.Direction.STRAIGHT ? 19 : 16
+                            : table == HudCheckState.CodeTable.AMAP
                             ? direction == RoundaboutExit.Direction.RIGHT ? 22 : direction == RoundaboutExit.Direction.STRAIGHT ? 23 : 21
                             : direction == RoundaboutExit.Direction.RIGHT ? 47 : direction == RoundaboutExit.Direction.STRAIGHT ? 48 : 49;
                 }

@@ -76,6 +76,10 @@ public final class NavigatorMapPatcher {
     public static final String FAILED = "FAILED";
     public static final String PAYLOAD_PREFIX = "Lcom/bydhud/mapcapture/";
     public static final String REVISION = "navigator-map-capture-r3";
+    private static final String HUD_CAPABILITY = "bydhud-waze525-independent-hud-v1";
+    private static final String HUD_NATIVE = "lib/arm64-v8a/libbydhud_hudmap.so";
+    private static final String WAZE_NATIVE_SHA = "79df676abb007443c98a7a435e9aec967ad67d22082b564f869de6b9c61f5858";
+    private static final String HUD_NATIVE_SHA = "e5dae7bd973d8b7fcdf519bc7e416eab6084f07de427bbb34f49aedc02cd3844";
 
     private static final String BRIDGE = "Lcom/bydhud/mapcapture/CaptureBridge;";
     private static final String BACKGROUND = "Lcom/bydhud/mapcapture/BackgroundCapture;";
@@ -91,7 +95,8 @@ public final class NavigatorMapPatcher {
             new HashSet<>(Arrays.asList("CaptureBridge", "BackgroundCapture", "CaptureLease",
                     "CapturePollPolicy", "CarCapturePolicy", "MapsFollowing",
                     "MapsNavigationCamera", "PixelMath", "CaptureReadbackBuffer",
-                    "LifecycleJournalBatch", "LifecycleJournalSpool", "WazeRenderScheduler", "WazeRenderPolicy", "WazeSurfaceCopy")));
+                    "LifecycleJournalBatch", "LifecycleJournalSpool", "WazeRenderScheduler", "WazeRenderPolicy", "WazeSurfaceCopy",
+                    "WazeHudMap", "WazeHudStyle")));
     private static final Set<String> REQUIRED_PAYLOAD_CLASSES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(BRIDGE, BACKGROUND,
                     "Lcom/bydhud/mapcapture/CaptureLease;",
@@ -171,6 +176,8 @@ public final class NavigatorMapPatcher {
         boolean duplicateRelevantClass;
         PayloadInfo payload;
         boolean scheduled;
+        File nativeApk;
+        boolean hudNativeCurrent;
     }
 
     private final class PatchPlan {
@@ -221,11 +228,16 @@ public final class NavigatorMapPatcher {
     /** Writes a complete candidate set, preserving untouched APK members byte-for-byte. */
     public static Inspection patch(List<File> sourceApks, File outputDir, File payloadDex,
             String profile, String version) {
-        return new NavigatorMapPatcher(profile, version).patchInternal(sourceApks, outputDir, payloadDex, profile, version);
+        return patch(sourceApks, outputDir, payloadDex, null, profile, version);
+    }
+
+    public static Inspection patch(List<File> sourceApks, File outputDir, File payloadDex,
+            File hudNative, String profile, String version) {
+        return new NavigatorMapPatcher(profile, version).patchInternal(sourceApks, outputDir, payloadDex, hudNative, profile, version);
     }
 
     private Inspection patchInternal(List<File> sourceApks, File outputDir, File payloadDex,
-            String profile, String version) {
+            File hudNative, String profile, String version) {
         try {
             String family = normalizeProfile(profile);
             if (family == null) return result(UNSUPPORTED, "unsupported navigator profile");
@@ -242,11 +254,17 @@ public final class NavigatorMapPatcher {
                         : result(FAILED, "copied capture set failed verification: " + copied.reason);
             }
             if (!PATCHABLE.equals(input.state)) return input;
+            if (modernWaze && (source.nativeApk == null || hudNative == null
+                    || !HUD_NATIVE_SHA.equals(fileSha(hudNative)))) {
+                throw new UnsupportedPatchException("independent HUD map requires the pinned Waze arm64 engine and current native payload");
+            }
 
             PayloadInfo suppliedPayload = inspectPayloadFile(payloadDex);
             verifyPayload(suppliedPayload, family);
             if ("waze".equals(family) && !currentPayload(suppliedPayload, family))
                 throw new UnsupportedPatchException("Waze scheduling requires current payload");
+            if (modernWaze && !suppliedPayload.bridgeStrings.contains(HUD_CAPABILITY))
+                throw new UnsupportedPatchException("independent Waze HUD payload is missing");
             if (source.payload != null) {
                 // Preserve verified hooks and add only the missing scheduling/host extension.
                 if (!currentPayload(suppliedPayload, family)) throw new UnsupportedPatchException("capture upgrade requires current capabilities");
@@ -269,7 +287,10 @@ public final class NavigatorMapPatcher {
                     for (File apk : sourceApks) {
                         File output = new File(outputDir, apk.getName());
                         Map<String, File> replacements = changes.get(apk.getCanonicalFile());
-                        if (replacements != null) repack(apk, output, replacements, Collections.emptyMap());
+                        Map<String, File> nativeAddition = modernWaze && apk.getCanonicalFile().equals(source.nativeApk)
+                                ? Collections.singletonMap(HUD_NATIVE, hudNative) : Collections.emptyMap();
+                        if (replacements != null || !nativeAddition.isEmpty()) repack(apk, output,
+                                replacements == null ? Collections.emptyMap() : replacements, nativeAddition);
                         else Files.copy(apk.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
                     }
                 } finally {
@@ -333,10 +354,13 @@ public final class NavigatorMapPatcher {
                     File candidate = new File(work, sourceApk.getName());
                     File canonicalSource = sourceApk.getCanonicalFile();
                     Map<String, File> dexChanges = replacements.get(canonicalSource);
+                    Map<String, File> memberAdditions = new HashMap<>();
+                    if (canonicalSource.equals(targetApk)) memberAdditions.putAll(additions);
+                    if (modernWaze && canonicalSource.equals(source.nativeApk)) memberAdditions.put(HUD_NATIVE, hudNative);
                     if (canonicalSource.equals(targetApk)) {
-                        repack(sourceApk, candidate, dexChanges, additions);
-                    } else if (dexChanges != null) {
-                        repack(sourceApk, candidate, dexChanges, Collections.emptyMap());
+                        repack(sourceApk, candidate, dexChanges, memberAdditions);
+                    } else if (dexChanges != null || !memberAdditions.isEmpty()) {
+                        repack(sourceApk, candidate, dexChanges == null ? Collections.emptyMap() : dexChanges, memberAdditions);
                     } else {
                         Files.copy(sourceApk.toPath(), candidate.toPath(),
                                 StandardCopyOption.REPLACE_EXISTING);
@@ -413,7 +437,8 @@ public final class NavigatorMapPatcher {
         try {
             verifyCaptured(analysis, family);
             boolean supported = supportedCapturePayload(analysis.payload, family)
-                    && (!"waze".equals(family) || analysis.scheduled);
+                    && (!"waze".equals(family) || analysis.scheduled)
+                    && (!modernWaze || (analysis.payload.bridgeStrings.contains(HUD_CAPABILITY) && analysis.hudNativeCurrent));
             String revision = analysis.payload.bridgeStrings.contains(REVISION) ? REVISION
                     : publishedWaze525Payload(analysis.payload, family) ? PUBLISHED_WAZE525 : "";
             return new Inspection(supported ? PATCHED : PATCHABLE,
@@ -444,6 +469,17 @@ public final class NavigatorMapPatcher {
     private Analysis analyze(List<File> apks, String family) throws IOException {
         if (apks == null || apks.isEmpty()) throw new UnsupportedPatchException("no APK members supplied");
         Analysis result = new Analysis();
+        if (modernWaze) for (File apk : apks) {
+            try (ZipFile zip = new ZipFile(apk)) {
+                ZipEntry engine = zip.getEntry("lib/arm64-v8a/libwaze.so");
+                if (engine == null) continue;
+                if (result.nativeApk != null || !WAZE_NATIVE_SHA.equals(entrySha(zip, engine)))
+                    throw new UnsupportedPatchException("Waze engine differs from the independent HUD map ABI");
+                result.nativeApk = apk.getCanonicalFile();
+                ZipEntry helper = zip.getEntry(HUD_NATIVE);
+                result.hudNativeCurrent = helper != null && HUD_NATIVE_SHA.equals(entrySha(zip, helper));
+            }
+        }
         Set<String> canonicalFiles = new HashSet<>();
         Set<String> relevantClasses = new HashSet<>();
         Set<String> targetOwners = targetOwners(family);
@@ -844,9 +880,17 @@ public final class NavigatorMapPatcher {
     private static void verifyEntryPlacement(Method method, String hookKey)
             throws UnsupportedPatchException {
         List<Instruction> instructions = instructions(method);
+        int entry = 0;
+        String routeExport = methodKey("Lcom/bydhud/navexport/WazeRouteExport;", "init",
+                Collections.singletonList("Landroid/content/Context;"), "V");
+        if (key(method).equals("Lcom/waze/mobile/WazeMobileApplication;->onCreate()V")
+                && !instructions.isEmpty() && isRangeCall(instructions.get(0), routeExport, parameterStart(method), 1)) {
+            requireCallCount(instructions, routeExport, 1, key(method));
+            entry = 1;
+        }
         if (AccessFlags.STATIC.isSet(method.getAccessFlags())
                 || !"V".equals(method.getReturnType())
-                || instructions.isEmpty() || !isRangeCall(instructions.get(0), hookKey,
+                || instructions.size() <= entry || !isRangeCall(instructions.get(entry), hookKey,
                 parameterStart(method), 1)) {
             throw new UnsupportedPatchException("entry hook is not at method entry: " + key(method));
         }
@@ -1023,11 +1067,16 @@ public final class NavigatorMapPatcher {
         if (modernWaze && supportedCapturePayload(payload, family)) {
             requiredClasses.add(PAYLOAD_PREFIX + "WazeSurfaceCopy;");
         }
+        if (modernWaze && payload.bridgeStrings.contains(HUD_CAPABILITY)) {
+            requiredClasses.add(PAYLOAD_PREFIX + "WazeHudMap;");
+            requiredClasses.add(PAYLOAD_PREFIX + "WazeHudStyle;");
+        }
         if ("waze".equals(family)) {
             requiredClasses.remove("Lcom/bydhud/mapcapture/MapsNavigationCamera;");
         }
         if (!payload.classes.containsAll(requiredClasses)
-                || payload.classes.size() < 30 || payload.classes.size() > 80
+                || payload.classes.size() < 30 || payload.classes.size() >
+                        (payload.bridgeStrings.contains(HUD_CAPABILITY) ? 112 : 80)
                 || payload.implementedMethods < 80 || payload.instructionCount < 2500) {
             Set<String> missing = new HashSet<>(requiredClasses);
             missing.removeAll(payload.classes);
@@ -1037,7 +1086,8 @@ public final class NavigatorMapPatcher {
         }
         for (String type : payload.classes) {
             if (BACKGROUND_D8_ACCESS.equals(type) || SCHEDULER_D8_ACCESS.equals(type)
-                    || JOURNAL_D8_ACCESS.equals(type) || SURFACE_D8_ACCESS.equals(type)) continue;
+                    || JOURNAL_D8_ACCESS.equals(type) || SURFACE_D8_ACCESS.equals(type)
+                    || (PAYLOAD_PREFIX + "WazeHudMap-IA;").equals(type)) continue;
             String name = type.substring(PAYLOAD_PREFIX.length(), type.length() - 1);
             int nested = name.indexOf('$');
             String root = nested < 0 ? name : name.substring(0, nested);
@@ -1227,7 +1277,9 @@ public final class NavigatorMapPatcher {
         verifyKnownD8Companion(payload, SCHEDULER_D8_ACCESS,
                 "Lcom/bydhud/mapcapture/WazeRenderScheduler$State;", Collections.singleton(
                         methodKey(WazeRenderPatch.OWNER, "attach",
-                                Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;"), "V")));
+                                payload.bridgeStrings.contains(HUD_CAPABILITY)
+                                        ? Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;", "Ljava/lang/Object;")
+                                        : Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;"), "V")));
         verifyKnownD8Companion(payload, JOURNAL_D8_ACCESS,
                 PAYLOAD_PREFIX + "LifecycleJournalSpool$RestoreState;", Collections.singleton(
                         methodKey(PAYLOAD_PREFIX + "LifecycleJournalSpool;", "restore",
@@ -1792,8 +1844,10 @@ public final class NavigatorMapPatcher {
             Map<String, File> changed = new HashMap<>(replacements);
             changed.putAll(additions);
             for (Map.Entry<String, File> entry : changed.entrySet()) {
-                BytesSource source = new BytesSource(entry.getValue(), entry.getKey(), Deflater.BEST_SPEED);
-                source.align(4);
+                boolean nativeLibrary = entry.getKey().equals(HUD_NATIVE);
+                BytesSource source = new BytesSource(entry.getValue(), entry.getKey(),
+                        nativeLibrary ? Deflater.NO_COMPRESSION : Deflater.BEST_SPEED);
+                source.align(nativeLibrary ? 16384 : 4);
                 archive.add(source);
             }
         }
@@ -1811,6 +1865,23 @@ public final class NavigatorMapPatcher {
             if (source.getCanonicalFile().equals(output.getCanonicalFile())) continue;
             Files.copy(source.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
         }
+    }
+
+    private static String entrySha(ZipFile zip, ZipEntry entry) throws IOException {
+        try (InputStream input = zip.getInputStream(entry)) { return sha(input); }
+    }
+    private static String fileSha(File file) throws IOException {
+        try (InputStream input = new FileInputStream(file)) { return sha(input); }
+    }
+    private static String sha(InputStream input) throws IOException {
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[65536]; int count;
+            while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
+            StringBuilder result = new StringBuilder();
+            for (byte value : digest.digest()) result.append(String.format(Locale.ROOT, "%02x", value & 255));
+            return result.toString();
+        } catch (java.security.NoSuchAlgorithmException error) { throw new IOException("SHA-256 unavailable", error); }
     }
 
     private static List<File> outputMembers(List<File> sources, File outputDir) throws IOException {
