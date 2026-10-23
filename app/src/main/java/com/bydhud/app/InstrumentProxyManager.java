@@ -78,6 +78,7 @@ final class InstrumentProxyManager {
     private long activeOperationId;
     private long activeOperationGeneration;
     private ResultCallback activeOperationCallback;
+    private ResultCallback vehiclePowerCallback;
     private boolean activeOperationTerminal;
     private PendingGuidance pendingGuidance;
     private PendingGuidance deferredGuidance;
@@ -1224,12 +1225,49 @@ final class InstrumentProxyManager {
 
     private void executeCall(
             String operation, ResultCallback callback, RemoteCall remoteCall) {
+        // Reading power is independent of navigation output ownership, including Shanghai.
+        if ("vehicle_power".equals(operation)) {
+            executeAllowedCall(operation, callback, remoteCall);
+            return;
+        }
         if (!ShanghaiOutputGate.enterWrite()) {
             deliver(callback, Result.unavailable("stock Shanghai test owns navigation output"));
             return;
         }
         try { executeAllowedCall(operation, callback, remoteCall); }
         finally { ShanghaiOutputGate.leaveWrite(); }
+    }
+
+    void readVehiclePower(ResultCallback callback) {
+        boolean ready;
+        synchronized (lock) { ready = state == State.READY && proxyBinder != null && proxyBinder.isBinderAlive(); }
+        if (!ready) {
+            ensureStarted("dashboard-widget-power");
+            deliver(callback, Result.unavailable("vehicle power helper not ready"));
+            return;
+        }
+        synchronized (callLock) {
+            if (vehiclePowerCallback != null) {
+                deliver(callback, Result.unavailable("vehicle power read already pending"));
+                return;
+            }
+            vehiclePowerCallback = callback;
+        }
+        submitCall("vehicle_power", result -> {
+            synchronized (callLock) {
+                if (vehiclePowerCallback != callback) return;
+                vehiclePowerCallback = null;
+            }
+            deliver(callback, result);
+        }, (remote, requestGeneration) -> {
+            synchronized (callLock) {
+                if (vehiclePowerCallback != callback) {
+                    return InstrumentProxyContract.operationResult(Collections.emptyList(),
+                            "vehicle power read cancelled before dispatch");
+                }
+            }
+            return remote.readVehiclePower(requestGeneration);
+        });
     }
 
     void nativeSpeedOperation(int operation, int value, BooleanSupplier current,
@@ -1261,7 +1299,7 @@ final class InstrumentProxyManager {
         long currentGeneration;
         boolean outputReady;
         synchronized (lock) {
-            if (shanghaiSuspended) {
+            if (shanghaiSuspended && !"vehicle_power".equals(operation)) {
                 deliver(callback, Result.unavailable(
                         "stock Shanghai test owns navigation output"));
                 return;
@@ -1272,7 +1310,8 @@ final class InstrumentProxyManager {
             if (isClusterDebugOperation(operation)) {
                 outputReady = clusterDebugOutputReady;
             } else {
-                outputReady = navigationOutputReady || operation.startsWith("native_speed:");
+                outputReady = navigationOutputReady || operation.startsWith("native_speed:")
+                        || ("vehicle_power".equals(operation) && state == State.READY);
             }
         }
         if (!outputReady) {
@@ -1304,9 +1343,10 @@ final class InstrumentProxyManager {
         try {
             result = Result.from(remoteCall.invoke(current, currentGeneration));
         } catch (RemoteException | RuntimeException error) {
-            result = Result.unavailable(isClusterDebugOperation(operation)
-                    ? describeClusterDebugFailure(operation, error)
-                    : describe(error));
+            result = Result.unavailable("vehicle_power".equals(operation)
+                    ? "vehicle_power IPC: " + Log.getStackTraceString(error)
+                    : isClusterDebugOperation(operation)
+                            ? describeClusterDebugFailure(operation, error) : describe(error));
             handleCallFailure(currentGeneration, currentBinder, error);
         }
         boolean currentResult;
@@ -1387,6 +1427,7 @@ final class InstrumentProxyManager {
     private void resetCallWorker(String reason) {
         ExecutorService previous;
         ResultCallback activeCallback;
+        ResultCallback powerCallback;
         PendingGuidance pending;
         PendingGuidance deferred;
         PendingTrafficLight trafficPending;
@@ -1408,6 +1449,8 @@ final class InstrumentProxyManager {
             activeOperationId = 0L;
             activeOperationGeneration = 0L;
             activeCallback = activeOperationCallback;
+            powerCallback = vehiclePowerCallback;
+            vehiclePowerCallback = null;
             activeTerminal = activeOperationTerminal && activeCallback != null;
             activeOperationCallback = null;
             activeOperationTerminal = false;
@@ -1455,6 +1498,10 @@ final class InstrumentProxyManager {
             }
         }
         previous.shutdownNow();
+        // Generic queued work is discarded by shutdownNow even before it becomes active.
+        if (powerCallback != null) {
+            deliver(powerCallback, Result.unavailable("vehicle power read cancelled: " + safe(reason)));
+        }
         if (activeCallback != null && !activeTerminal) {
             deliver(activeCallback, Result.unavailable("proxy reset: " + safe(reason)));
         }
@@ -2427,6 +2474,7 @@ final class InstrumentProxyManager {
         final String skipReason;
         final String navigationDetail;
         NativeSpeedLimitEngine.Result nativeSpeed;
+        int vehiclePower = -1;
 
         private Result(boolean available,
                 List<InstrumentProxyContract.Operation> operations, String error,
@@ -2447,6 +2495,9 @@ final class InstrumentProxyManager {
                     InstrumentProxyContract.intentionallySkipped(result),
                     InstrumentProxyContract.skipReason(result),
                     InstrumentProxyContract.navigationDetail(result));
+            if (result != null && error.isEmpty()) {
+                parsed.vehiclePower = result.getInt("vehicle_power", -1);
+            }
             if (result != null && result.containsKey("native_started")) {
                 parsed.nativeSpeed = new NativeSpeedLimitEngine.Result(error.isEmpty(),
                         result.getInt("native_raw"), result.getLong("native_started"),

@@ -33,6 +33,16 @@ final class DashboardWidgetLifecyclePolicy {
 
     private DashboardWidgetLifecyclePolicy() {}
 
+    static boolean visibleForVehiclePower(boolean visible, int power) {
+        // Missing OEM support must not disable the widget; only confirmed OFF hides it.
+        return visible && power != 0;
+    }
+
+    static int retainVehiclePower(int previous, int reading) {
+        // OEM Bodywork: 0=OFF, 1=ACC, 2=ON, 3=OK, 4=FAKE_OK.
+        return reading >= 0 && reading <= 4 ? reading : previous;
+    }
+
     static State initialState() {
         return new State(false, 0L, 0L, false);
     }

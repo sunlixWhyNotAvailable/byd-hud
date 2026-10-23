@@ -111,6 +111,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private final Object operationLock = new Object();
     private volatile InstrumentApi instrument;
     private volatile BodyworkApi bodywork;
+    private Object powerDevice;
+    private Method powerLevelGetter;
     private StatisticEtaApi statisticEta;
     private boolean statisticEtaResolved;
     private boolean statisticEtaUnavailableLogged;
@@ -877,6 +879,41 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         synchronized (operationLock) {
             outputSuspended = false;
             return InstrumentProxyContract.operationResult(new ArrayList<>(), "");
+        }
+    }
+
+    @Override
+    public Bundle readVehiclePower(long requestGeneration) {
+        enforceSession(requestGeneration);
+        synchronized (operationLock) {
+            long identity = Binder.clearCallingIdentity();
+            int raw = -1;
+            String error = "";
+            try {
+                if (android.os.Process.myUid() != 2000) {
+                    throw new SecurityException("vehicle power read requires shell UID");
+                }
+                if (powerDevice == null) {
+                    Class<?> type = Class.forName(BODYWORK_CLASS);
+                    powerLevelGetter = type.getMethod("getPowerLevel");
+                    powerDevice = type.getMethod("getInstance", Context.class)
+                            .invoke(null, new BydPermissionContext(systemContext));
+                }
+                raw = ((Number) powerLevelGetter.invoke(powerDevice)).intValue();
+                if (raw < 0 || raw > 4) {
+                    throw new IllegalStateException("invalid vehicle power level: " + raw);
+                }
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError failure) {
+                error = Log.getStackTraceString(failure);
+                raw = -1;
+                powerDevice = null;
+                powerLevelGetter = null;
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+            Bundle result = InstrumentProxyContract.operationResult(new ArrayList<>(), error);
+            result.putInt("vehicle_power", raw);
+            return result;
         }
     }
 

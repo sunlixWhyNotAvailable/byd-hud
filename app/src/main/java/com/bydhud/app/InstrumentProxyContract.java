@@ -8,7 +8,7 @@ import java.util.List;
 
 /** Fixed IPC and diagnostic contract shared by the app and its shell helper. */
 final class InstrumentProxyContract {
-    static final int PROTOCOL_VERSION = 11;
+    static final int PROTOCOL_VERSION = 12;
     static final int CAP_SYSTEM_CONTEXT = 1;
     static final int CAP_DIRECT_FID = 1 << 1;
     static final int CAP_INSTRUMENT_SDK = 1 << 2;

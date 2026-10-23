@@ -35,4 +35,5 @@ interface IInstrumentNavigationProxy {
             int arrivalDay, int arrivalHour, int arrivalMinute, int arrivalSecond,
             int dayPeriod);
     Bundle retireExportArtifacts(long generation, String requestJson);
+    Bundle readVehiclePower(long generation);
 }

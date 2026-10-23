@@ -36,6 +36,89 @@ internal object DashboardWidgetController {
     private var wakeReceiver: BroadcastReceiver? = null
     private var displayListener: DisplayManager.DisplayListener? = null
     private var pendingWake: Pair<String, Long>? = null
+    private var vehiclePower = -1
+    private var powerContext: Context? = null
+    private var powerObserversRegistered = false
+    private var powerReadPending = false
+    private var powerGeneration = 0L
+    private var lastPowerError = ""
+    private val powerPoll = Runnable { powerContext?.let(::pollVehiclePower) }
+    private val powerReadExpiry = Runnable {
+        powerContext?.let { app ->
+            ++powerGeneration
+            applyVehiclePower(app, -1, "read-timeout")
+        }
+    }
+
+    private fun wantsPowerObservation(app: Context): Boolean = state.visible &&
+        overlayPermission == DashboardWidgetLifecyclePolicy.Permission.GRANTED &&
+        UserRuntimeSession.allowsRuntime(app) &&
+        app.getSystemService(PowerManager::class.java)?.isInteractive == true
+
+    private fun effectiveVisible(): Boolean =
+        DashboardWidgetLifecyclePolicy.visibleForVehiclePower(state.visible, vehiclePower)
+
+    private fun observePower(app: Context) {
+        powerContext = app
+        if (!powerObserversRegistered) {
+            powerObserversRegistered = true
+            val proxy = InstrumentProxyManager.get(app)
+            proxy.addReadyListener { main.post { schedulePowerRead(app) } }
+            proxy.addUnavailableListener { reason -> main.post {
+                invalidatePower(app, "helper-unavailable:$reason")
+                schedulePowerRead(app)
+            } }
+        }
+        if (wantsPowerObservation(app)) schedulePowerRead(app)
+        else invalidatePower(app, "observation-inactive")
+    }
+
+    private fun schedulePowerRead(app: Context) {
+        if (!wantsPowerObservation(app) || powerReadPending || main.hasCallbacks(powerPoll)) return
+        main.post(powerPoll)
+    }
+
+    private fun invalidatePower(app: Context, reason: String) {
+        ++powerGeneration
+        main.removeCallbacks(powerPoll)
+        main.removeCallbacks(powerReadExpiry)
+        applyVehiclePower(app, -1, reason)
+    }
+
+    private fun applyVehiclePower(app: Context, raw: Int, error: String) {
+        val next = DashboardWidgetLifecyclePolicy.retainVehiclePower(vehiclePower, raw)
+        val changed = vehiclePower != next
+        if (changed || error != lastPowerError) {
+            log(app, "vehicle_power from=$vehiclePower to=$next error=$error")
+        }
+        vehiclePower = next
+        lastPowerError = error
+        if (!effectiveVisible()) {
+            pendingWake = null
+            state = state.copy(expanded = false)
+        }
+        if (changed) reconcile(app, allowRetry = true)
+    }
+
+    private fun pollVehiclePower(app: Context) {
+        if (!wantsPowerObservation(app)) {
+            invalidatePower(app, "observation-inactive")
+            return
+        }
+        if (powerReadPending) return
+        powerReadPending = true
+        val request = ++powerGeneration
+        // Bound the request while retaining the last confirmed power across read failures.
+        main.postDelayed(powerReadExpiry, 3_000L)
+        InstrumentProxyManager.get(app).readVehiclePower { result -> main.post {
+            powerReadPending = false
+            main.removeCallbacks(powerReadExpiry)
+            if (request == powerGeneration && wantsPowerObservation(app)) {
+                applyVehiclePower(app, result.vehiclePower, result.error)
+            }
+            if (wantsPowerObservation(app)) main.postDelayed(powerPoll, 1_000L)
+        } }
+    }
 
     // Process-scoped observers also cover a manual session with auto-start disabled.
     private fun observeWake(app: Context) {
@@ -44,6 +127,7 @@ internal object DashboardWidgetController {
                 override fun onReceive(context: Context, intent: Intent) {
                     if (intent.action == Intent.ACTION_SCREEN_ON) onRuntimeWake(app, "screen-on")
                     else if (intent.action == Intent.ACTION_SCREEN_OFF) {
+                        invalidatePower(app, "screen-off")
                         pendingWake = null
                         service?.cancelWakeDraw("screen-off")
                         log(app, "sleep source=screen-off")
@@ -92,6 +176,7 @@ internal object DashboardWidgetController {
         val signaledAt = SystemClock.elapsedRealtime()
         main.post {
             load(app)
+            invalidatePower(app, "wake:$reason")
             val displayState = app.getSystemService(DisplayManager::class.java)
                 ?.getDisplay(Display.DEFAULT_DISPLAY)?.state ?: Display.STATE_UNKNOWN
             val interactive = app.getSystemService(PowerManager::class.java)?.isInteractive == true
@@ -120,6 +205,7 @@ internal object DashboardWidgetController {
     private fun log(context: Context, message: String) {
         AppEventLogger.event(context, "dashboard_widget $message elapsedMs=${SystemClock.elapsedRealtime()} " +
             "enabled=${state.enabled} hidden=${state.hidden} permission=$overlayPermission " +
+            "vehiclePower=$vehiclePower " +
             "shutdown=${HudPrefs.isUserShutdownActive(context)} instance=${lifecycle.activeInstance} " +
             "startPending=${lifecycle.startRequested} closing=${service?.isClosing()}")
     }
@@ -147,6 +233,7 @@ internal object DashboardWidgetController {
         main.post {
             if (loaded && overlayPermission == DashboardWidgetLifecyclePolicy.Permission.UNKNOWN) {
                 permissionRefreshFailed = true
+                invalidatePower(app, "permission-refresh-failed")
                 log(app, "permission_refresh_failed")
                 reconcile(app, allowRetry = false)
             }
@@ -213,7 +300,7 @@ internal object DashboardWidgetController {
 
     fun requestMode(context: Context, mode: DashboardWidgetMode) {
         val app = context.applicationContext
-        if (busy || !state.visible || !state.expanded || HudPrefs.isUserShutdownActive(app)) return
+        if (busy || !effectiveVisible() || !state.expanded || HudPrefs.isUserShutdownActive(app)) return
         busy = true
         val generation = ++commandGeneration
         state = state.onModeClick()
@@ -242,6 +329,7 @@ internal object DashboardWidgetController {
         permissionRefreshFailed = false
         lifecycle = DashboardWidgetLifecyclePolicy.allowRetry(lifecycle)
         uiLanguage = Language.fromCode(HudPrefs.uiLanguage(app))
+        observePower(app)
         reconcile(app, allowRetry = true)
         if (publishUi) MainActivity.publishSharedUiStateChange()
     }
@@ -250,7 +338,7 @@ internal object DashboardWidgetController {
         val shutdown = HudPrefs.isUserShutdownActive(app)
         val active = service
         val transition = DashboardWidgetLifecyclePolicy.reconcile(
-            lifecycle, state.visible, overlayPermission, shutdown, permissionRefreshFailed,
+            lifecycle, effectiveVisible(), overlayPermission, shutdown, permissionRefreshFailed,
             active?.isClosing() == true, allowRetry)
         lifecycle = transition.state
         if (transition.action != DashboardWidgetLifecyclePolicy.Action.RENDER || pendingWake != null) {
@@ -286,6 +374,7 @@ internal object DashboardWidgetController {
         overlayPermission = MainActivity.cachedDashboardOverlayPermission()
         permissionRefreshFailed = false
         uiLanguage = Language.fromCode(HudPrefs.uiLanguage(active))
+        observePower(active.applicationContext)
         val instance = ++serviceGeneration
         lifecycle = DashboardWidgetLifecyclePolicy.serviceCreated(lifecycle, instance)
         service = active
@@ -298,7 +387,7 @@ internal object DashboardWidgetController {
             return DashboardWidgetLifecyclePolicy.ServiceStart.STOP
         }
         return DashboardWidgetLifecyclePolicy.serviceStart(
-            state.visible, overlayPermission, HudPrefs.isUserShutdownActive(active),
+            effectiveVisible(), overlayPermission, HudPrefs.isUserShutdownActive(active),
             permissionRefreshFailed, active.isClosing())
     }
 
@@ -315,7 +404,7 @@ internal object DashboardWidgetController {
         log(active, "service_destroyed destroyedInstance=$instance")
         val permission = MainActivity.cachedDashboardOverlayPermission()
         val transition = DashboardWidgetLifecyclePolicy.serviceDestroyed(
-            lifecycle, instance, state.visible, permission, HudPrefs.isUserShutdownActive(active))
+            lifecycle, instance, effectiveVisible(), permission, HudPrefs.isUserShutdownActive(active))
         lifecycle = transition.state
         if (service !== active || transition.state.activeInstance != 0L) return
         service = null
@@ -326,6 +415,7 @@ internal object DashboardWidgetController {
     }
 
     @JvmStatic fun shutdown(context: Context) {
+        invalidatePower(context.applicationContext, "shutdown")
         ++commandGeneration
         busy = false
         state = state.copy(expanded = false)
