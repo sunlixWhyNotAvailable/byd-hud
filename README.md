@@ -12,6 +12,34 @@ Route search and selection remain in the navigator. The BYD HUD interface is ava
 
 > **AI disclosure:** Generative AI tools are used for code and diagnostic-log analysis, implementation, testing, and documentation.
 
+## Contents
+
+- [Compatibility](#compatibility)
+- [Installation](#installation)
+- [Everyday use](#everyday-use)
+- [Customize the HUD](#customize-the-hud)
+  - [Maneuvers, lanes and text](#maneuvers-lanes-and-text)
+  - [Arrival time and remaining journey](#arrival-time-and-remaining-journey)
+  - [Speed limit](#speed-limit)
+  - [Map display](#map-display)
+    - [Navigator image profiles](#navigator-image-profiles)
+    - [Map and lane layout on the HUD](#map-and-lane-layout-on-the-hud)
+  - [Waze alerts and route screen](#waze-alerts-and-route-screen)
+- [Dashboard projection](#dashboard-projection)
+  - [Partial and Full window profiles](#partial-and-full-window-profiles)
+  - [Floating widget](#floating-widget)
+  - [Steering-wheel shortcuts](#steering-wheel-shortcuts)
+- [Navigator patcher](#navigator-patcher)
+- [Startup and updates](#startup-and-updates)
+  - [Update hint widget](#update-hint-widget)
+- [HUD check](#hud-check)
+- [Logs and privacy](#logs-and-privacy)
+- [Troubleshooting](#troubleshooting)
+- [Report a problem](#report-a-problem)
+- [Support the project](#support-the-project)
+- [Acknowledgements](#acknowledgements)
+- [License](#license)
+
 ## Compatibility
 
 You need Android 10 or newer, a compatible DiLink system and permission to install APKs. Vehicle firmware determines which HUD fields and dashboard layouts are available.
