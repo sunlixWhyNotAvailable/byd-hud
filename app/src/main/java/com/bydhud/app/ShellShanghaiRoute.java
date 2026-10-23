@@ -37,6 +37,7 @@ final class ShellShanghaiRoute {
             long lastCoverageWriteMs = Long.MIN_VALUE;
             int elapsed = 0;
             String failure = "";
+            ShanghaiMockGps.Result gpsFailure = null;
             ShanghaiMockGps.Result cleanup;
             boolean resetAnyRequested = false;
             try (ShanghaiSessionJournal journal = new ShanghaiSessionJournal(new File(shellEvidence, "route.jsonl"))) {
@@ -48,14 +49,20 @@ final class ShellShanghaiRoute {
                     ShanghaiRoute route = ShanghaiRoute.load(app);
                     ShanghaiMockGps.Result begun = gps.begin(input.getString("id"));
                     journal.record("mock_begin", begun.code + ": " + begun.detail);
-                    if (!begun.success()) throw new IllegalStateException(begun.detail);
+                    if (!begun.success()) {
+                        gpsFailure = begun;
+                        throw new IllegalStateException(begun.detail);
+                    }
                     while (elapsed <= ShanghaiRoute.DURATION_SECONDS) {
                         if (Thread.currentThread().isInterrupted()) break;
                         ShanghaiRoute.Point point = route.pointAt(elapsed);
                         ShanghaiMockGps.Result injected = gps.inject(point);
                         journal.record("route_point", "second=" + elapsed + " lat=" + point.latitude
                                 + " lon=" + point.longitude + " result=" + injected.code);
-                        if (!injected.success()) throw new IllegalStateException(injected.detail);
+                        if (!injected.success()) {
+                            gpsFailure = injected;
+                            throw new IllegalStateException(injected.detail);
+                        }
                         if (origin == 0) origin = gps.lastInjectedElapsedMs();
                         ShellWorkEntryPoint.progress(new JSONObject().put("phase", elapsed < 15 ? "PREPARING" : "DRIVING")
                                 .put("elapsed", elapsed).put("origin", origin));
@@ -72,7 +79,10 @@ final class ShellShanghaiRoute {
                     }
                 } catch (InterruptedException stopped) {
                     // Explicit Stop cancels the route; ordinary application death never interrupts this thread.
-                } catch (Exception error) { failure = error.toString(); journal.record("failure", failure); }
+                } catch (Exception error) {
+                    failure = android.util.Log.getStackTraceString(error);
+                    journal.record("failure", failure);
+                }
                 finally {
                     Thread.interrupted();
                     File resetAny = ShellWorkEntryPoint.currentControl == null ? null
@@ -88,6 +98,8 @@ final class ShellShanghaiRoute {
             }
             return new JSONObject().put("completed", completed).put("elapsed", elapsed).put("origin", origin)
                     .put("failure", failure).put("cleanup", cleanup.code + ": " + cleanup.detail)
+                    .put("failureCode", gpsFailure == null ? "" : gpsFailure.code.name())
+                    .put("blockingPackage", gpsFailure == null ? "" : gpsFailure.blockingPackage)
                     .put("resetAny", resetAnyRequested)
                     .put("cleanupPending", !cleanup.success() || gps.hasPendingRecovery());
         }

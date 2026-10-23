@@ -8155,16 +8155,16 @@ private fun ShanghaiTestSection(
         ShanghaiTestState.FooterStatus.NORMAL -> palette.muted
     }
     val footerPrimary = when (footerStatus) {
-        ShanghaiTestState.FooterStatus.CLEANUP_PENDING -> language.choose(
+        ShanghaiTestState.FooterStatus.CLEANUP_PENDING -> state.detail.ifBlank { language.choose(
             "Очищення штучних координат не завершено.",
             "Mock location cleanup is still pending.",
             "Очистка искусственных координат ещё не завершена."
-        )
-        ShanghaiTestState.FooterStatus.FAILURE -> language.choose(
+        ) }
+        ShanghaiTestState.FooterStatus.FAILURE -> state.detail.ifBlank { language.choose(
             "Тест або запис завершився з помилкою.",
             "The test or recording failed.",
             "Тест или запись завершились с ошибкой."
-        )
+        ) }
         ShanghaiTestState.FooterStatus.PARTIAL -> language.choose(
             "Покриття діагностики часткове.",
             "Diagnostic coverage is partial.",

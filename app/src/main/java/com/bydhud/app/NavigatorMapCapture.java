@@ -220,10 +220,17 @@ public final class NavigatorMapCapture {
         }
         synchronized (LOCK) {
             if (activeSourceMode == source) return;
+            HudMapProfile.Source previous = captureSource(expectedSource, activeSourceMode);
             activeSourceMode = source;
+            if (previous == captureSource(expectedSource, activeSourceMode)) return;
             activeSourceModeRevision++;
             FRAME.resetCadence();
         }
+    }
+
+    static HudMapProfile.Source captureSource(HudMapProfile.Source selected,
+            HudMapProfile.Source runtime) {
+        return selected != null ? selected : runtime;
     }
 
     /** Applies an unsaved calibration value to the latest frame; null restores saved settings. */
@@ -521,12 +528,12 @@ public final class NavigatorMapCapture {
                     now = requestStartedNs / 1_000_000L;
                     pendingId = nextRequestIdLocked();
                     pendingAtElapsedMs = now;
-                    requestSourceMode = activeSourceMode;
+                    requestSourceMode = captureSource(expectedSource, activeSourceMode);
                     requestSourceModeRevision = activeSourceModeRevision;
                     lastRequestAtElapsedMs = now;
                     answer.putLong("id", pendingId);
                     if ("com.waze".equals(ownerPackage)) answer.putString("requestedWazeSource",
-                            activeSourceMode == HudMapProfile.Source.WAZE_SURFACE ? "waze_surface" : "waze");
+                            requestSourceMode == HudMapProfile.Source.WAZE_SURFACE ? "waze_surface" : "waze");
                     answer.putLong("requestNs", requestStartedNs);
                     answer.putLong("pollSkipCount", skippedPollCount);
                     answer.putLong("pollSkipElapsedMs", skippedPollStartedAtElapsedMs < 0L
@@ -539,6 +546,7 @@ public final class NavigatorMapCapture {
                     processingWaitAccumulatedMs = 0L;
                     logRequest = "navigator_map_capture request owner="
                             + field(ownerPackage, 96) + " session=" + session + " id=" + pendingId
+                            + " requestedSource=" + sourceName(requestSourceMode)
                             + " pollIntervalMs=" + interval;
                 } else if (stillActive) {
                     if (skippedPollCount == 0L) skippedPollStartedAtElapsedMs = now;

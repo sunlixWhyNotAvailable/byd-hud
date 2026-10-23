@@ -2,6 +2,7 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -55,7 +56,7 @@ final class HudMapLiveFixture {
                 arrival, offsetSeconds, REMAINING_SECONDS, REMAINING_METERS, nowWallTimeMs);
         return new DirectTbtFrame(0, 3, 2, 155,
                 "Typical Street", "Turn right", "Typical Street",
-                HudGraphicPayload.buildTurnPng(state), lanePng(), Arrays.asList(
+                maneuverPng(state), lanePng(), Arrays.asList(
                         new DirectTbtFrame.Lane(2, false, "L"),
                         new DirectTbtFrame.Lane(2, false, "L+S"),
                         new DirectTbtFrame.Lane(1, false, "S"),
@@ -69,6 +70,25 @@ final class HudMapLiveFixture {
     }
 
     private static byte[] laneFixture;
+    private static byte[] maneuverFixture;
+
+    private static synchronized byte[] maneuverPng(HudState state) {
+        if (maneuverFixture != null) return maneuverFixture;
+        byte[] png = HudGraphicPayload.buildTurnPng(state);
+        Bitmap source = BitmapFactory.decodeByteArray(png, 0, png.length);
+        if (source == null) throw new IllegalStateException("Missing map-test maneuver image");
+        Bitmap normalized = null;
+        try {
+            // Composite sign sizes use the 120px maneuver canvas, not the 34px OEM thumbnail.
+            normalized = Bitmap.createScaledBitmap(source, 120, 120, true);
+            byte[] result = HudMapImage.encodePng(normalized);
+            if (result.length == 0) throw new IllegalStateException("Cannot encode map-test maneuver image");
+            return maneuverFixture = result;
+        } finally {
+            if (normalized != null && normalized != source) normalized.recycle();
+            source.recycle();
+        }
+    }
 
     // Waze-style lane strip: six bitmap arrows, including compound directions.
     // It enters the same DirectTbtFrame lane-PNG path as Waze's getLanesImage().

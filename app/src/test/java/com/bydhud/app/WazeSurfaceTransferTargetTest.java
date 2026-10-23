@@ -8,6 +8,20 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertFalse;
 
 public class WazeSurfaceTransferTargetTest {
+    @Test public void independentMapUsesTheSelectedProfileOrActiveSurfaceChannel() {
+        HudMapProfile.Source surface = HudMapProfile.Source.WAZE_SURFACE;
+        HudMapProfile.Source waze = HudMapProfile.Source.WAZE;
+        assertEquals(surface, NavigatorMapCapture.captureSource(surface, null));
+        assertEquals(surface, NavigatorMapCapture.captureSource(surface, waze));
+        assertEquals(waze, NavigatorMapCapture.captureSource(waze, surface));
+        assertEquals(surface, NavigatorMapCapture.captureSource(null,
+                NavHudLiveSender.wazeMapSourceMode(true, true, true)));
+        assertEquals(waze, NavigatorMapCapture.captureSource(null,
+                NavHudLiveSender.wazeMapSourceMode(true, true, false)));
+        assertNull(NavHudLiveSender.wazeMapSourceMode(false, true, true));
+        assertNull(NavHudLiveSender.wazeMapSourceMode(true, false, false));
+    }
+
     @Test public void recenterRequestsRejectDuplicatesAndCancelledIds() {
         WazeSurfacePanState state = new WazeSurfacePanState();
         long first = state.beginRecenter();

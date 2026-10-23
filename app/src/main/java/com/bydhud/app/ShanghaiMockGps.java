@@ -42,10 +42,12 @@ final class ShanghaiMockGps {
     static final class Result {
         final Code code;
         final String detail;
+        final String blockingPackage;
 
-        private Result(Code code, String detail) {
+        private Result(Code code, String detail, String blockingPackage) {
             this.code = code;
             this.detail = detail == null ? "" : detail;
+            this.blockingPackage = blockingPackage == null ? "" : blockingPackage;
         }
 
         boolean success() {
@@ -54,7 +56,11 @@ final class ShanghaiMockGps {
         }
 
         static Result of(Code code, String detail) {
-            return new Result(code, detail);
+            return new Result(code, detail, "");
+        }
+
+        static Result of(Code code, String detail, String blockingPackage) {
+            return new Result(code, detail, blockingPackage);
         }
     }
 
@@ -118,7 +124,7 @@ final class ShanghaiMockGps {
             }
             if (before.kind == ProviderKind.FOREIGN_MOCK) {
                 return Result.of(Code.FOREIGN_MOCK,
-                        "Another app owns the active GPS mock: " + before.packageName);
+                        "Another app owns the active GPS mock: " + before.packageName, before.packageName);
             }
             if (before.kind == ProviderKind.UNKNOWN) {
                 return Result.of(Code.UNKNOWN_PROVIDER, "Cannot establish current GPS ownership.");
@@ -142,7 +148,8 @@ final class ShanghaiMockGps {
                         : immediate.kind == ProviderKind.OWNED_MOCK
                                 ? Code.UNTRACKED_OWN_MOCK : Code.FOREIGN_MOCK;
                 return Result.of(code, "GPS provider changed before creation ("
-                        + immediate.kind + "). Cleanup: " + cleanup.code + " " + cleanup.detail);
+                        + immediate.kind + "). Cleanup: " + cleanup.code + " " + cleanup.detail,
+                        immediate.kind == ProviderKind.FOREIGN_MOCK ? immediate.packageName : "");
             }
             if (!prefs.edit().putString("kind", "owned").commit()) {
                 prefs.edit().putString("kind", "permission").commit();

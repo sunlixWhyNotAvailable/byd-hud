@@ -2978,14 +2978,9 @@ final class NavHudLiveSender {
 
     private void refreshActiveWazeMapSourceMode() {
         updateWazeSurfaceReentry();
-        boolean ownedSurface = isCurrentWazeSurfaceWindow(
-                wazeSurfaceReadyInstanceId, wazeSurfaceReadyEpoch)
-                && wazeSurfaceReadyInstanceId == wazeSurfaceInstanceId
-                && WazeSurfaceActivity.activeDisplayId() == wazeSurfaceReadyDisplayId;
         NavigatorMapCapture.setActiveSourceMode(wazeMapSourceMode(
                 isRuntimeEnabled() && !HudPrefs.isUserShutdownActive(context),
-                wazeDirectChannel.isActive(), wazeSurfaceDirectChannel.isActive(),
-                ownedSurface, WazeSurfaceActivity.isVisible()));
+                wazeDirectChannel.isActive(), wazeSurfaceDirectChannel.isActive()));
     }
 
     private void updateWazeSurfaceReentry() {
@@ -3000,14 +2995,10 @@ final class NavHudLiveSender {
     }
 
     static HudMapProfile.Source wazeMapSourceMode(boolean runtimeEnabled,
-            boolean clusterChannelActive, boolean surfaceChannelActive,
-            boolean ownedSurface, boolean surfaceVisible) {
+            boolean clusterChannelActive, boolean surfaceChannelActive) {
         if (!runtimeEnabled) return null;
-        // Rendering ownership exists before a route/TBT frame. An unready Surface
-        // channel is ambiguous; never substitute the selected profile or cluster mode.
-        if (surfaceChannelActive) {
-            return ownedSurface && surfaceVisible ? HudMapProfile.Source.WAZE_SURFACE : null;
-        }
+        // The HUD renderer is independent of the tablet Surface's visibility/display.
+        if (surfaceChannelActive) return HudMapProfile.Source.WAZE_SURFACE;
         return clusterChannelActive ? HudMapProfile.Source.WAZE : null;
     }
 

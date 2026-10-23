@@ -90,7 +90,7 @@ final class ShanghaiTestController {
         try {
             ShanghaiTestService.launch(context, run.id, run.resetOnly);
             worker.schedule(() -> {
-                if (current == run && !run.serviceReady) fail(run, "Foreground service did not start");
+                if (current == run && !run.serviceReady) fail(run, "SERVICE_START", "Foreground service did not start");
             }, 10, TimeUnit.SECONDS);
         } catch (RuntimeException error) {
             worker.execute(() -> fail(run, describe(error)));
@@ -312,12 +312,12 @@ final class ShanghaiTestController {
         if (current != run || run.finishing) return;
         if (run.cancelled) { finish(run); return; }
         if (!run.logcat.isHealthy() || !run.diagnostics.isHealthy()) {
-            fail(run, "Diagnostic recording failed during setup");
+            fail(run, "RECORDING_FAILED", "Diagnostic recording failed during setup");
             return;
         }
         if (!run.logcat.isReady() || !run.diagnostics.isReady()) {
             if (SystemClock.elapsedRealtime() >= run.startDeadlineMs) {
-                fail(run, "Diagnostic recording readiness timed out");
+                fail(run, "RECORDING_TIMEOUT", "Diagnostic recording readiness timed out");
             } else worker.schedule(() -> awaitCapture(run), 100, TimeUnit.MILLISECONDS);
             return;
         }
@@ -381,7 +381,7 @@ final class ShanghaiTestController {
             }
             if (ShellWorkClient.terminal(status.optString("state"))) { finish(run); return; }
             reconcileWorker(run);
-            if (run.logcat != null && !run.logcat.isHealthy()) { fail(run, "Required Logcat stopped"); return; }
+            if (run.logcat != null && !run.logcat.isHealthy()) { fail(run, "LOGCAT_STOPPED", "Required Logcat stopped"); return; }
             publish(run, run.elapsed < ShanghaiTestState.PREPARATION_SECONDS
                     ? ShanghaiTestState.Phase.PREPARING : ShanghaiTestState.Phase.DRIVING, "");
             worker.schedule(() -> tick(run), 200, TimeUnit.MILLISECONDS);
@@ -389,8 +389,13 @@ final class ShanghaiTestController {
     }
 
     private void fail(Run run, String error) {
+        fail(run, "", error);
+    }
+
+    private void fail(Run run, String code, String error) {
         if (current != run || run.finishing) return;
         run.failure = error;
+        run.failureCode = code;
         record(run, "failure", error);
         finish(run);
     }
@@ -415,7 +420,14 @@ final class ShanghaiTestController {
                 run.elapsed = result.optInt("elapsed", run.elapsed);
                 run.cleanupDetail = result.optString("cleanup");
                 run.cleanupFailed = result.optBoolean("cleanupPending", !result.optBoolean("ok"));
-                if (run.failure.isEmpty()) run.failure = result.optString("failure", result.optString("error"));
+                if (run.failure.isEmpty()) {
+                    run.failure = result.optString("failure", result.optString("error"));
+                    run.failureCode = result.optString("failureCode");
+                } else {
+                    String shellFailure = result.optString("failure", result.optString("error"));
+                    if (!shellFailure.isEmpty()) noteFailure(run, "Shell " + result.optString("failureCode"), shellFailure);
+                }
+                run.blockingPackage = result.optString("blockingPackage");
                 String workerState = state.optString("state");
                 if (!"SUCCEEDED".equals(workerState) && run.failure.isEmpty())
                     run.failure = result.optString("error", "Shanghai shell operation "
@@ -430,7 +442,7 @@ final class ShanghaiTestController {
                 publish(run, ShanghaiTestState.Phase.FINISHING, "");
                 finalizeCapture(run);
                 return;
-            } catch (Exception error) { run.failure = describe(error); run.cleanupFailed = true; }
+            } catch (Exception error) { noteFailure(run, "Worker completion", describe(error)); run.cleanupFailed = true; }
         }
         run.finishing = true;
         publish(run, ShanghaiTestState.Phase.FINISHING, "");
@@ -453,18 +465,20 @@ final class ShanghaiTestController {
         try {
             if (run.diagnostics != null) {
                 try {
-                    record(run, "session_end", "completed=" + run.completed + " reason=" + run.stopReason);
+                    record(run, "session_end", "completed=" + run.completed + " reason=" + run.stopReason
+                            + " failureCode=" + run.failureCode + " blockingPackage=" + run.blockingPackage
+                            + " error=" + run.failure);
                     run.diagnostics.stop();
                 } catch (Exception error) {
-                    run.failure = "Diagnostics: " + describe(error);
+                    noteFailure(run, "Diagnostics", describe(error));
                 }
             }
             if (run.logcat != null) {
                 try {
                     LogcatRecorder.Result result = LogcatRecorder.releaseForShanghai(run.logcat);
-                    if (!result.ok && run.failure.isEmpty()) run.failure = "Logcat: " + result.detail;
+                    if (!result.ok) noteFailure(run, "Logcat", result.detail);
                 } catch (RuntimeException error) {
-                    run.failure = "Logcat: " + describe(error);
+                    noteFailure(run, "Logcat", describe(error));
                 }
             }
         } catch (Exception error) {
@@ -474,7 +488,7 @@ final class ShanghaiTestController {
             if (run.instrumentSuspendAttempted) {
                 try { InstrumentProxyManager.get(context).resumeAfterShanghai(); }
                 catch (Exception error) {
-                    run.failure = "Instrument restore: " + describe(error);
+                    noteFailure(run, "Instrument restore", describe(error));
                     record(run, "instrument_restore_error", describe(error));
                 }
             }
@@ -485,7 +499,7 @@ final class ShanghaiTestController {
                         NavHudLiveSender.get(context).resumeAfterShanghai();
                     }
                 } catch (RuntimeException error) {
-                    run.failure = "Output restore: " + describe(error);
+                    noteFailure(run, "Output restore", describe(error));
                     record(run, "output_restore_error", describe(error));
                 }
             }
@@ -497,12 +511,14 @@ final class ShanghaiTestController {
             boolean pending = run.cleanupFailed || gps().hasPendingRecovery();
             ShanghaiTestState.Phase phase = pending || !run.failure.isEmpty() ? ShanghaiTestState.Phase.ERROR
                     : run.completed ? ShanghaiTestState.Phase.COMPLETED : ShanghaiTestState.Phase.STOPPED;
-            String detail = pending ? localized("Очищення GPS не завершене. Повторіть скидання.",
+            String detail = !run.failure.isEmpty() ? ShanghaiTestState.failureDetail(
+                    HudPrefs.uiLanguage(context), run.failureCode, blockingApp(run.blockingPackage), run.failure) : "";
+            if (pending) detail += (detail.isEmpty() ? "" : "\n")
+                    + localized("Очищення GPS не завершене. Повторіть скидання.",
                     "GPS cleanup is incomplete. Retry reset.", "Очистка GPS не завершена. Повторите сброс.")
-                    : !run.failure.isEmpty() ? localized("Тест перервано через помилку. Подробиці збережено в логах.",
-                    "The test stopped with an error. Details were saved in the logs.",
-                    "Тест прерван из-за ошибки. Подробности сохранены в логах.")
-                    : run.resetOnly ? localized("Підміну GPS скинуто.", "GPS mock reset.", "Подмена GPS сброшена.") : "";
+                    + (run.cleanupDetail.isEmpty() ? "" : "\n" + run.cleanupDetail);
+            else if (detail.isEmpty() && run.resetOnly)
+                detail = localized("Підміну GPS скинуто.", "GPS mock reset.", "Подмена GPS сброшена.");
             cached = new ShanghaiTestState(phase, run.elapsed, run.id, detail,
                     captureStatus(run, phase), pending, run.day, run.logcat == null ? "" : run.logcat.day());
             synchronized (this) {
@@ -525,6 +541,8 @@ final class ShanghaiTestController {
                 .put("endedWallMs", System.currentTimeMillis()).put("elapsedSeconds", run.elapsed)
                 .put("routeCompleted", run.completed).put("stopReason", run.stopReason)
                 .put("error", run.failure).put("cleanup", run.cleanupDetail)
+                .put("failureCode", run.failureCode).put("blockingPackage", run.blockingPackage)
+                .put("secondaryFailures", run.secondaryFailures)
                 .put("cleanupPending", run.cleanupFailed || gps().hasPendingRecovery())
                 .put("physicalHudVerified", false).put("postCleanupCaptureMs", CAPTURE_TAIL_MS)
                 .put("diagnostics", run.diagnostics == null ? "not_started" : run.diagnostics.coverage().toString());
@@ -546,6 +564,25 @@ final class ShanghaiTestController {
         try {
             AppEventLogger.event(context, "shanghai_" + event + " session=" + run.id + " " + detail);
         } catch (RuntimeException ignored) { }
+    }
+
+    private void noteFailure(Run run, String stage, String detail) {
+        String failure = stage + ": " + detail;
+        if (run.failure.isEmpty()) run.failure = failure;
+        else run.secondaryFailures += (run.secondaryFailures.isEmpty() ? "" : "\n") + failure;
+        record(run, "finalize_failure", failure);
+    }
+
+    private String blockingApp(String packageName) {
+        if (packageName.isEmpty()) return "";
+        try {
+            android.content.pm.PackageManager packages = context.getPackageManager();
+            String label = String.valueOf(packages.getApplicationLabel(packages.getApplicationInfo(packageName, 0)));
+            if (!label.isEmpty() && !label.equals(packageName)) return label + " (" + packageName + ")";
+        } catch (android.content.pm.PackageManager.NameNotFoundException | RuntimeException error) {
+            AppEventLogger.event(context, "shanghai_blocking_app_label package=" + packageName + " error=" + describe(error));
+        }
+        return packageName;
     }
 
     private void publish(Run run, ShanghaiTestState.Phase phase, String detail) {
@@ -609,7 +646,7 @@ final class ShanghaiTestController {
     }
 
     private static String describe(Throwable error) {
-        return error.getClass().getSimpleName() + ": " + String.valueOf(error.getMessage());
+        return android.util.Log.getStackTraceString(error);
     }
 
     private static final class Run {
@@ -636,6 +673,9 @@ final class ShanghaiTestController {
         int elapsed;
         String day = "";
         String failure = "";
+        String failureCode = "";
+        String blockingPackage = "";
+        String secondaryFailures = "";
         String cleanupDetail = "";
         String stopReason = "";
         File directory;
