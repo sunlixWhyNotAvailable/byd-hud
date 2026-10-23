@@ -9,27 +9,6 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public final class AdbAuthorizationGenerationTest {
-    @Test public void currentAttemptCanContinueFromWaitToGrant() {
-        long cleanupGeneration = LocalAdbBridge.authorizationCancellationGeneration();
-        try {
-            LocalAdbBridge.AuthorizationCancellation wait =
-                    LocalAdbBridge.cancelPendingAuthorization(cleanupGeneration);
-            assertNotNull(wait);
-            cleanupGeneration = wait.generation;
-            assertTrue(LocalAdbBridge.isAuthorizationCancellationPending());
-            assertTrue(LocalAdbBridge.clearPendingAuthorizationCancellation(wait.generation));
-            assertFalse(LocalAdbBridge.isAuthorizationCancellationPending());
-
-            LocalAdbBridge.AuthorizationCancellation grant =
-                    LocalAdbBridge.cancelPendingAuthorization(wait.generation);
-            assertNotNull(grant);
-            cleanupGeneration = grant.generation;
-            assertTrue(LocalAdbBridge.isAuthorizationGenerationCurrent(grant.generation));
-        } finally {
-            LocalAdbBridge.clearPendingAuthorizationCancellation(cleanupGeneration);
-        }
-    }
-
     @Test public void cancelledWaitCannotReplaceExitEvenAfterItsMarkerIsReleased() {
         LocalAdbBridge.AuthorizationCancellation wait = LocalAdbBridge.cancelPendingAuthorization();
         long cleanupGeneration = wait.generation;

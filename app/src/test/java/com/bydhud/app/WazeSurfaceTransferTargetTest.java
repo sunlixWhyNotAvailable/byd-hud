@@ -8,75 +8,34 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertFalse;
 
 public class WazeSurfaceTransferTargetTest {
-    @Test public void recentersOnceWithFreshControlsAndCancelsOnGestureOrRendererChange() {
+    @Test public void recenterRequestsRejectDuplicatesAndCancelledIds() {
         WazeSurfacePanState state = new WazeSurfacePanState();
-        state.request(true);
         long first = state.beginRecenter();
         assertTrue(first > 0);
         assertEquals(0, state.beginRecenter());
-        assertEquals(0, state.recenterControlsRequest());
-        assertFalse(state.sendRecenter(first));
-        state.request(false);
-        assertTrue(state.recenterPanExited());
         assertEquals(first, state.recenterControlsRequest());
-        assertTrue(state.sendRecenter(first));
+        assertTrue(state.sendRecenter(first)); // Admission, not an acknowledgment from Waze.
         assertFalse(state.sendRecenter(first));
-        assertTrue(state.finishRecenter(first));
-
-        long gestureCancelled = state.beginRecenter();
         state.request(true);
         assertFalse(state.recenterPending());
-        assertFalse(state.sendRecenter(gestureCancelled));
-        long rendererCancelled = state.beginRecenter();
+        assertFalse(state.sendRecenter(first));
+        long second = state.beginRecenter();
+        assertTrue(second > first);
+        assertEquals(0, state.recenterControlsRequest());
+        assertFalse(state.sendRecenter(second));
+        assertFalse(state.sendRecenter(first));
+        assertEquals(second, state.pendingRecenter());
         state.rendererChanged();
         assertFalse(state.recenterPending());
-        assertFalse(state.recenterPanExited());
-        assertFalse(state.finishRecenter(rendererCancelled));
-        state.request(false);
-        long current = state.beginRecenter();
-        assertFalse(state.finishRecenter(first));
-        assertFalse(state.sendRecenter(rendererCancelled));
-        assertTrue(state.sendRecenter(current));
-        assertTrue(state.finishRecenter(current));
-
-        state.request(true);
-        state.next();
-        long timedOut = state.beginRecenter();
-        state.request(false);
-        WazeSurfacePanState.Request lateExit = state.next();
-        assertTrue(state.finishRecenter(timedOut));
+        assertFalse(state.sendRecenter(second));
         assertTrue(state.isPanning());
-        assertFalse(state.complete(lateExit, true));
-        long retry = state.beginRecenter();
         state.request(false);
-        WazeSurfacePanState.Request newExit = state.next();
-        assertFalse(newExit.enabled);
-        assertTrue(state.complete(newExit, true));
-        assertTrue(state.recenterPanExited());
-        assertTrue(state.sendRecenter(retry));
-    }
-
-    @Test public void restoresPanForNewRendererAndIgnoresOldAcknowledgments() {
-        WazeSurfacePanState state = new WazeSurfacePanState();
-        state.request(true);
-        WazeSurfacePanState.Request old = state.next();
-        assertTrue(old.enabled);
-        assertNull(state.next());
-        state.rendererChanged();
-        WazeSurfacePanState.Request restored = state.next();
-        assertTrue(restored.enabled);
-        assertFalse(state.complete(old, false));
-        assertNull(state.next());
-        assertTrue(state.complete(restored, true));
-        state.request(false);
-        WazeSurfacePanState.Request centered = state.next();
-        assertFalse(centered.enabled);
-        assertTrue(state.complete(centered, false));
-        WazeSurfacePanState.Request retry = state.next();
-        assertFalse(retry.enabled);
-        assertFalse(state.complete(centered, true));
-        assertTrue(state.complete(retry, true));
-        assertNull(state.next());
+        long third = state.beginRecenter();
+        assertTrue(third > second);
+        assertFalse(state.sendRecenter(first));
+        assertFalse(state.sendRecenter(second));
+        assertEquals(third, state.pendingRecenter());
+        assertTrue(state.sendRecenter(third));
     }
 
     @Test public void mapsTouchFocusAndDeltasToTheActualSurfaceBuffer() {

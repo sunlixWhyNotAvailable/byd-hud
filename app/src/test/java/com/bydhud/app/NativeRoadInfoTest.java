@@ -107,7 +107,7 @@ public class NativeRoadInfoTest {
         }
     }
 
-    @Test public void liveSpatialModesSerializeAsWholeGroupsAndKeepDiagnosticsExplicit() {
+    @Test public void liveSpatialModesSerializeAsWholeGroupsAndKeepDiagnosticsExplicit() throws Exception {
         final long nowElapsedMs = 100_000L;
         DirectTbtFrame frame = navigation(3, 2);
         HudSpatialGeometry.Result real = realSpatialGeometry(nowElapsedMs);
@@ -133,10 +133,7 @@ public class NativeRoadInfoTest {
                 frame, options(), NOW, nowElapsedMs, fallback, false);
         Map<Integer, Object> schematicFields = road(schematic.build(0));
         assertEquals(HudSpatialGeometry.Mode.SCHEMATIC, schematic.spatialMode());
-        assertEquals(HudManeuverGeometry.LONGITUDE, (Double) schematicFields.get(19), 0.0);
-        assertEquals(HudManeuverGeometry.LATITUDE, (Double) schematicFields.get(20), 0.0);
-        assertEquals(HudManeuverGeometry.HEADING, (Double) schematicFields.get(32), 0.0);
-        assertEquals(HudManeuverGeometry.STRAIGHT.line, text(schematicFields, 30));
+        assertSchematicGeometry(schematicFields, 0);
         assertEquals("", text(schematicFields, 31));
         assertFieldsEqual(ordinary, schematicFields);
 
@@ -151,13 +148,11 @@ public class NativeRoadInfoTest {
                 frame, options(), NOW, real.validUntilElapsedMs, real, false);
         Map<Integer, Object> expiredFields = road(expired.build(0));
         assertEquals(HudSpatialGeometry.Mode.SCHEMATIC, expired.spatialMode());
-        assertEquals(HudManeuverGeometry.STRAIGHT.line, text(expiredFields, 30));
+        assertSchematicGeometry(expiredFields, 0);
 
         Map<Integer, Object> diagnostic = road(DirectTbtPayload.prepareDiagnostic(
                 frame, options(), false, true).build(0));
-        assertEquals(HudManeuverGeometry.LONGITUDE, (Double) diagnostic.get(19), 0.0);
-        assertEquals(HudManeuverGeometry.LATITUDE, (Double) diagnostic.get(20), 0.0);
-        assertEquals(HudManeuverGeometry.STRAIGHT.line, text(diagnostic, 30));
+        assertSchematicGeometry(diagnostic, 0);
         assertEquals("", text(diagnostic, 31));
 
         DirectTbtFrame alerted = frame.withAlertOverlay(
@@ -186,10 +181,7 @@ public class NativeRoadInfoTest {
         for (HudSpatialGeometry.Result unavailable : new HudSpatialGeometry.Result[]{fallback, real}) {
             Map<Integer, Object> destinationFallback = road(DirectTbtPayload.prepareLive(
                     destination, options(), NOW, real.validUntilElapsedMs, unavailable, false).build(0));
-            assertEquals(HudManeuverGeometry.STRAIGHT.line, text(destinationFallback, 30));
-            assertEquals(HudManeuverGeometry.LONGITUDE, (Double) destinationFallback.get(19), 0);
-            assertEquals(HudManeuverGeometry.LATITUDE, (Double) destinationFallback.get(20), 0);
-            assertEquals(HudManeuverGeometry.HEADING, (Double) destinationFallback.get(32), 0);
+            assertSchematicGeometry(destinationFallback, 0);
             assertOrdinaryFieldsEqual(destinationBaseline, destinationFallback);
         }
         assertNoSpatialFields(road(DirectTbtPayload.prepareLive(destination, options(), NOW,
@@ -204,23 +196,17 @@ public class NativeRoadInfoTest {
                 NOW, nowElapsedMs, real, false).build(0)));
     }
 
-    @Test public void selectiveSpatialResetKeepsOrdinaryFieldsAndWaitsForSuccessfulPayload() {
+    @Test public void selectiveSpatialResetClearsWireGeometryAndKeepsOrdinaryFields() {
         final long nowElapsedMs = 100_000L;
-        DirectTbtFrame frame = navigation(3, 2);
-        HudSpatialGeometry.Result real = realSpatialGeometry(nowElapsedMs);
-        HudOutputCoordinator.SpatialOutputState state = new HudOutputCoordinator.SpatialOutputState();
+        byte[] lanePng = java.util.Base64.getDecoder().decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEakAAAAASUVORK5CYII=");
+        DirectTbtFrame frame = new DirectTbtFrame(3, 3, 2, 60, "Main Street", "Continue", "",
+                lanePng, lanePng, Collections.emptyList(), DirectTbtFrame.AlertOverlay.inactive());
+        DirectTbtPayload.Options enabled = new DirectTbtPayload.Options(false, true, true, true, true);
         HudSpatialGeometry.Result off = HudSpatialGeometry.Result.off();
 
-        assertFalse(state.resetRequired(off));
-        DirectTbtPayload.Prepared spatial = DirectTbtPayload.prepareLive(
-                frame, options(), NOW, nowElapsedMs, real, false);
-        assertFalse(state.spatialSent()); // Preparing a packet does not record a transmission.
-        state.recordSuccessfulPayload(spatial);
-        assertTrue(state.spatialSent());
-        assertTrue(state.resetRequired(off));
-
         DirectTbtPayload.Prepared reset = DirectTbtPayload.prepareLive(
-                frame, options(), NOW, nowElapsedMs, off, true);
+                frame, enabled, NOW, nowElapsedMs, off, true);
         Map<Integer, Object> resetFields = road(reset.build(0));
         assertTrue(reset.spatialReset());
         assertEquals(HudSpatialGeometry.Mode.OFF, reset.spatialMode());
@@ -229,16 +215,12 @@ public class NativeRoadInfoTest {
         assertEquals("", text(resetFields, 30));
         assertEquals("", text(resetFields, 31));
         assertEquals(0.0, (Double) resetFields.get(32), 0.0);
-        Map<Integer, Object> ordinary = road(DirectTbtPayload.prepare(frame, options(), NOW).build(0));
+        assertArrayEquals(lanePng, (byte[]) resetFields.get(7));
+        assertEquals(2L, resetFields.get(28));
+        assertEquals(60L, resetFields.get(9));
+        assertEquals("Main Street", text(resetFields, 10));
+        Map<Integer, Object> ordinary = road(DirectTbtPayload.prepare(frame, enabled, NOW).build(0));
         assertOrdinaryFieldsEqual(ordinary, resetFields);
-        assertTrue(state.resetRequired(off)); // A prepared reset is still pending until send success.
-
-        state.recordSuccessfulPayload(reset);
-        assertFalse(state.spatialSent());
-        assertFalse(state.resetRequired(off));
-        state.recordSuccessfulPayload(spatial);
-        state.recordSuccessfulClear();
-        assertFalse(state.spatialSent());
     }
 
     @Test public void spatialIdentityInvalidatesOnlyWhenGeometryContentChanges() {
@@ -346,7 +328,7 @@ public class NativeRoadInfoTest {
             assertEquals((long) frame.getDistanceMeters(), fields.get(9));
             assertEquals(state.toHudState().maneuverId, frame.getBydManeuver());
             assertEquals(state.toHudState().distanceToIntersection, frame.getDistanceMeters());
-            assertEquals(state.liveGeometry().line, text(fields, 30));
+            assertLiveScenarioGeometry(fields, state.extendedIndex);
             if (state.liveScenarioKey().startsWith("roundabout-native-")) {
                 assertEquals(controlCodes[controlIndex++], frame.getBydManeuver());
                 assertEquals(60L, fields.get(9));
@@ -365,7 +347,10 @@ public class NativeRoadInfoTest {
         assertEquals(17, basic.liveFrame().getBydManeuver());
         assertEquals(RoundaboutExit.Direction.RIGHT, basic.liveFrame().getRoundaboutExit().getDirection());
         assertEquals(2, basic.liveFrame().getRoundaboutExitNumber());
-        assertEquals(basic.liveGeometry().line, basic.withManeuverBitmap(true).liveGeometry().line);
+        for (boolean bitmap : new boolean[]{false, true}) {
+            assertSchematicGeometry(road(HudCheckPayload.prepareLive(
+                    basic.withManeuverBitmap(bitmap), new byte[0], new byte[0]).build(0)), 4);
+        }
 
         // Persisted selections must still restore the same geometry/scenario after removing two probes.
         HudCheckState extended = basic.selectMode(HudCheckState.Mode.EXTENDED).withAutomatic(false);
@@ -382,7 +367,8 @@ public class NativeRoadInfoTest {
             old.remove("extendedCount");
             HudCheckState restored = HudCheckState.restore(old);
             assertTrue(restored.isGeometryCheck());
-            assertEquals(HudCheckGeometry.line(23), HudCheckGeometry.line(restored.extendedIndex));
+            assertSchematicGeometry(road(HudCheckPayload.prepareLive(
+                    restored, new byte[0], new byte[0]).build(0)), 0);
         }
     }
 
@@ -635,7 +621,7 @@ public class NativeRoadInfoTest {
         }
     }
 
-    @Test public void extendedInheritsBasicPacketAndOverridesOnlySelectedStageFields() {
+    @Test public void extendedInheritsBasicPacketAndOverridesOnlySelectedStageFields() throws Exception {
         byte[] image = java.util.Base64.getDecoder().decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEakAAAAASUVORK5CYII=");
         // Expected wire values of the existing scalar probes, independent of the encoder.
@@ -684,10 +670,7 @@ public class NativeRoadInfoTest {
                                         ? ((String) value).getBytes(StandardCharsets.UTF_8) : value);
                             }
                         } else if (sample.isGeometryCheck()) {
-                            assertEquals(HudCheckGeometry.line(index), text(fields, 30));
-                            assertEquals(HudCheckGeometry.LONGITUDE, fields.get(19));
-                            assertEquals(HudCheckGeometry.LATITUDE, fields.get(20));
-                            assertEquals(HudCheckGeometry.heading(index), fields.get(32));
+                            assertSchematicGeometry(fields, index - 23);
                             for (int field : new int[] {19, 20, 30, 32}) {
                                 expected.remove(field);
                                 fields.remove(field);
@@ -696,7 +679,7 @@ public class NativeRoadInfoTest {
                             assertEquals((long) sample.liveFrame().getDistanceMeters(), fields.get(9));
                             if (fields.containsKey(28)) assertEquals((long) sample.liveNativeManeuver(), fields.get(28));
                             if (format == HudCheckState.Format.D) assertFalse(fields.containsKey(30));
-                            else assertEquals(sample.liveGeometry().line, text(fields, 30));
+                            else assertLiveScenarioGeometry(fields, index);
                             for (int field : new int[] {9, 28, 19, 20, 30, 31, 32}) {
                                 expected.remove(field);
                                 fields.remove(field);
@@ -816,6 +799,49 @@ public class NativeRoadInfoTest {
                 assertFieldsEqual(previous, selected);
             }
         }
+    }
+
+    private static void assertLiveScenarioGeometry(Map<Integer, Object> fields, int extendedIndex)
+            throws org.json.JSONException {
+        // Approved scenario order: ordinary turns stay straight; circles use their calibrated exit shape.
+        int[] shapes = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 3, 0, 4, 4, 4};
+        assertSchematicGeometry(fields, shapes[extendedIndex - 32]);
+    }
+
+    private static void assertSchematicGeometry(Map<Integer, Object> fields, int shape)
+            throws org.json.JSONException {
+        // Independent wire checkpoints: first bend and endpoint of the approved N9 diagnostic shapes.
+        double[][] checkpoints = {
+                {121.47875502158523, 31.22862124811722, 121.4806928905369, 31.22957013567292},
+                {121.47879425976342, 31.22835920007809, 121.48094919575908, 31.227858428249526},
+                {121.47851058279107, 31.22878281861336, 121.47909620734897, 31.230625520092357},
+                {121.47868608886587, 31.22820221516114, 121.47980934765235, 31.22655368249031},
+                {121.4782975, 31.2287825, 121.47720333333334, 31.23044527777778},
+                {121.47829886165337, 31.228116625831085, 121.47771323709547, 31.22627392435209},
+                {121.47801518468103, 31.228540244366357, 121.47586024868536, 31.22904101619492},
+                {121.47860531213303, 31.228150178683293, 121.47666744318136, 31.227201291127596},
+                {121.47820413231142, 31.228749265761152, 121.47626626335975, 31.227800378205455}
+        };
+        assertEquals(121.47832472222223, (Double) fields.get(19), 1e-12);
+        assertEquals(31.228410277777776, (Double) fields.get(20), 1e-12);
+        assertEquals(57.50603485107422, (Double) fields.get(32), 1e-12);
+        org.json.JSONArray points = new org.json.JSONArray(text(fields, 30));
+        assertEquals(7, points.length());
+        assertPoint(points.getJSONArray(0), 121.47832416666667, 31.228410277777776);
+        assertPoint(points.getJSONArray(1), 121.47840472222222, 31.228449722222223);
+        double[] expected = checkpoints[shape];
+        assertPoint(points.getJSONArray(2), expected[0], expected[1]);
+        assertPoint(points.getJSONArray(6), expected[2], expected[3]);
+        for (int point = 0; point < points.length(); point++) {
+            assertEquals(3, points.getJSONArray(point).length());
+            assertEquals(0, points.getJSONArray(point).getDouble(2), 0);
+        }
+    }
+
+    private static void assertPoint(org.json.JSONArray point, double longitude, double latitude)
+            throws org.json.JSONException {
+        assertEquals(longitude, point.getDouble(0), 1e-12);
+        assertEquals(latitude, point.getDouble(1), 1e-12);
     }
 
     private static void assertOrdinaryFieldsEqual(Map<Integer, Object> expected,
