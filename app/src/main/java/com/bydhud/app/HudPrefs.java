@@ -905,7 +905,6 @@ final class HudPrefs {
     //keeps debug artifact volume user-controlled while preserving operational logs.
     static void setDetailedDebugArtifactsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_DETAILED_DEBUG_ARTIFACTS, enabled).apply();
-        SomeIpTxLog.onDetailedModeChanged(context, enabled);
         NavigatorRouteReceiver.refreshEligibility(context);
     }
 

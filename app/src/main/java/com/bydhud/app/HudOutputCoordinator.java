@@ -252,7 +252,6 @@ final class HudOutputCoordinator {
     private long preparedEtaWallMinute = Long.MIN_VALUE;
     private String preparedEtaCacheKey = "";
     private final EtaStreetTextGate etaStreetTextGate = new EtaStreetTextGate();
-    private byte[] preparedDirectSemanticPayload;
     private GMapsDirectChannel.BitmapSelection directBitmapSelection;
     private GMapsDirectChannel.BitmapSelection preparedDirectBitmapSelection;
     private Consumer<String> directBitmapTxLogger;
@@ -490,7 +489,7 @@ final class HudOutputCoordinator {
             }
             denzaOemRawPacketMayBeVisible = true;
             int result = sendPayload(Source.MANUAL, "hud_check_denza_oem",
-                    "denza_oem_recorded_roadinfo", reason, payload, payload);
+                    "denza_oem_recorded_roadinfo", reason, payload);
             long duration = SystemClock.elapsedRealtime() - startedAtMs;
             logDenzaOemRawResult(frame, reason, result, "send-result", duration);
             if (!isPayloadSuccessResult(result)) {
@@ -845,7 +844,6 @@ final class HudOutputCoordinator {
             preparedSpatialUsable = false;
             preparedSpatialReset = false;
             preparedDirectPayload = null;
-            preparedDirectSemanticPayload = null;
             preparedDirectBitmapSelection = null;
             preparedDirectBitmapTxLogger = null;
             directBitmapSelection = directFrame.hasGuidance() ? bitmapSelection : null;
@@ -898,7 +896,6 @@ final class HudOutputCoordinator {
             preparedSpatialReset = false;
             preparedDirectPayload = null;
             candidateDirectPayload = null;
-            preparedDirectSemanticPayload = null;
             preparedDirectOptions = null;
             preparedDirectOptionsRevision = -1;
             preparedEtaContext = "";
@@ -959,7 +956,6 @@ final class HudOutputCoordinator {
             directSourceRoad = sourceRoad == null ? "" : sourceRoad;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
-            preparedDirectSemanticPayload = null;
             directBitmapSelection = null;
             directBitmapTxLogger = null;
             lastBitmapTxDiagnosticKey = "";
@@ -1076,7 +1072,6 @@ final class HudOutputCoordinator {
         directFrame = null;
         preparedDirectFrame = null;
         preparedDirectPayload = null;
-        preparedDirectSemanticPayload = null;
         directBitmapSelection = null;
         preparedDirectBitmapSelection = null;
         directBitmapTxLogger = null;
@@ -1614,7 +1609,7 @@ final class HudOutputCoordinator {
                         : HudCheckPayload.buildManeuverClear(context, hudCheck);
                 String clearAction = comparisonClear ? "comparison_clear" : "maneuver_bitmap_clear";
                 int clearResult = sendPayload(source, channelFor(source),
-                        clearAction, reason, clear, clear);
+                        clearAction, reason, clear);
                 log("hud_check " + clearAction + " from=" + HudCheckDiagnostics.sampleKey(lastSentHudCheck)
                         + " to=" + HudCheckDiagnostics.sampleKey(hudCheck)
                         + " result=" + clearResult);
@@ -1625,10 +1620,8 @@ final class HudOutputCoordinator {
                 // Keep a successful transition clear consumed if the next payload needs a retry.
                 lastSentHudCheck = null;
             }
-            byte[] semanticPayload = source == Source.DIRECT
-                    ? preparedDirectSemanticPayload : payload;
             int result = sendPayload(source, channelFor(source), "payload", reason,
-                    payload, semanticPayload);
+                    payload);
             long duration = SystemClock.elapsedRealtime() - startedAt;
             sendCount++;
             sendDurationMs += duration;
@@ -1856,8 +1849,8 @@ final class HudOutputCoordinator {
             return false;
         } finally {
             txLog.recordSend("direct", "navigator_map", SomeIpHudClient.HUD_TOPIC_8003,
-                    kind, reason, payload, payload, result, error,
-                    SystemClock.elapsedRealtime() - startedAt, !"map_frame".equals(kind));
+                    kind, reason, payload, result, error,
+                    startedAt, mapOwnerPackage, mapOwnerGeneration);
             log("navigator_map " + kind + " result=" + result + " bytes=" + payload.length
                     + " error=" + error + " reason=" + safe(reason));
         }
@@ -1956,7 +1949,6 @@ final class HudOutputCoordinator {
             if (preparedDirectPayload == null
                     || !displayText.equals(preparedDirectPayload.displayText())) {
                 preparedDirectPayload = candidateDirectPayload.withDisplayText(displayText);
-                preparedDirectSemanticPayload = preparedDirectPayload.build(0);
             }
             return preparedDirectPayload.build(directCounter);
         }
@@ -2259,8 +2251,7 @@ final class HudOutputCoordinator {
             recordHudCheck("aux-topic-" + Long.toHexString(packet.topicId) + ":" + kind,
                     isPayloadSuccessResult(result) ? 1 : -1, "send-result:" + result);
             txLog.recordSend("manual", "hud_check_aux", packet.topicId, kind, reason,
-                    packet.payload, packet.payload, result, "",
-                    SystemClock.elapsedRealtime() - startedAt);
+                    packet.payload, result, "", startedAt, "manual", generation);
             if (resultMarksServiceUnstarted(result)) {
                 hudCheckReadyServices.remove(packet.serviceId);
                 hudCheckOwnedServices.remove(packet.serviceId);
@@ -2273,10 +2264,10 @@ final class HudOutputCoordinator {
             hudCheckReadyServices.remove(packet.serviceId);
             hudCheckOwnedServices.remove(packet.serviceId);
             txLog.recordSend("manual", "hud_check_aux", packet.topicId, kind, reason,
-                    packet.payload, packet.payload, null,
+                    packet.payload, null,
                     error.getClass().getSimpleName() + ":" + safe(error.getMessage())
                             + " stack=" + stack,
-                    SystemClock.elapsedRealtime() - startedAt);
+                    startedAt, "manual", generation);
             Log.e(TAG, "hud_check auxiliary send failed kind=" + kind
                     + " topic=0x" + Long.toHexString(packet.topicId)
                     + " reason=" + safe(reason), error);
@@ -2616,7 +2607,6 @@ final class HudOutputCoordinator {
         etaStreetTextGate.reset();
         candidateDirectPayload = null;
         preparedDirectPayload = null;
-        preparedDirectSemanticPayload = null;
         String event = etaStreetTextGate.drainEvent();
         if (!event.isEmpty()) log("eta_street " + event + " trigger=" + safe(reason));
     }
@@ -2627,7 +2617,7 @@ final class HudOutputCoordinator {
         resetEtaStreetText("clear:" + kind);
         if (!manualEnabled) releaseHudCheckAuxiliary(reason);
         byte[] payload = buildClearPayload();
-        int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
+        int result = sendPayload(source, channelFor(source), kind, reason, payload);
         logAsync("clear result=" + result + " reason=" + reason);
         maneuverGeometryDiagnostic = "";
         if (!isPayloadSuccessResult(result)) {
@@ -2652,7 +2642,7 @@ final class HudOutputCoordinator {
             flushNativeMapClear(reason, true);
             if (!manualEnabled) releaseHudCheckAuxiliary(reason);
             byte[] payload = buildClearPayload();
-            int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
+            int result = sendPayload(source, channelFor(source), kind, reason, payload);
             long completedAtMs = SystemClock.elapsedRealtime();
             logAsync("clear result=" + result + " reason=" + reason);
             maneuverGeometryDiagnostic = "";
@@ -2733,24 +2723,22 @@ final class HudOutputCoordinator {
             String channel,
             String kind,
             String reason,
-            byte[] payload,
-            byte[] semanticPayload) throws RemoteException {
+            byte[] payload) throws RemoteException {
         long startedAtMs = SystemClock.elapsedRealtime();
         lastTransportSource = source;
         lastTransportChannel = channel;
-        boolean retainPayload = !(source == Source.DIRECT && "payload".equals(kind)
-                && navigatorMapMode == HudMapSettings.EXPERIMENTAL && navigatorMapPng.length > 0);
+        String owner = source == Source.DIRECT ? directOwnerPackage : sourceName(source);
+        long ownerGeneration = source == Source.DIRECT ? directOwnerSessionGeneration : generation;
         try {
             int result = client.send(payload);
             txLog.recordSend(sourceName(source), channel, SomeIpHudClient.HUD_ROAD_INFO_TOPIC,
-                    kind, reason, payload, semanticPayload, result, "",
-                    SystemClock.elapsedRealtime() - startedAtMs, retainPayload);
+                    kind, reason, payload, result, "", startedAtMs, owner, ownerGeneration);
             return result;
         } catch (RemoteException | RuntimeException e) {
             txLog.recordSend(sourceName(source), channel, SomeIpHudClient.HUD_ROAD_INFO_TOPIC,
-                    kind, reason, payload, semanticPayload, null,
+                    kind, reason, payload, null,
                     e.getClass().getSimpleName() + ":" + safe(e.getMessage()),
-                    SystemClock.elapsedRealtime() - startedAtMs, retainPayload);
+                    startedAtMs, owner, ownerGeneration);
             throw e;
         }
     }
@@ -2909,7 +2897,6 @@ final class HudOutputCoordinator {
             directFrame = null;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
-            preparedDirectSemanticPayload = null;
             directBitmapSelection = null;
             preparedDirectBitmapSelection = null;
             directBitmapTxLogger = null;
@@ -3052,7 +3039,6 @@ final class HudOutputCoordinator {
         updateVehiclePositionOutput();
         preparedDirectFrame = null;
         preparedDirectPayload = null;
-        preparedDirectSemanticPayload = null;
         directBitmapSelection = null;
         preparedDirectBitmapSelection = null;
         directBitmapTxLogger = null;

@@ -28,16 +28,26 @@ public final class JournalTextBatchTest {
         assertArrayEquals(expected.getBytes(Charset.defaultCharset()), Files.readAllBytes(file.toPath()));
     }
 
-    @Test public void rotationKeepsCompleteShardAndCreatesEmptyActiveFile() throws Exception {
-        File file = new File(temporaryFolder.newFolder(), "raw_nav_events.jsonl");
-        String contents = repeat('r', (int) NavCaptureStore.MAX_LOG_BYTES + 1);
-        assertTrue(JournalTextBatch.append(file, Collections.singletonList(contents)));
-
+    @Test public void rotationPreservesAllSameDayShardsAndCreatesEmptyActiveFile() throws Exception {
+        File file = new File(temporaryFolder.newFolder(), AppEventLogger.EVENTS_FILE);
+        String first = repeat('r', (int) AppEventLogger.MAX_FILE_BYTES + 1);
+        assertTrue(JournalTextBatch.append(file, Collections.singletonList(first)));
         assertTrue(NavCaptureStore.rotate(file));
 
-        assertTrue(new File(file.getParentFile(), file.getName() + ".1").isFile());
-        assertArrayEquals(contents.getBytes(Charset.defaultCharset()),
+        String second = "second\n";
+        assertTrue(JournalTextBatch.append(file, Collections.singletonList(second)));
+        assertTrue(NavCaptureStore.rotate(file));
+
+        String third = "third\n";
+        assertTrue(JournalTextBatch.append(file, Collections.singletonList(third)));
+        assertTrue(NavCaptureStore.rotate(file));
+
+        assertArrayEquals(third.getBytes(Charset.defaultCharset()),
                 Files.readAllBytes(new File(file.getParentFile(), file.getName() + ".1").toPath()));
+        assertArrayEquals(second.getBytes(Charset.defaultCharset()),
+                Files.readAllBytes(new File(file.getParentFile(), file.getName() + ".2").toPath()));
+        assertArrayEquals(first.getBytes(Charset.defaultCharset()),
+                Files.readAllBytes(new File(file.getParentFile(), file.getName() + ".3").toPath()));
         assertTrue(file.isFile());
         assertEquals(0L, file.length());
     }

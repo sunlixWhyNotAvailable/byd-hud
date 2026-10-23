@@ -97,12 +97,7 @@ final class AppEventLogger {
                 if (append.written && append.file != null
                         && append.file.length() > MAX_FILE_BYTES
                         && !NavigationLogStorage.holdsTopologyRead()) {
-                    if (HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
-                        NavCaptureStore.rotate(append.file);
-                    } else {
-                        NavigationLogStorage.withWriteLock(
-                                () -> rotate(append.file, EVENTS_FILE));
-                    }
+                    NavCaptureStore.rotate(append.file);
                 }
             }
             if (anyWritten) NavigationLogStorage.enforceNavCaptureRetention(context);
@@ -155,29 +150,9 @@ final class AppEventLogger {
             if (file != null
                     && file.length() > MAX_FILE_BYTES
                     && !NavigationLogStorage.holdsTopologyRead()) {
-                if (HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
-                    NavCaptureStore.rotate(file);
-                } else {
-                    NavigationLogStorage.withWriteLock(() -> rotate(file, name));
-                }
+                NavCaptureStore.rotate(file);
             }
             return file != null;
-        }
-    }
-
-    private static void rotate(File file, String name) {
-        if (NavigationLogStorage.deferExportRotation(file, () -> rotate(file, name))) return;
-        if (!file.exists() || file.length() <= MAX_FILE_BYTES) {
-            return;
-        }
-        File rotated = new File(file.getParentFile(), name + ".1");
-        if (rotated.exists() && !rotated.delete()) {
-            WazeCaptureDebugWriter.recordWriteFailure("events rotated delete failed");
-            Log.w(TAG, "delete rotated failed: " + rotated.getAbsolutePath());
-        }
-        if (!file.renameTo(rotated)) {
-            WazeCaptureDebugWriter.recordWriteFailure("events rotate failed");
-            Log.w(TAG, "rotate failed: " + file.getAbsolutePath());
         }
     }
 
