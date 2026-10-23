@@ -42,6 +42,8 @@ android {
         compose = true
     }
 
+    sourceSets.getByName("test").resources.srcDir("src/main/assets/hud-check")
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

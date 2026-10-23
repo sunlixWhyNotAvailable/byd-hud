@@ -16,15 +16,19 @@ final class HudCheckDiagnostics {
         if (sample == null || !sample.running) return null;
         String channel = token(plane);
         String line = "hud_check case=" + sampleKey(sample) + " plane=" + channel
+                + " selected_channel=" + sample.channel.name()
+                + " add_someip=" + sample.effectiveAddSomeIp()
+                + " oem=" + sample.isDenzaOem()
                 + " result=" + (result == -2 ? "skipped"
-                        : result > 0 ? ("AMap".equals(plane) ? "dispatched" : "sent")
+                        : result > 0 ? ("AMap".equals(plane) || "ClusterDebug".equals(plane)
+                                ? "dispatched" : "sent")
                         : result < 0 ? "unavailable-or-error" : "waiting")
                 + " reason=" + token(reason);
         if (endpoint != null) {
             line += " amap_endpoint=" + endpoint.name().toLowerCase(java.util.Locale.ROOT)
                     + " amap_selection=" + token(selectionReason);
         }
-        if (sample.isLiveCheck()) {
+        if (sample.isLiveCheck() && !sample.isDenzaOem()) {
             DirectTbtFrame frame = sample.liveFrame();
             HudManeuverGeometry.Selection geometry = sample.liveGeometry();
             boolean bitmap = sample.effectiveManeuverBitmap();
@@ -95,6 +99,8 @@ final class HudCheckDiagnostics {
 
     static String sampleKey(HudCheckState sample) {
         if (sample == null) return "none";
+        String route = "-channel-" + sample.channel.name() + "-someip-" + sample.effectiveAddSomeIp();
+        if (sample.isDenzaOem()) return "denza-oem" + route;
         String stage = sample.mode == HudCheckState.Mode.EXTENDED
                 ? "extended-" + (sample.extendedIndex + 1) + "-" : "";
         return stage + "basic-" + sample.format.name() + "-" + sample.effectiveCodeTable().name() + "-m"
@@ -102,9 +108,8 @@ final class HudCheckDiagnostics {
                 + "-d" + sample.distanceIndex + "-s" + sample.streetIndex
                 + "-t" + sample.trafficLightIndex + "-mb" + sample.effectiveManeuverBitmap()
                 + "-lb" + sample.effectiveLaneBitmap() + "-tr" + sample.transliterate
-                + (sample.mode == HudCheckState.Mode.BASIC
-                ? "-st" + sample.streetTestDestination + sample.streetTestGuidePoint
-                        + sample.streetTestMapState + sample.streetTestRoadClass : "");
+                + "-st" + sample.streetTestDestination + sample.streetTestGuidePoint
+                + sample.streetTestMapState + sample.streetTestRoadClass + route;
     }
 
     private static String token(String value) {

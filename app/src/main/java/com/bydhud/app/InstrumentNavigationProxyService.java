@@ -1,9 +1,13 @@
 package com.bydhud.app;
 
 import android.annotation.SuppressLint;
+import android.app.AppOpsManager;
+import android.content.AttributionSource;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -26,6 +30,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,6 +44,9 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private static final int FID_DUAL_ICON = 1_139_806_256;
     private static final int FID_DISTANCE = 1_139_806_232;
     private static final int FID_ROAD = 1_140_461_576;
+    private static final String CLUSTER_DEBUG_PACKAGE = "com.byd.clusterdebug";
+    private static final ComponentName CLUSTER_DEBUG_RECEIVER = new ComponentName(
+            CLUSTER_DEBUG_PACKAGE, "com.byd.clusterdebug.BroadcastReceiverCAN");
     private static final int FID_NATIVE_ETA_DAYS = 1_139_810_340;
     private static final int FID_NATIVE_ETA_HOURS = 1_139_810_320;
     private static final int FID_NATIVE_ETA_MINUTES = 1_139_810_328;
@@ -519,6 +528,190 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 Binder.restoreCallingIdentity(identity);
             }
         }
+    }
+
+    @Override
+    public Bundle sendClusterDebugStatus(long requestGeneration, int status) {
+        enforceSession(requestGeneration);
+        return dispatchClusterDebugRecords(
+                java.util.Collections.singletonList(ClusterDebugPayload.navigationStatus(status)));
+    }
+
+    @Override
+    public Bundle sendClusterDebugGuidance(long requestGeneration, int icon,
+            int distanceMeters, String road) {
+        enforceSession(requestGeneration);
+        return dispatchClusterDebugRecords(
+                ClusterDebugPayload.guidance(icon, distanceMeters, road));
+    }
+
+    private Bundle dispatchClusterDebugRecords(List<ClusterDebugPayload.Record> records) {
+        int callerUid = Binder.getCallingUid();
+        synchronized (operationLock) {
+            long identity = Binder.clearCallingIdentity();
+            try {
+                if (outputSuspended) return outputSuspendedResult();
+                List<InstrumentProxyContract.Operation> operations =
+                        new ArrayList<>(records.size());
+                long startedAt = SystemClock.elapsedRealtime();
+                final Context shellContext;
+                final String executionIdentity;
+                try {
+                    shellContext = checkedClusterDebugShellContext();
+                    executionIdentity = describeClusterDebugIdentity(shellContext);
+                } catch (Exception error) {
+                    for (ClusterDebugPayload.Record record : records) {
+                        operations.add(operation(clusterDebugOperationName(
+                                record, systemContext, callerUid),
+                                -1, startedAt,
+                                "stage=identity_validation\n" + stackTrace(error)));
+                    }
+                    return InstrumentProxyContract.operationResult(operations,
+                            "ClusterDebug identity validation failed; no broadcast was attempted",
+                            false, "", "ClusterDebug dispatch not attempted; target operation data is included in each operation name");
+                }
+
+                boolean allDispatched = true;
+                for (ClusterDebugPayload.Record record : records) {
+                    long recordStartedAt = SystemClock.elapsedRealtime();
+                    try {
+                        Intent intent = new Intent(ClusterDebugPayload.ACTION)
+                                .setComponent(CLUSTER_DEBUG_RECEIVER)
+                                .putExtra(ClusterDebugPayload.EXTRA_NORMAL, record.normalHex);
+                        shellContext.sendBroadcast(intent);
+                        operations.add(operation(clusterDebugOperationName(
+                                record, shellContext, callerUid),
+                                0, recordStartedAt, ""));
+                    } catch (RuntimeException error) {
+                        allDispatched = false;
+                        operations.add(operation(clusterDebugOperationName(
+                                record, shellContext, callerUid),
+                                -1, recordStartedAt,
+                                "stage=sendBroadcast\n" + stackTrace(error)));
+                    }
+                }
+                return InstrumentProxyContract.operationResult(operations,
+                        allDispatched ? "" : "one or more ClusterDebug broadcasts failed",
+                        false, "", "ClusterDebug broadcast dispatch only; receiver receipt and rendering are unverified; "
+                                + executionIdentity);
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        }
+    }
+
+    private Context checkedClusterDebugShellContext() throws Exception {
+        int uid = Process.myUid();
+        if (systemContext.getApplicationInfo().uid != uid
+                || !"com.android.shell".equals(systemContext.getPackageName())
+                || !"com.android.shell".equals(systemContext.getOpPackageName())) {
+            throw new SecurityException("ClusterDebug broadcast requires a shell Context whose package and UID match the actual helper process");
+        }
+        AppOpsManager appOps = (AppOpsManager) systemContext.getSystemService(Context.APP_OPS_SERVICE);
+        if (appOps == null) throw new SecurityException("shell AppOps identity is unavailable");
+        appOps.checkPackage(uid, systemContext.getOpPackageName());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AttributionSource attributionSource = systemContext.getAttributionSource();
+            String attributionTag = systemContext.getAttributionTag();
+            String sourceTag = attributionSource == null
+                    ? null : attributionSource.getAttributionTag();
+            if (attributionSource == null || attributionSource.getUid() != uid
+                    || !systemContext.getPackageName().equals(
+                            attributionSource.getPackageName())
+                    || (attributionTag == null ? sourceTag != null
+                            : !attributionTag.equals(sourceTag))) {
+                throw new SecurityException("ClusterDebug attribution source does not match the shell Context identity");
+            }
+        }
+        String selinuxContext = currentSelinuxContext();
+        if (selinuxContext == null || !selinuxContext.startsWith("u:r:shell:s0")) {
+            throw new SecurityException("ClusterDebug broadcast requires shell SELinux context; actual="
+                    + (selinuxContext == null ? "unknown" : selinuxContext));
+        }
+        ActivityInfo receiver = systemContext.getPackageManager()
+                .getReceiverInfo(CLUSTER_DEBUG_RECEIVER, 0);
+        if (!CLUSTER_DEBUG_PACKAGE.equals(receiver.packageName)
+                || !CLUSTER_DEBUG_RECEIVER.getClassName().equals(receiver.name)
+                || !receiver.enabled || receiver.applicationInfo == null
+                || !CLUSTER_DEBUG_PACKAGE.equals(receiver.applicationInfo.packageName)
+                || !receiver.applicationInfo.enabled || !receiver.exported) {
+            throw new SecurityException("ClusterDebug receiver identity or export state changed");
+        }
+        if (receiver.permission != null && !receiver.permission.isEmpty()
+                && systemContext.checkPermission(receiver.permission,
+                        Process.myPid(), uid) != PackageManager.PERMISSION_GRANTED) {
+            throw new SecurityException("shell process lacks the ClusterDebug receiver permission: "
+                    + receiver.permission);
+        }
+        return systemContext;
+    }
+
+    private String describeClusterDebugIdentity(Context shellContext) throws Exception {
+        String attribution = "unsupported_before_api_31";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            String tag = shellContext.getAttributionTag();
+            attribution = tag == null ? "none" : tag;
+        }
+        ActivityInfo receiver = shellContext.getPackageManager()
+                .getReceiverInfo(CLUSTER_DEBUG_RECEIVER, 0);
+        String receiverPermission = receiver.permission == null
+                || receiver.permission.isEmpty() ? "none" : receiver.permission;
+        String receiverPermissionGrant = "none";
+        if (!"none".equals(receiverPermission)) {
+            receiverPermissionGrant = shellContext.checkPermission(receiver.permission,
+                    Process.myPid(), Process.myUid()) == PackageManager.PERMISSION_GRANTED
+                    ? "granted" : "not_granted";
+        }
+        return "uid=" + Process.myUid() + ";user=" + (Process.myUid() / 100_000)
+                + ";package=" + shellContext.getPackageName()
+                + ";opPackage=" + shellContext.getOpPackageName()
+                + ";attributionTag=" + attribution
+                + ";selinux=" + currentSelinuxContext()
+                + ";receiver=" + receiver.packageName + "/" + receiver.name
+                + ";receiverUid=" + receiver.applicationInfo.uid
+                + ";receiverPermission=" + receiverPermission
+                + ";receiverPermissionGrant=" + receiverPermissionGrant
+                + ";appOps=checkPackage_passed";
+    }
+
+    private static String clusterDebugOperationName(
+            ClusterDebugPayload.Record record, Context shellContext, int callerUid) {
+        int uid = Process.myUid();
+        String packageName = "unknown";
+        String opPackageName = "unknown";
+        if (shellContext != null) {
+            try {
+                packageName = shellContext.getPackageName();
+            } catch (RuntimeException ignored) {
+                // Keep the operation record even if diagnostic context lookup fails.
+            }
+            try {
+                opPackageName = shellContext.getOpPackageName();
+            } catch (RuntimeException ignored) {
+                // Keep the operation record even if diagnostic context lookup fails.
+            }
+        }
+        return "clusterdebug_broadcast_dispatch:" + record.name
+                + "|component=" + CLUSTER_DEBUG_RECEIVER.flattenToShortString()
+                + "|action=" + ClusterDebugPayload.ACTION
+                + "|uid=" + uid
+                + "|user=" + (uid / 100_000)
+                + "|callerUid=" + callerUid
+                + "|package=" + packageName
+                + "|opPackage=" + opPackageName
+                + "|normal=" + record.normalHex;
+    }
+
+    private static String currentSelinuxContext() throws IOException {
+        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/attr/current"))) {
+            return reader.readLine();
+        }
+    }
+
+    private static String stackTrace(Throwable error) {
+        StringWriter trace = new StringWriter();
+        error.printStackTrace(new PrintWriter(trace));
+        return trace.toString();
     }
 
     @Override

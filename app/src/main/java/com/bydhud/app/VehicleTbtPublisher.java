@@ -126,6 +126,10 @@ final class VehicleTbtPublisher {
     private long failedStatisticDayPeriodAtMs = Long.MIN_VALUE;
     private final HudCheckDiagnostics hudCheckDiagnostics = new HudCheckDiagnostics();
     private HudCheckState latestHudCheck;
+    private volatile HudCheckState hudCheckOutput;
+    private boolean hudCheckTransitionPending;
+    private Runnable hudCheckRecoveryListener;
+    private volatile int hudCheckClusterResult;
     private String hudCheckInstrumentReason = "pending";
     private String hudCheckAmapReason = "pending";
     private String hudCheckLightReason = "pending";
@@ -135,7 +139,10 @@ final class VehicleTbtPublisher {
     }
 
     String hudCheckStatus(String language) {
-        String result = "Instrument: " + checkResultText(
+        HudCheckState selected = hudCheckOutput;
+        String result = selected != null && selected.usesClusterDebug()
+                ? "ClusterDebug: " + checkResultText(hudCheckClusterResult, language, true)
+                : "Instrument: " + checkResultText(
                 hudCheckInstrumentResult, language, false)
                 + " · AMap: " + checkResultText(hudCheckAmapResult, language, true);
         if (hudCheckLightIndex >= 0) {
@@ -144,6 +151,35 @@ final class VehicleTbtPublisher {
                     + checkResultText(hudCheckLightResult, language);
         }
         return result;
+    }
+
+    // Installed before beginRoute so activation cannot leak into an excluded route.
+    void setHudCheckOutput(HudCheckState selected) {
+        hudCheckOutput = selected;
+        hudCheckInstrumentResult = HudCheckChannelPolicy.usesInstrument(selected)
+                ? 0 : HUD_CHECK_SKIPPED;
+        hudCheckAmapResult = HudCheckChannelPolicy.usesAmap(selected) ? 0 : HUD_CHECK_SKIPPED;
+        hudCheckClusterResult = 0;
+    }
+
+    void setHudCheckRecoveryListener(Runnable listener) {
+        hudCheckRecoveryListener = listener;
+    }
+
+    void setHudCheckTransitionPending(boolean pending) {
+        hudCheckTransitionPending = pending;
+        if (pending) resetNativeEtaState("hud-check-writer-retirement");
+    }
+
+    private HudCheckState selectedCheck(Trace trace) {
+        if (trace == null || !MANUAL_OWNER.equals(trace.owner)) return null;
+        return trace.hudCheck != null ? trace.hudCheck : hudCheckOutput;
+    }
+
+    private boolean instrumentNavigationFieldsAllowed(Trace trace) {
+        HudCheckState selected = selectedCheck(trace);
+        return selected != null && HudCheckChannelPolicy.isolated(selected)
+                ? selected.usesInstrument() : instrumentNavigationFieldsAllowed();
     }
 
     private static String checkResultText(int result, String language) {
@@ -248,6 +284,7 @@ final class VehicleTbtPublisher {
             String reason, Runnable dashboardCompletion) {
         String owner = safe(packageName);
         if (owner.isEmpty()) return;
+        if (hudCheckTransitionPending && !MANUAL_OWNER.equals(owner)) return;
         if (routeActive && MANUAL_OWNER.equals(ownerPackage) && !MANUAL_OWNER.equals(owner)) {
             log("tbt_route_start ignored manual_owner incoming=" + owner);
             return;
@@ -352,6 +389,7 @@ final class VehicleTbtPublisher {
             Runnable dashboardCompletion) {
         String current = safe(currentPackage);
         String successor = safe(successorPackage);
+        if (hudCheckTransitionPending) return false;
         if (!routeActive || !matches(current, currentGeneration)
                 || !isDirectOwner(current) || !isDirectOwner(successor)
                 || current.equals(successor)) {
@@ -423,6 +461,7 @@ final class VehicleTbtPublisher {
 
     void publishFrame(String packageName, long generation,
             DirectTbtFrame frame, String reason) {
+        if (hudCheckTransitionPending) return;
         if (frame == null) return;
         if (!matches(packageName, generation)) {
             if (!frame.hasGuidance()) return;
@@ -441,6 +480,7 @@ final class VehicleTbtPublisher {
     }
 
     void clearGuidance(String packageName, long generation, String reason) {
+        if (hudCheckTransitionPending) return;
         if (!routeActive || !matches(packageName, generation)) return;
         ++routeToken;
         resetGuidanceDedup();
@@ -458,6 +498,8 @@ final class VehicleTbtPublisher {
     void publishManualFrame(String packageName, long generation,
             HudState state, String reason) {
         if (state == null || !routeActive || !matches(packageName, generation)) return;
+        // Recorded frames have their own clock; refresh/reconnect must never synthesize a packet.
+        if (state.hudCheck != null && state.hudCheck.isDenzaOem()) return;
         if (state.hudCheck != null && !hudCheckProfileActive) {
             hudCheckManeuverCompatibilityProfile = ManeuverCompatibilityProfile.normalize(
                     HudPrefs.maneuverCompatibilityProfile(context));
@@ -489,7 +531,7 @@ final class VehicleTbtPublisher {
         lastGuidanceHasAmapFallback = publishBroadcast;
         sendInstrumentGuidance(
                 trace.nativeId, distance, road, trace.lanes, trace,
-                instrumentNavigationFieldsAllowed(), true);
+                instrumentNavigationFieldsAllowed(trace), true);
         if (publishBroadcast) {
             sendAmapFrame(trace.amapIcon, trace.roundaboutExit,
                     distance, road, DirectTbtFrame.TravelMetrics.unavailable(), trace, true);
@@ -514,6 +556,66 @@ final class VehicleTbtPublisher {
                 null, 0, 0L, "");
     }
 
+    void publishDenzaOemFrame(String packageName, long generation, HudCheckState check,
+            DenzaOemRecording.Frame frame, String reason, Runnable completion) {
+        if (check == null || !check.isDenzaOem() || frame == null
+                || !routeActive || !matches(packageName, generation)) {
+            if (completion != null) completion.run();
+            return;
+        }
+        latestHudCheck = check;
+        HudState state = new HudState();
+        state.hudCheck = check;
+        state.maneuverId = frame.nativeManeuver;
+        state.turnBitmapId = frame.amapManeuver;
+        state.distanceToIntersection = frame.distanceMeters;
+        state.roadName = frame.street;
+        latestManualState = state;
+        ManeuverCompatibilityProfile.Mapping mapping = new ManeuverCompatibilityProfile.Mapping(
+                frame.amapBroadcastManeuver, 0, frame.nativeManeuver,
+                frame.amapBroadcastManeuver, 0, true);
+        Trace trace = new Trace("manual", packageName, generation,
+                "tbt-" + transactionSequence.incrementAndGet(), reason,
+                frame.nativeManeuver, frame.amapManeuver, frame.amapBroadcastManeuver, 0,
+                frame.distanceMeters, frame.street, DirectTbtFrame.TravelMetrics.unavailable(),
+                DirectTbtFrame.TravelMetrics.unavailable(), LanePayload.EMPTY,
+                ManeuverCompatibilityProfile.AMAP, mapping);
+        trace.routeToken = routeToken;
+        trace.hudCheck = check;
+        lastGuidanceHasAmapFallback = check.usesAmap();
+        if (check.usesAmap()) sendAmapFrame(frame.amapBroadcastManeuver, 0,
+                frame.distanceMeters, frame.street, DirectTbtFrame.TravelMetrics.unavailable(),
+                trace, false);
+        // Keep the source recording's semantics independent of the user's live compatibility profile.
+        sendInstrumentGuidance(frame.nativeManeuver, frame.distanceMeters, frame.street,
+                LanePayload.EMPTY, trace, instrumentNavigationFieldsAllowed(trace), false, completion);
+    }
+
+    private boolean restartDenzaAfterRecovery(String reason) {
+        if (!MANUAL_OWNER.equals(ownerPackage) || hudCheckOutput == null
+                || !hudCheckOutput.isDenzaOem()) return false;
+        log("hud_check oem recovery_restart reason=" + safe(reason));
+        sendStatus(STATUS_ACTIVE, trace(ownerPackage, ownerGeneration,
+                "denza-recovery:" + safe(reason), null, latestManualState));
+        if (hudCheckRecoveryListener != null) hudCheckRecoveryListener.run();
+        return true;
+    }
+
+    private void recordClusterDebugResult(InstrumentProxyManager.Result result, Trace trace,
+            int status, int icon, int distance, String road) {
+        recordInstrumentResult(result, trace, status, icon, distance, road);
+        if (trace == null || !isCurrentRoute(trace.owner, trace.generation, trace.routeToken)) return;
+        int outcome = successfulCheckResult(result) ? 1 : -1;
+        String reason = outcome > 0 ? "dispatch-only;receipt-unconfirmed"
+                : result == null ? "no-result" : !result.error.isEmpty()
+                        ? result.error : checkResultReason(result);
+        recordHudCheck(trace, "ClusterDebug", outcome, reason);
+        if (hudCheckClusterResult != outcome) {
+            hudCheckClusterResult = outcome;
+            MainActivity.publishSharedUiStateChange();
+        }
+    }
+
     void recordDeferredFrame(String packageName, long generation,
             DirectTbtFrame frame, String reason) {
         if (frame == null) return;
@@ -530,21 +632,44 @@ final class VehicleTbtPublisher {
         endRoute(packageName, generation, reason, false);
     }
 
+    void endManualRoute(String packageName, long generation, String reason,
+            Runnable completion) {
+        endRoute(packageName, generation, reason, false, completion);
+    }
+
     private void endRoute(String packageName, long generation,
             String reason, boolean emitIdle) {
-        if (!routeActive || !matches(packageName, generation)) return;
+        endRoute(packageName, generation, reason, emitIdle, null);
+    }
+
+    private void endRoute(String packageName, long generation,
+            String reason, boolean emitIdle, Runnable completion) {
+        if (!routeActive || !matches(packageName, generation)) {
+            if (completion != null) completion.run();
+            return;
+        }
         if (MANUAL_OWNER.equals(ownerPackage)) publishHudCheckLight(-1, reason, true);
         String endedOwner = ownerPackage;
         long endedGeneration = ownerGeneration;
         Trace trace = trace(endedOwner, endedGeneration, reason, null, null);
         invalidateAmapSession("route-end:" + safe(reason));
-        instrument.fenceNavigationOutput(() -> { });
+        if (completion == null) instrument.fenceNavigationOutput(() -> { });
         ++routeToken;
         resetNativeEtaState("route-end:" + safe(reason));
         handoffPendingInstrumentRecovery = false;
         lastGuidanceHasAmapFallback = false;
-        sendTerminalGuidanceClear(trace);
-        sendAmapTerminal(trace);
+        if (completion == null) {
+            sendTerminalGuidanceClear(trace);
+            sendAmapTerminal(trace);
+        } else {
+            boolean includeFields = HudCheckChannelPolicy.isolated(trace.hudCheck)
+                    ? trace.hudCheck.usesInstrument()
+                    : NativeEtaTransportPolicy.includesInstrumentNavigationFields(amapEndpoint);
+            instrument.fenceNavigationOutput(() -> ownerHandler.post(() -> {
+                sendAmapTerminal(trace);
+                sendTerminalGuidanceClear(trace, includeFields, completion);
+            }));
+        }
         if (emitIdle) sendStatus(STATUS_IDLE, trace);
         record(trace, "lifecycle", emitIdle ? "end_idle" : "end",
                 "navigation", null, 0, 0L, "");
@@ -605,10 +730,17 @@ final class VehicleTbtPublisher {
     }
 
     void sendTeardownStatus() {
-        if (!teardownEligible || routeActive) return;
+        sendTeardownStatus(null);
+    }
+
+    void sendTeardownStatus(Runnable completion) {
+        if (!teardownEligible || routeActive) {
+            if (completion != null) completion.run();
+            return;
+        }
         Trace trace = trace(teardownOwner, teardownGeneration,
                 teardownReason.isEmpty() ? "teardown" : teardownReason, null, null);
-        sendStatus(STATUS_TEARDOWN, trace);
+        sendStatus(STATUS_TEARDOWN, trace, completion);
         record(trace, "lifecycle", "teardown", "navigation", null, 0, 0L, "");
         teardownEligible = false;
         log("tbt_status=4");
@@ -768,17 +900,37 @@ final class VehicleTbtPublisher {
     }
 
     private void sendStatus(int status, Trace trace) {
+        sendStatus(status, trace, null);
+    }
+
+    private void sendStatus(int status, Trace trace, Runnable completion) {
         hasInstrumentStatus = true;
         lastInstrumentStatus = status;
-        if (!instrumentNavigationFieldsAllowed()) {
+        HudCheckState selected = selectedCheck(trace);
+        if (selected != null && selected.usesClusterDebug()) {
+            instrument.sendClusterDebugStatus(status, result -> ownerHandler.post(() -> {
+                recordClusterDebugResult(result, trace, status, 0, -1, "");
+                if (completion != null) completion.run();
+            }));
+            return;
+        }
+        if (!HudCheckChannelPolicy.usesInstrument(selected)) {
+            recordHudCheck(trace, "Instrument", HUD_CHECK_SKIPPED, "channel-excluded");
+            if (completion != null) completion.run();
+            return;
+        }
+        if (!instrumentNavigationFieldsAllowed(trace)) {
             record(trace, "instrument", "skip", "navigation_status", ints(status),
                     0, 0L, amapTransitionPending
                             ? "endpoint-transition" : "new-amap-selected");
+            if (completion != null) completion.run();
             return;
         }
         instrument.sendNavigationStatus(status,
-                result -> ownerHandler.post(() -> recordInstrumentResult(
-                        result, trace, status, 0, -1, "")));
+                result -> ownerHandler.post(() -> {
+                    recordInstrumentResult(result, trace, status, 0, -1, "");
+                    if (completion != null) completion.run();
+                }));
         log("tbt_status=" + status);
     }
 
@@ -791,12 +943,31 @@ final class VehicleTbtPublisher {
     }
 
     private void sendTerminalGuidanceClear(Trace trace) {
+        HudCheckState selected = selectedCheck(trace);
         sendTerminalGuidanceClear(trace,
-                NativeEtaTransportPolicy.includesInstrumentNavigationFields(amapEndpoint));
+                HudCheckChannelPolicy.isolated(selected) ? selected.usesInstrument()
+                        : NativeEtaTransportPolicy.includesInstrumentNavigationFields(amapEndpoint));
     }
 
     private void sendTerminalGuidanceClear(Trace trace,
             boolean includeNavigationFields) {
+        sendTerminalGuidanceClear(trace, includeNavigationFields, null);
+    }
+
+    private void sendTerminalGuidanceClear(Trace trace,
+            boolean includeNavigationFields, Runnable completion) {
+        HudCheckState selected = selectedCheck(trace);
+        if (selected != null && selected.usesClusterDebug()) {
+            instrument.sendClusterDebugTerminalGuidanceClear(result -> ownerHandler.post(() -> {
+                recordClusterDebugResult(result, trace, 0, 0, -1, "");
+                if (completion != null) completion.run();
+            }));
+            return;
+        }
+        if (!HudCheckChannelPolicy.usesInstrument(selected)) {
+            if (completion != null) completion.run();
+            return;
+        }
         handoffPendingInstrumentRecovery = false;
         hasInstrumentGuidance = true;
         lastInstrumentIcon = 0;
@@ -808,13 +979,37 @@ final class VehicleTbtPublisher {
         lastInstrumentNavigationFieldsIncluded = includeNavigationFields;
         instrument.sendTerminalGuidanceClear(
                 trace.compatibilityProfile, includeNavigationFields,
-                result -> ownerHandler.post(() -> recordInstrumentResult(
-                        result, trace, 0, 0, -1, "")));
+                result -> ownerHandler.post(() -> {
+                    recordInstrumentResult(result, trace, 0, 0, -1, "");
+                    if (completion != null) completion.run();
+                }));
     }
 
     private void sendInstrumentGuidance(
             int icon, int distance, String road, LanePayload lanes,
             Trace trace, boolean includeNavigationFields, boolean deduplicate) {
+        sendInstrumentGuidance(icon, distance, road, lanes, trace,
+                includeNavigationFields, deduplicate, null);
+    }
+
+    private void sendInstrumentGuidance(
+            int icon, int distance, String road, LanePayload lanes,
+            Trace trace, boolean includeNavigationFields, boolean deduplicate,
+            Runnable completion) {
+        HudCheckState selected = selectedCheck(trace);
+        if (selected != null && selected.usesClusterDebug()) {
+            instrument.sendClusterDebugGuidance(icon, distance, road,
+                    result -> ownerHandler.post(() -> {
+                        recordClusterDebugResult(result, trace, 0, icon, distance, road);
+                        if (completion != null) completion.run();
+                    }));
+            return;
+        }
+        if (!HudCheckChannelPolicy.usesInstrument(selected)) {
+            recordHudCheck(trace, "Instrument", HUD_CHECK_SKIPPED, "channel-excluded");
+            if (completion != null) completion.run();
+            return;
+        }
         hasInstrumentGuidance = true;
         boolean extendedBaiduIcon = trace != null
                 && trace.compatibilityProfile == ManeuverCompatibilityProfile.BAIDU
@@ -840,6 +1035,7 @@ final class VehicleTbtPublisher {
                     lastInstrumentIcon, lastInstrumentDistance, lastInstrumentRoad,
                     nextLanes), 0, 0L, "");
             recordHudCheck(trace, "Instrument", hudCheckInstrumentResult, hudCheckInstrumentReason);
+            if (completion != null) completion.run();
             return;
         }
         lastInstrumentIcon = nextIcon;
@@ -871,10 +1067,11 @@ final class VehicleTbtPublisher {
         instrument.sendGuidance(
                 nextProfile, sentIcon, sentDistance, sentRoad,
                 sentLaneDirections, sentLaneRecommendations, includeNavigationFields,
-                result -> ownerHandler.post(() -> recordInstrumentGuidanceResult(
-                        result, trace, sentIcon, sentDistance, sentRoad,
-                        sentLaneDirections, sentLaneRecommendations,
-                        includeNavigationFields)));
+                result -> ownerHandler.post(() -> {
+                    recordInstrumentGuidanceResult(result, trace, sentIcon, sentDistance, sentRoad,
+                            sentLaneDirections, sentLaneRecommendations, includeNavigationFields);
+                    if (completion != null) completion.run();
+                }));
         hasLastInstrumentSemantic = true;
     }
 
@@ -884,6 +1081,7 @@ final class VehicleTbtPublisher {
     }
 
     void refreshNativeEta() {
+        if (hudCheckTransitionPending) return;
         DirectTbtFrame frame = latestNativeEtaFrame;
         resetNativeEtaCaches("preference-change");
         lastNativeEtaSemanticKey = "";
@@ -901,6 +1099,7 @@ final class VehicleTbtPublisher {
     }
 
     void onPackageChanged(String packageName) {
+        if (hudCheckTransitionPending) return;
         if (!NativeEtaTransportPolicy.isAmapPackageName(packageName)) return;
         boolean selectedPackageChanged = packageName.equals(
                 NativeEtaTransportPolicy.packageNameFor(amapEndpoint));
@@ -1341,6 +1540,11 @@ final class VehicleTbtPublisher {
             next = amapEndpoint;
             reason = "query-unknown-retained:" + reason;
         }
+        if (MANUAL_OWNER.equals(ownerPackage) && HudCheckChannelPolicy.isolated(hudCheckOutput)) {
+            // Explicit diagnostics do not perform the automatic Instrument/AMap handoff.
+            applyAmapEndpoint(next, reason, trigger);
+            return true;
+        }
         if (amapTransitionPending) {
             amapSelectionDirty = true;
             log("amap_endpoint refresh_deferred selected=" + amapEndpoint
@@ -1435,7 +1639,9 @@ final class VehicleTbtPublisher {
     }
 
     private void replayCurrentRouteState(String reason) {
+        if (hudCheckTransitionPending) return;
         if (!routeActive || amapTransitionPending) return;
+        if (restartDenzaAfterRecovery(reason)) return;
         if (hasInstrumentStatus) {
             sendStatus(lastInstrumentStatus,
                     trace(ownerPackage, ownerGeneration, reason,
@@ -1536,6 +1742,10 @@ final class VehicleTbtPublisher {
     private void sendAmapFrame(int amapIcon, int roundaboutExit, int distance,
             String road, DirectTbtFrame.TravelMetrics metrics, Trace trace,
             boolean deduplicate, NativeEtaSnapshot etaSnapshot) {
+        if (!HudCheckChannelPolicy.usesAmap(selectedCheck(trace))) {
+            recordHudCheck(trace, "AMap", HUD_CHECK_SKIPPED, "channel-excluded");
+            return;
+        }
         String recipientPackage = NativeEtaTransportPolicy.packageNameFor(amapEndpoint);
         if (amapTransitionPending || recipientPackage.isEmpty()) {
             skipAmapFrame(trace, amapTransitionPending
@@ -1683,6 +1893,8 @@ final class VehicleTbtPublisher {
     }
 
     private void publishHudCheckLight(int index, String reason, boolean force) {
+        if (index >= 0 && (HudCheckChannelPolicy.isolated(hudCheckOutput)
+                || (hudCheckOutput != null && hudCheckOutput.isDenzaOem()))) return;
         if (index < 0 && !hudCheckLightOwned) return;
         long now = SystemClock.elapsedRealtime();
         if (!force && index == hudCheckLightIndex
@@ -1742,15 +1954,28 @@ final class VehicleTbtPublisher {
     }
 
     private void replayInstrumentState() {
+        if (hudCheckTransitionPending) return;
         if (!resolveAmapReceiver("proxy-ready", true, false)) return;
         replayInstrumentStateSelected();
     }
 
     private void replayInstrumentStateSelected() {
+        if (hudCheckTransitionPending) return;
         if (hudCheckLightOwned && hudCheckLightIndex < 0) {
             publishHudCheckLight(-1, "hud-check-ready-clear", true);
         }
         if (!routeActive) return;
+        if (MANUAL_OWNER.equals(ownerPackage) && HudCheckChannelPolicy.isolated(hudCheckOutput)
+                && !hudCheckOutput.usesInstrument() && !hudCheckOutput.usesClusterDebug()) return;
+        if (restartDenzaAfterRecovery("proxy-ready")) return;
+        if (MANUAL_OWNER.equals(ownerPackage) && HudCheckChannelPolicy.isolated(hudCheckOutput)) {
+            resetGuidanceDedup();
+            sendStatus(STATUS_ACTIVE, trace(ownerPackage, ownerGeneration,
+                    "proxy-ready-replay", null, latestManualState));
+            if (latestManualState != null) publishManualFrame(ownerPackage, ownerGeneration,
+                    latestManualState, "proxy-ready-replay");
+            return;
+        }
         if (!hasInstrumentStatus && !hasInstrumentGuidance) {
             replayNativeEtaInstrument("proxy-ready");
             return;
@@ -1797,6 +2022,18 @@ final class VehicleTbtPublisher {
 
     private void handleInstrumentUnavailable(String reason) {
         resetNativeEtaCaches("proxy-unavailable:" + safe(reason));
+        if (MANUAL_OWNER.equals(ownerPackage) && HudCheckChannelPolicy.isolated(hudCheckOutput)) {
+            if (hudCheckOutput.usesClusterDebug()) {
+                hudCheckClusterResult = -1;
+                recordHudCheck(hudCheckOutput, "ClusterDebug", -1, reason);
+            } else if (hudCheckOutput.usesInstrument()) {
+                hudCheckInstrumentResult = -1;
+                hudCheckInstrumentReason = reason;
+                recordHudCheck(hudCheckOutput, "Instrument", -1, reason);
+            }
+            MainActivity.publishSharedUiStateChange();
+            return;
+        }
         if (routeActive && MANUAL_OWNER.equals(ownerPackage)) {
             boolean changed = hudCheckInstrumentResult != -1
                     || (hudCheckLightIndex >= 0 && hudCheckLightResult != -1);
@@ -2030,6 +2267,10 @@ final class VehicleTbtPublisher {
     }
 
     private boolean sendAmap(Intent intent, String operation, Trace trace, byte[] arguments) {
+        if (!HudCheckChannelPolicy.usesAmap(selectedCheck(trace))) {
+            recordHudCheck(trace, "AMap", HUD_CHECK_SKIPPED, "channel-excluded");
+            return false;
+        }
         if (!ShanghaiOutputGate.enterWrite()) return false;
         try { return sendAmapWhenAllowed(intent, operation, trace, arguments); }
         finally { ShanghaiOutputGate.leaveWrite(); }
@@ -2037,6 +2278,8 @@ final class VehicleTbtPublisher {
 
     private boolean sendAmapWhenAllowed(Intent intent, String operation, Trace trace, byte[] arguments) {
         long startedAt = System.nanoTime();
+        String target = trace.hudCheck == null ? AMAP_ACTION
+                : AMAP_ACTION + " package=" + intent.getPackage();
         try {
             context.sendBroadcast(intent);
             if ("frame".equals(operation)) {
@@ -2048,7 +2291,7 @@ final class VehicleTbtPublisher {
                 hudCheckAmapResult = 1;
                 MainActivity.publishSharedUiStateChange();
             }
-            record(trace, "amap_broadcast", operation, AMAP_ACTION,
+            record(trace, "amap_broadcast", operation, target,
                     arguments, 0, elapsedMs(startedAt), "");
             return true;
         } catch (RuntimeException error) {
@@ -2061,8 +2304,9 @@ final class VehicleTbtPublisher {
                 hudCheckAmapResult = -1;
                 MainActivity.publishSharedUiStateChange();
             }
-            record(trace, "amap_broadcast", operation, AMAP_ACTION,
-                    arguments, -1, elapsedMs(startedAt), describe(error));
+            record(trace, "amap_broadcast", operation, target,
+                    arguments, -1, elapsedMs(startedAt), trace.hudCheck == null
+                            ? describe(error) : Log.getStackTraceString(error));
             Log.w(TAG, "TBT AMap broadcast failed: " + operation, error);
             return false;
         }
@@ -2117,7 +2361,8 @@ final class VehicleTbtPublisher {
                 nativeId, intermediateAmapIcon, amapIcon, roundaboutExit,
                 distance, preserveText(road), route, next, lanes, profile, mapping);
         trace.routeToken = routeToken;
-        trace.hudCheck = manualState == null ? null : manualState.hudCheck;
+        trace.hudCheck = manualState != null ? manualState.hudCheck
+                : MANUAL_OWNER.equals(owner) ? hudCheckOutput : null;
         return trace;
     }
 
@@ -2135,7 +2380,7 @@ final class VehicleTbtPublisher {
     private void record(Trace trace, String plane, String operation, String target,
             byte[] argumentBytes, int result, long durationMs, String error) {
         if (trace == null) return;
-        TbtTxLog.record(context, TbtTxLog.Entry.builder()
+        boolean detailed = TbtTxLog.record(context, TbtTxLog.Entry.builder()
                 .source(trace.source)
                 .owner(trace.owner)
                 .generation(trace.generation)
@@ -2160,6 +2405,17 @@ final class VehicleTbtPublisher {
                 .result(result)
                 .durationMs(durationMs)
                 .error(error));
+        if (trace.hudCheck != null && (!detailed || result < 0 || !safe(error).isEmpty())) {
+            log("hud_check_tx generation=" + trace.generation + " tx=" + trace.transactionId
+                    + " selected=" + trace.hudCheck.channel
+                    + " addSomeIp=" + trace.hudCheck.effectiveAddSomeIp()
+                    + " oem=" + trace.hudCheck.isDenzaOem()
+                    + " plane=" + plane + " operation=" + operation + " target=" + target
+                    + " native=" + trace.nativeId + " amap=" + trace.amapIcon
+                    + " distanceM=" + trace.distanceMeters + " road=" + trace.road
+                    + " reason=" + trace.reason + " result=" + result + " durationMs=" + durationMs
+                    + (safe(error).isEmpty() ? "" : " error=" + error));
+        }
     }
 
     private static byte[] ints(int... values) {

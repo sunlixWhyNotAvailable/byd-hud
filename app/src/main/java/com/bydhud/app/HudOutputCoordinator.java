@@ -187,6 +187,11 @@ final class HudOutputCoordinator {
     private boolean manualEnabled;
     private boolean directEnabled;
     private HudState manualState;
+    private boolean denzaOemRawPacketMayBeVisible;
+    private boolean denzaOemAwaitingRecovery;
+    private Runnable denzaOemRecoveryListener;
+    private Runnable pendingWriterRetirementCompletion;
+    private boolean manualWriterRetirementHeld;
     private DirectTbtFrame manualMapLiveFrame;
     private long manualMapLiveSession;
     private HudMapSettings manualMapLiveSettings;
@@ -291,6 +296,11 @@ final class HudOutputCoordinator {
             if (desiredSource() == Source.NONE) {
                 return;
             }
+            if (isHudCheckIsolatedManual()) {
+                if (pendingSource != Source.NONE) continuePendingTransition(generation);
+                else activateDesired("transport-recovery-isolated");
+                return;
+            }
             if (pendingSource != Source.NONE) {
                 continuePendingTransition(generation);
             } else {
@@ -304,6 +314,15 @@ final class HudOutputCoordinator {
         public void run() {
             protocolRetryScheduled = false;
             if (desiredSource() == Source.NONE) {
+                return;
+            }
+            if (isHudCheckIsolatedManual()) {
+                if (pendingSource != Source.NONE) continuePendingTransition(generation);
+                else activateDesired("protocol-retry-isolated");
+                return;
+            }
+            if (isDenzaOemManual()) {
+                recoverDenzaOemProtocol();
                 return;
             }
             if (!client.isBound()) {
@@ -372,18 +391,170 @@ final class HudOutputCoordinator {
 
     private static String checkResultText(int result, String language) {
         if (result > 0) return "uk".equals(language) ? "надіслано" : "ru".equals(language) ? "отправлено" : "sent";
+        if (result == -2) return "uk".equals(language) ? "пропущено" : "ru".equals(language) ? "пропущено" : "skipped";
         if (result < 0) return "uk".equals(language) ? "недоступно/помилка" : "ru".equals(language) ? "недоступно/ошибка" : "unavailable/error";
         return "uk".equals(language) ? "очікування" : "ru".equals(language) ? "ожидание" : "waiting";
     }
 
     private static String checkResultText(int result, boolean ukrainian) {
         if (result > 0) return ukrainian ? "надіслано" : "sent";
+        if (result == -2) return ukrainian ? "пропущено" : "skipped";
         if (result < 0) return ukrainian ? "недоступно/помилка" : "unavailable/error";
         return ukrainian ? "очікування" : "waiting";
     }
 
     void ensureBound(String reason) {
-        worker.post(() -> ensureBoundOnWorker(reason));
+        worker.post(() -> {
+            if (isHudCheckIsolatedManual()) return;
+            ensureBoundOnWorker(reason);
+        });
+    }
+
+    void setDenzaOemRecoveryListener(Runnable listener) {
+        worker.post(() -> denzaOemRecoveryListener = listener);
+    }
+
+    void configureHudCheckOutput(HudCheckState check, String reason) {
+        worker.post(() -> {
+            HudCheckState previous = manualState == null ? null : manualState.hudCheck;
+            if (check == null) {
+                if (previous != null) manualState = null;
+                clearDenzaOemPreparedState();
+                denzaOemAwaitingRecovery = false;
+                return;
+            }
+            boolean sameWriter = previous != null
+                    && !HudCheckChannelPolicy.changesWriter(previous, check);
+            HudState selected = check.toHudState();
+            selected.hudCheck = check;
+            manualState = selected;
+            if (!sameWriter || previous == null || previous.isDenzaOem() != check.isDenzaOem()) {
+                clearDenzaOemPreparedState();
+                if (check.isDenzaOem()) denzaOemAwaitingRecovery = false;
+            }
+            if (check.isDenzaOem() && sameWriter && previous.isDenzaOem()) {
+                // Basic/Extended sample changes must not restart or rewind the captured writer.
+                if (manualEnabled && check.usesSomeIp() && !client.isBound()) {
+                    denzaOemAwaitingRecovery = true;
+                }
+                return;
+            }
+            int selectedResult = check.usesSomeIp() ? 0 : -2;
+            setHudCheckRoadResult(selectedResult,
+                    check.usesSomeIp() ? "sample-selected" : "channel-excluded");
+            if (manualEnabled) reconcile(reason);
+        });
+    }
+
+    void publishDenzaOemRoadInfo(HudCheckState check, DenzaOemRecording.Frame frame,
+            String reason, Consumer<Boolean> completion) {
+        if (frame == null || check == null) {
+            postDenzaOemCompletion(completion, false);
+            return;
+        }
+        worker.post(() -> sendDenzaOemRoadInfoOnWorker(check, frame, reason, completion));
+    }
+
+    private void sendDenzaOemRoadInfoOnWorker(HudCheckState check,
+            DenzaOemRecording.Frame frame, String reason, Consumer<Boolean> completion) {
+        if (!manualEnabled || activeSource != Source.MANUAL || pendingSource != Source.NONE
+                || manualState == null || manualState.hudCheck == null
+                || !manualState.hudCheck.isDenzaOem() || !check.isDenzaOem()
+                || HudCheckChannelPolicy.changesWriter(manualState.hudCheck, check)
+                || !manualState.hudCheck.usesSomeIp() || !check.usesSomeIp()) {
+            denzaOemAwaitingRecovery = true;
+            postDenzaOemCompletion(completion, false);
+            return;
+        }
+        if (!client.isBound()) {
+            denzaOemAwaitingRecovery = true;
+            ensureBoundOnWorker("denza-oem:" + safe(reason));
+            postDenzaOemCompletion(completion, false);
+            return;
+        }
+        long startedAtMs = SystemClock.elapsedRealtime();
+        byte[] payload = frame.payload();
+        try {
+            if (!serviceStarted) {
+                int startResult = startService(Source.MANUAL, "hud_check_denza_oem",
+                        "denza-oem-start:" + safe(reason));
+                if (!isStartReadyResult(startResult)) {
+                    logDenzaOemRawResult(frame, reason, startResult,
+                            "service-start-result", SystemClock.elapsedRealtime() - startedAtMs);
+                    handleProtocolResult("denza-oem start", startResult);
+                    denzaOemAwaitingRecovery = true;
+                    postDenzaOemCompletion(completion, false);
+                    return;
+                }
+                serviceStarted = true;
+            }
+            denzaOemRawPacketMayBeVisible = true;
+            int result = sendPayload(Source.MANUAL, "hud_check_denza_oem",
+                    "denza_oem_recorded_roadinfo", reason, payload, payload);
+            long duration = SystemClock.elapsedRealtime() - startedAtMs;
+            logDenzaOemRawResult(frame, reason, result, "send-result", duration);
+            if (!isPayloadSuccessResult(result)) {
+                handleProtocolResult("denza-oem send", result);
+                denzaOemAwaitingRecovery = true;
+                postDenzaOemCompletion(completion, false);
+                return;
+            }
+            recordPayloadSuccess();
+            sendCount++;
+            sendDurationMs += duration;
+            HudDeliveryStatus.recordNonClearResult(result);
+            setHudCheckRoadResult(1, "denza-oem-sequence-" + frame.sourceSequence);
+            notifyDenzaOemRecovery("roadinfo-ready");
+            postDenzaOemCompletion(completion, true);
+        } catch (RemoteException error) {
+            sendFailures++;
+            logDenzaOemRawFailure(frame, reason, error);
+            handleTransportFailure("denza-oem send source=manual", error);
+            denzaOemAwaitingRecovery = true;
+            postDenzaOemCompletion(completion, false);
+        } catch (RuntimeException error) {
+            sendFailures++;
+            logDenzaOemRawFailure(frame, reason, error);
+            handleProtocolException("denza-oem send source=manual", error);
+            denzaOemAwaitingRecovery = true;
+            postDenzaOemCompletion(completion, false);
+        }
+    }
+
+    private void logDenzaOemRawResult(DenzaOemRecording.Frame frame, String reason,
+            int result, String outcome, long durationMs) {
+        log("hud_check oem roadinfo " + outcome + " sequence=" + frame.sourceSequence
+                + " offsetNs=" + frame.offsetNanos + " sha256=" + frame.payloadSha256
+                + " result=" + result + " durationMs=" + durationMs
+                + " reason=" + safe(reason));
+    }
+
+    private void logDenzaOemRawFailure(DenzaOemRecording.Frame frame, String reason,
+            Throwable error) {
+        String detail = "hud_check oem roadinfo exception sequence=" + frame.sourceSequence
+                + " offsetNs=" + frame.offsetNanos + " sha256=" + frame.payloadSha256
+                + " exception=" + error.getClass().getName() + ":" + safe(error.getMessage())
+                + " cause=" + causeSummary(error.getCause()) + " reason=" + safe(reason)
+                + " stack=" + Log.getStackTraceString(error);
+        Log.e(TAG, detail, error);
+        log(detail);
+    }
+
+    private static String causeSummary(Throwable cause) {
+        if (cause == null) return "none";
+        return cause.getClass().getName() + ":" + safe(cause.getMessage());
+    }
+
+    private void postDenzaOemCompletion(Consumer<Boolean> completion, boolean success) {
+        if (completion != null) completion.accept(success);
+    }
+
+    private void clearDenzaOemPreparedState() {
+        preparedHudCheck = null;
+        preparedHudCheckPayload = null;
+        hudCheckPackets = Collections.emptyList();
+        hudCheckHasAuxiliary = false;
+        hudCheckAuxiliarySentAtMs = 0L;
     }
 
     void publishManual(HudState state, String reason) {
@@ -393,8 +564,13 @@ final class HudOutputCoordinator {
                     .equals(HudCheckDiagnostics.sampleKey(
                             manualState == null ? null : manualState.hudCheck));
             manualState = copy;
-            if (changed) recordHudCheck("roadinfo", 0, "sample-selected");
-            if (activeSource == Source.MANUAL) {
+            if (copy != null && copy.hudCheck != null && !copy.hudCheck.usesSomeIp()) {
+                setHudCheckRoadResult(-2, "channel-excluded");
+            } else if (changed) {
+                setHudCheckRoadResult(0, "sample-selected");
+            }
+            if (activeSource == Source.MANUAL && !isHudCheckIsolatedManual()
+                    && !isDenzaOemManual()) {
                 scheduleImmediate(reason);
             }
         });
@@ -555,9 +731,14 @@ final class HudOutputCoordinator {
     void setManualEnabled(boolean enabled, String reason) {
         worker.post(() -> {
             boolean started = enabled && !manualEnabled;
+            if (enabled) manualWriterRetirementHeld = false;
             if (manualEnabled != enabled) hudCheckDiagnostics.reset();
             manualEnabled = enabled;
-            if (started) recordHudCheck("roadinfo", 0, "sample-selected");
+            if (started && isHudCheckIsolatedSelection()) {
+                setHudCheckRoadResult(-2, "channel-excluded");
+            } else if (started) {
+                setHudCheckRoadResult(0, "sample-selected");
+            }
             if (!enabled) {
                 releaseHudCheckAuxiliary(reason);
                 preparedHudCheck = null;
@@ -596,6 +777,32 @@ final class HudOutputCoordinator {
                 hudCheckRoadResult = 0;
                 runCompletion(completion);
             });
+        });
+    }
+
+    /** Stops the current manual writer and waits until its source transition is retired. */
+    void stopManualOutputForWriterChange(String reason, Runnable completion) {
+        worker.post(() -> {
+            manualWriterRetirementHeld = true;
+            if (manualMapLiveSession != 0L) {
+                long session = manualMapLiveSession;
+                synchronized (mapLivePublishLock) {
+                    closedMapLiveSession = Math.max(closedMapLiveSession, session);
+                }
+                clearManualMapLive(session, reason);
+            }
+            manualEnabled = false;
+            hudCheckDiagnostics.reset();
+            pendingWriterRetirementCompletion = chainCompletions(
+                    pendingWriterRetirementCompletion, completion);
+            reconcile(reason, SystemClock.elapsedRealtime(), null);
+        });
+    }
+
+    void completeManualWriterChange(String reason) {
+        worker.post(() -> {
+            manualWriterRetirementHeld = false;
+            reconcile(reason);
         });
     }
 
@@ -954,6 +1161,7 @@ final class HudOutputCoordinator {
             directBitmapTxLogger = null;
             lastBitmapTxDiagnosticKey = "";
             directAlertClearPending = false;
+            denzaOemAwaitingRecovery = false;
             invalidateDirectOwnerOnWorker("shutdown:" + reason);
             if (interruptedClear) {
                 generation++;
@@ -984,6 +1192,8 @@ final class HudOutputCoordinator {
             Runnable firstClearCompletion) {
         Source target = desiredSource();
         updateVehiclePositionOutput();
+        boolean isolatedHudCheckTarget = target == Source.MANUAL
+                && isHudCheckIsolatedManual();
         if (pendingSource == Source.NONE && target == activeSource) {
             if (target == Source.NONE && (finalClearInProgress
                     || pendingFinalClearCompletion != null)) {
@@ -996,9 +1206,18 @@ final class HudOutputCoordinator {
                 return;
             }
             runCompletion(firstClearCompletion);
+            if (isolatedHudCheckTarget && client.hasBinding()) {
+                if (denzaOemRawPacketMayBeVisible) {
+                    sendDenzaOemOwnedClearBestEffort(target,
+                            "writer-retire:" + safe(reason));
+                }
+                stopServiceAndUnbind("hud-check-isolated:" + reason);
+            }
             if (target == Source.NONE && client.hasBinding()) {
                 stopServiceAndUnbind(reason);
                 HudDeliveryStatus.reset();
+            } else if (target == Source.NONE) {
+                dispatchWriterRetirementCompletion();
             }
             return;
         }
@@ -1019,6 +1238,8 @@ final class HudOutputCoordinator {
         finalClearStartedAtMs = 0L;
         Runnable clearCompletion = chainCompletions(carriedCompletion, firstClearCompletion);
         Source previous = activeSource;
+        boolean previousHudCheckIsolated = previous == Source.MANUAL
+                && isHudCheckIsolatedSelection();
         resetEtaStreetText("source-transition");
         boolean stillNeedsClear = pendingNeedsClear || unfinishedFinalClear;
         long existingBarrierDeadline = pendingActivationNotBeforeMs;
@@ -1028,6 +1249,17 @@ final class HudOutputCoordinator {
         pendingNeedsClear = false;
         pendingActivationNotBeforeMs = 0L;
         HudDeliveryStatus.reset();
+        if (target == Source.NONE && previousHudCheckIsolated) {
+            pendingFinalClearCompletion = clearCompletion;
+            pendingFinalClearSucceeded = true;
+            finalClearCompletionDispatched = false;
+            finalClearInProgress = false;
+            finalClearStartedAtMs = 0L;
+            stopServiceAndUnbind("isolated-manual-stop:" + safe(reason));
+            HudDeliveryStatus.reset();
+            releaseFinalClearCompletionOnce();
+            return;
+        }
         if (target == Source.NONE) {
             pendingFinalClearCompletion = clearCompletion;
             pendingFinalClearSucceeded = false;
@@ -1041,9 +1273,37 @@ final class HudOutputCoordinator {
         pendingTransitionClearCompletion = clearCompletion;
         pendingSource = target;
         pendingReason = reason;
-        pendingNeedsClear = previous != Source.NONE || stillNeedsClear;
+        // A pure HUD Check target does not need SomeIP, but a previously active
+        // SomeIP writer still has to retire its RoadInfo before it is unbound.
+        pendingNeedsClear = !previousHudCheckIsolated
+                && (previous != Source.NONE || stillNeedsClear);
+        if ((isolatedHudCheckTarget || previousHudCheckIsolated)
+                && (previous != Source.NONE || client.hasBinding())) {
+            if (!pendingNeedsClear && denzaOemRawPacketMayBeVisible && client.isBound()) {
+                sendDenzaOemOwnedClearBestEffort(previous,
+                        "writer-retire:" + safe(reason));
+            }
+            // Retire an isolated writer immediately. A previous SomeIP writer
+            // instead goes through its bounded terminal clear before unbinding.
+            if (!pendingNeedsClear) {
+                stopServiceAndUnbind("hud-check-isolated:" + reason);
+            }
+        }
         if (!pendingNeedsClear) {
             pendingActivationNotBeforeMs = existingBarrierDeadline;
+        } else if (isolatedHudCheckTarget) {
+            worker.postDelayed(() -> {
+                if (transitionGeneration != generation || pendingSource != Source.MANUAL
+                        || !pendingNeedsClear || !isHudCheckIsolatedManual()) return;
+                log("hud_check previous SomeIP cleanup unconfirmed after timeout; target="
+                        + manualState.hudCheck.channel + " reason=" + safe(reason));
+                cancelScheduledWork();
+                stopServiceAndUnbind("isolated-retirement-timeout:" + safe(reason));
+                pendingNeedsClear = false;
+                pendingActivationNotBeforeMs = 0L;
+                completeTransitionClear();
+                finishPendingTransition(transitionGeneration);
+            }, FINAL_CLEAR_TIMEOUT_MS);
         }
         continuePendingTransition(transitionGeneration);
     }
@@ -1103,6 +1363,7 @@ final class HudOutputCoordinator {
         pendingNeedsClear = false;
         pendingActivationNotBeforeMs = 0L;
         activeSource = target;
+        dispatchWriterRetirementCompletion();
         activateDesired(reason);
     }
 
@@ -1117,6 +1378,20 @@ final class HudOutputCoordinator {
         }
         activeSource = target;
         updateVehiclePositionOutput();
+        if (target == Source.MANUAL && isHudCheckIsolatedManual()) {
+            HudDeliveryStatus.reset();
+            setHudCheckRoadResult(-2, "channel-excluded");
+            return;
+        }
+        if (target == Source.MANUAL && isDenzaOemManual()) {
+            if (!client.isBound()) {
+                denzaOemAwaitingRecovery = true;
+                ensureBoundOnWorker(reason);
+            } else {
+                notifyDenzaOemRecovery("output-owner-ready:" + safe(reason));
+            }
+            return;
+        }
         if (!client.isBound()) {
             ensureBoundOnWorker(reason);
         }
@@ -1127,6 +1402,7 @@ final class HudOutputCoordinator {
             flushPendingDirectLossClear();
             if (directLossClearPending) return;
         }
+        if (!clearDeferredOemImage(target, reason)) return;
         if (!hasFrame(target)) {
             HudDeliveryStatus.reset();
             log("waiting source=" + target + " reason=" + reason);
@@ -1137,7 +1413,8 @@ final class HudOutputCoordinator {
     }
 
     private Source desiredSource() {
-        return chooseSource(manualEnabled, directEnabled);
+        return manualWriterRetirementHeld ? Source.NONE
+                : chooseSource(manualEnabled, directEnabled);
     }
 
     static Source chooseSource(boolean manual, boolean direct) {
@@ -1157,6 +1434,7 @@ final class HudOutputCoordinator {
     }
 
     private void ensureBoundOnWorker(String reason) {
+        if (isHudCheckIsolatedManual() && !pendingNeedsClear) return;
         if (client.isBound()) {
             finishBindAttempt();
             flushPendingDirectLossClear();
@@ -1231,6 +1509,7 @@ final class HudOutputCoordinator {
     }
 
     private void scheduleImmediate(String reason) {
+        if (isHudCheckIsolatedManual() || isDenzaOemManual()) return;
         if (protocolRetryScheduled) {
             return;
         }
@@ -1246,7 +1525,7 @@ final class HudOutputCoordinator {
     }
 
     private void scheduleSend(long delayMs) {
-        if (protocolRetryScheduled
+        if (isHudCheckIsolatedManual() || isDenzaOemManual() || protocolRetryScheduled
                 || activeSource == Source.NONE
                 || !hasFrame(activeSource)) {
             return;
@@ -1265,6 +1544,7 @@ final class HudOutputCoordinator {
 
     private void sendActive(String reason) {
         updateVehiclePositionOutput();
+        if (isHudCheckIsolatedManual() || isDenzaOemManual()) return;
         if (ShanghaiOutputGate.isSuspended()) {
             nativeSpeed.stop("shanghai");
             stopNavigatorMap("shanghai");
@@ -1306,6 +1586,7 @@ final class HudOutputCoordinator {
                 }
                 log("service ready source=" + source + " result=" + startResult);
             }
+            if (!clearDeferredOemImage(source, reason)) return;
             refreshNavigatorMap(source);
             flushNativeMapClear(reason, false);
             if (source == Source.DIRECT && directLossClearPending) {
@@ -1563,6 +1844,7 @@ final class HudOutputCoordinator {
     }
 
     private boolean sendNativeMap(byte[] payload, String kind, String reason) {
+        if (isHudCheckIsolatedSelection() && !"map_clear".equals(kind)) return false;
         long startedAt = SystemClock.elapsedRealtime();
         Integer result = null;
         String error = "";
@@ -1735,6 +2017,123 @@ final class HudOutputCoordinator {
         MainActivity.publishSharedUiStateChange();
     }
 
+    private boolean isDenzaOemManual() {
+        return manualEnabled && manualState != null && manualState.hudCheck != null
+                && manualState.hudCheck.isDenzaOem();
+    }
+
+    private boolean isHudCheckIsolatedSelection() {
+        return manualState != null && manualState.hudCheck != null
+                && !manualState.hudCheck.usesSomeIp();
+    }
+
+    private boolean isHudCheckIsolatedManual() {
+        return manualEnabled && isHudCheckIsolatedSelection();
+    }
+
+    private void notifyDenzaOemRecovery(String reason) {
+        if (!denzaOemAwaitingRecovery || !isDenzaOemManual()
+                || !manualState.hudCheck.usesSomeIp()) return;
+        denzaOemAwaitingRecovery = false;
+        log("hud_check oem recovery_ready reason=" + safe(reason));
+        Runnable listener = denzaOemRecoveryListener;
+        if (listener != null) listener.run();
+    }
+
+    private void recoverDenzaOemProtocol() {
+        if (!isDenzaOemManual() || !manualState.hudCheck.usesSomeIp()) return;
+        if (pendingSource != Source.NONE) {
+            continuePendingTransition(generation);
+            return;
+        }
+        if (!client.isBound()) {
+            denzaOemAwaitingRecovery = true;
+            ensureBoundOnWorker("denza-oem-protocol-recovery");
+            return;
+        }
+        if (activeSource != Source.MANUAL || desiredSource() != Source.MANUAL) {
+            denzaOemAwaitingRecovery = true;
+            resumeActivation("denza-oem-protocol-recovery");
+            return;
+        }
+        if (!serviceStarted) {
+            try {
+                int result = startService(Source.MANUAL, "hud_check_denza_oem",
+                        "denza-oem-protocol-recovery");
+                if (!isStartReadyResult(result)) {
+                    handleProtocolResult("denza-oem recovery start", result);
+                    denzaOemAwaitingRecovery = true;
+                    return;
+                }
+                serviceStarted = true;
+            } catch (RemoteException error) {
+                String detail = "hud_check oem recovery service start failed exception="
+                        + error.getClass().getName() + ":" + safe(error.getMessage())
+                        + " stack=" + Log.getStackTraceString(error);
+                Log.e(TAG, detail, error);
+                log(detail);
+                denzaOemAwaitingRecovery = true;
+                handleTransportFailure("denza-oem recovery start", error);
+                return;
+            } catch (RuntimeException error) {
+                String detail = "hud_check oem recovery service start failed exception="
+                        + error.getClass().getName() + ":" + safe(error.getMessage())
+                        + " stack=" + Log.getStackTraceString(error);
+                Log.e(TAG, detail, error);
+                log(detail);
+                denzaOemAwaitingRecovery = true;
+                handleProtocolException("denza-oem recovery start", error);
+                return;
+            }
+        }
+        notifyDenzaOemRecovery("protocol-retry-ready");
+    }
+
+    private byte[] buildClearPayload() {
+        if (!denzaOemRawPacketMayBeVisible) return DirectTbtPayload.buildClear();
+        HudGraphicPayload.setContext(context);
+        byte[] blankManeuver = HudGraphicPayload.buildOemTurnPng(
+                HudState.TURN_BITMAP_BLANK_SOURCE_ID);
+        if (blankManeuver == null || blankManeuver.length == 0) {
+            throw new IllegalStateException("Denza OEM maneuver image clear is unavailable");
+        }
+        return DirectTbtPayload.buildClear(new byte[0], blankManeuver);
+    }
+
+    private boolean clearDeferredOemImage(Source source, String reason) {
+        if (!denzaOemRawPacketMayBeVisible) return true;
+        if (!client.isBound()) return false;
+        try {
+            if (!serviceStarted) {
+                int result = startService(source, channelFor(source), "denza-oem-deferred-clear");
+                if (!isStartReadyResult(result)) {
+                    handleProtocolResult("denza-oem deferred clear start", result);
+                    return false;
+                }
+                serviceStarted = true;
+            }
+            return sendRequiredClear(reason, source, "denza_oem_deferred_clear");
+        } catch (RemoteException error) {
+            log("denza-oem deferred clear failed stack=" + Log.getStackTraceString(error));
+            handleTransportFailure("denza-oem deferred clear", error);
+        } catch (RuntimeException error) {
+            log("denza-oem deferred clear failed stack=" + Log.getStackTraceString(error));
+            handleProtocolException("denza-oem deferred clear", error);
+        }
+        return false;
+    }
+
+    private long sendDenzaOemOwnedClearBestEffort(Source source, String reason) {
+        if (!denzaOemRawPacketMayBeVisible || !client.isBound()) return -1L;
+        return sendClearBestEffort(reason, source, "denza_oem_maneuver_clear");
+    }
+
+    private void dispatchWriterRetirementCompletion() {
+        Runnable completion = pendingWriterRetirementCompletion;
+        pendingWriterRetirementCompletion = null;
+        runCompletion(completion);
+    }
+
     private void logManeuverGeometry(String owner, long session, DirectTbtPayload.Prepared payload) {
         String key = "owner=" + owner + " session=" + session
                 + " f28=" + payload.nativeManeuver() + " " + payload.geometryDiagnostics();
@@ -1771,14 +2170,17 @@ final class HudOutputCoordinator {
                 && first.maneuverBitmap == second.maneuverBitmap
                 && first.laneBitmap == second.laneBitmap
                 && first.transliterate == second.transliterate
-                && (first.mode != HudCheckState.Mode.BASIC
-                || (first.streetTestDestination == second.streetTestDestination
-                        && first.streetTestGuidePoint == second.streetTestGuidePoint
-                        && first.streetTestMapState == second.streetTestMapState
-                        && first.streetTestRoadClass == second.streetTestRoadClass));
+                && first.streetTestDestination == second.streetTestDestination
+                && first.streetTestGuidePoint == second.streetTestGuidePoint
+                && first.streetTestMapState == second.streetTestMapState
+                && first.streetTestRoadClass == second.streetTestRoadClass
+                && first.channel == second.channel
+                && first.addSomeIp == second.addSomeIp
+                && first.isDenzaOem() == second.isDenzaOem();
     }
 
     private void publishHudCheckAuxiliary(String reason) {
+        if (isHudCheckIsolatedSelection()) return;
         long now = SystemClock.elapsedRealtime();
         if (hudCheckAuxiliarySentAtMs > 0L
                 && now - hudCheckAuxiliarySentAtMs < DEFAULT_INTERVAL_MS) return;
@@ -1812,6 +2214,7 @@ final class HudOutputCoordinator {
     }
 
     private boolean ensureHudCheckService(long serviceId, String reason) {
+        if (isHudCheckIsolatedSelection()) return false;
         if (serviceId == SomeIpHudClient.HUD_NAVI_INFO_SERVICE_ID) return serviceStarted;
         if (hudCheckReadyServices.contains(serviceId)) return true;
         if (!client.isBound()) return false;
@@ -1829,17 +2232,22 @@ final class HudOutputCoordinator {
             if (result == RESULT_OK) hudCheckOwnedServices.add(serviceId);
             return true;
         } catch (RemoteException | RuntimeException error) {
+            String stack = Log.getStackTraceString(error);
             recordHudCheck("aux-service-" + Long.toHexString(serviceId),
                     -1, "start-" + error.getClass().getSimpleName());
             txLog.recordLifecycle("service_start", "manual", "hud_check_aux", detail,
-                    null, error.getClass().getSimpleName() + ":" + safe(error.getMessage()),
+                    null, error.getClass().getSimpleName() + ":" + safe(error.getMessage())
+                            + " stack=" + stack,
                     SystemClock.elapsedRealtime() - startedAt);
+            Log.e(TAG, "hud_check auxiliary service start failed " + detail, error);
+            log("hud_check auxiliary service start failed " + detail + " stack=" + stack);
             return false;
         }
     }
 
     private boolean sendHudCheckPacket(HudCheckPayload.Packet packet, String kind,
             String reason) {
+        if (isHudCheckIsolatedSelection()) return false;
         long startedAt = SystemClock.elapsedRealtime();
         try {
             if (packet.topicId == SomeIpHudClient.HUD_TOPIC_8003) {
@@ -1859,19 +2267,31 @@ final class HudOutputCoordinator {
             }
             return isPayloadSuccessResult(result);
         } catch (RemoteException | RuntimeException error) {
+            String stack = Log.getStackTraceString(error);
             recordHudCheck("aux-topic-" + Long.toHexString(packet.topicId) + ":" + kind,
                     -1, "send-" + error.getClass().getSimpleName());
             hudCheckReadyServices.remove(packet.serviceId);
             hudCheckOwnedServices.remove(packet.serviceId);
             txLog.recordSend("manual", "hud_check_aux", packet.topicId, kind, reason,
                     packet.payload, packet.payload, null,
-                    error.getClass().getSimpleName() + ":" + safe(error.getMessage()),
+                    error.getClass().getSimpleName() + ":" + safe(error.getMessage())
+                            + " stack=" + stack,
                     SystemClock.elapsedRealtime() - startedAt);
+            Log.e(TAG, "hud_check auxiliary send failed kind=" + kind
+                    + " topic=0x" + Long.toHexString(packet.topicId)
+                    + " reason=" + safe(reason), error);
+            log("hud_check auxiliary send failed kind=" + kind
+                    + " topic=0x" + Long.toHexString(packet.topicId)
+                    + " reason=" + safe(reason) + " stack=" + stack);
             return false;
         }
     }
 
     private boolean flushHudCheckAuxiliaryClears(String reason) {
+        if (isHudCheckIsolatedSelection()) {
+            hudCheckPendingClearTopics.clear();
+            return true;
+        }
         if (hudCheckPendingClearTopics.isEmpty()) return true;
         if (!client.isBound()) return false;
         List<HudCheckPayload.Packet> clears = HudCheckPayload.clearAuxiliaryPackets();
@@ -1890,6 +2310,21 @@ final class HudOutputCoordinator {
     }
 
     private void releaseHudCheckAuxiliary(String reason) {
+        if (isHudCheckIsolatedSelection()) {
+            if (!hudCheckActiveTopics.isEmpty() || !hudCheckPendingClearTopics.isEmpty()
+                    || !hudCheckOwnedServices.isEmpty()) {
+                log("hud_check auxiliary cleanup skipped channel="
+                        + manualState.hudCheck.channel + " reason=" + safe(reason));
+            }
+            hudCheckActiveTopics.clear();
+            hudCheckPendingClearTopics.clear();
+            hudCheckOwnedServices.clear();
+            hudCheckReadyServices.clear();
+            hudCheckPackets = Collections.emptyList();
+            hudCheckHasAuxiliary = false;
+            hudCheckAuxiliarySentAtMs = 0L;
+            return;
+        }
         hudCheckPendingClearTopics.addAll(hudCheckActiveTopics);
         hudCheckActiveTopics.clear();
         flushHudCheckAuxiliaryClears(reason);
@@ -1906,9 +2341,13 @@ final class HudOutputCoordinator {
                     hudCheckReadyServices.remove(serviceId);
                 }
             } catch (RemoteException | RuntimeException error) {
+                String stack = Log.getStackTraceString(error);
                 txLog.recordLifecycle("service_stop", "manual", "hud_check_aux", detail,
-                        null, error.getClass().getSimpleName() + ":" + safe(error.getMessage()),
+                        null, error.getClass().getSimpleName() + ":" + safe(error.getMessage())
+                                + " stack=" + stack,
                         SystemClock.elapsedRealtime() - startedAt);
+                Log.e(TAG, "hud_check auxiliary service stop failed " + detail, error);
+                log("hud_check auxiliary service stop failed " + detail + " stack=" + stack);
             }
         }
     }
@@ -2038,8 +2477,10 @@ final class HudOutputCoordinator {
             }
             finalClearInProgress = false;
             finalClearStartedAtMs = 0L;
+            boolean clearedOemManeuver = pendingFinalClearSucceeded;
             pendingFinalClearSucceeded = false;
             stopServiceAndUnbind(reason);
+            if (clearedOemManeuver) denzaOemRawPacketMayBeVisible = false;
             HudDeliveryStatus.reset();
             releaseFinalClearCompletionOnce();
         }, FINAL_STOP_DELAY_MS);
@@ -2185,7 +2626,7 @@ final class HudOutputCoordinator {
         flushNativeMapClear(reason, true);
         resetEtaStreetText("clear:" + kind);
         if (!manualEnabled) releaseHudCheckAuxiliary(reason);
-        byte[] payload = DirectTbtPayload.buildClear();
+        byte[] payload = buildClearPayload();
         int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
         logAsync("clear result=" + result + " reason=" + reason);
         maneuverGeometryDiagnostic = "";
@@ -2194,6 +2635,9 @@ final class HudOutputCoordinator {
             return false;
         }
         recordPayloadSuccess();
+        if (!finalClearInProgress && denzaOemRawPacketMayBeVisible) {
+            denzaOemRawPacketMayBeVisible = false;
+        }
         spatialOutputState.recordSuccessfulClear();
         liveSpatialTxDiagnostic = "";
         lastSentHudCheck = null;
@@ -2207,12 +2651,15 @@ final class HudOutputCoordinator {
         try {
             flushNativeMapClear(reason, true);
             if (!manualEnabled) releaseHudCheckAuxiliary(reason);
-            byte[] payload = DirectTbtPayload.buildClear();
+            byte[] payload = buildClearPayload();
             int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
             long completedAtMs = SystemClock.elapsedRealtime();
             logAsync("clear result=" + result + " reason=" + reason);
             maneuverGeometryDiagnostic = "";
             if (isPayloadSuccessResult(result)) {
+                if (!finalClearInProgress && pendingFinalClearCompletion == null) {
+                    denzaOemRawPacketMayBeVisible = false;
+                }
                 spatialOutputState.recordSuccessfulClear();
                 liveSpatialTxDiagnostic = "";
                 lastSentHudCheck = null;
@@ -2255,10 +2702,13 @@ final class HudOutputCoordinator {
         client.unbind();
         hudCheckReadyServices.clear();
         hudCheckOwnedServices.clear();
+        lastSentHudCheck = null;
+        clearDenzaOemPreparedState();
         directCounter = 0;
         lastTransportSource = Source.NONE;
         lastTransportChannel = "transport";
         log("transport stopped reason=" + reason);
+        dispatchWriterRetirementCompletion();
     }
 
     private int startService(Source source, String channel, String reason) throws RemoteException {
@@ -2323,7 +2773,8 @@ final class HudOutputCoordinator {
         resetEtaStreetText("transport-failure:" + reason);
         HudDeliveryStatus.recordFailure();
         if (manualEnabled && manualState != null && manualState.hudCheck != null) {
-            setHudCheckRoadResult(-1, "transport-unavailable");
+            setHudCheckRoadResult(isHudCheckIsolatedSelection() ? -2 : -1,
+                    isHudCheckIsolatedSelection() ? "channel-excluded" : "transport-unavailable");
             if (hudCheckHasAuxiliary) recordHudCheck("auxiliary", -1, "transport-unavailable");
             if (hudCheckHasAuxiliary && hudCheckAuxiliaryResult != -1) {
                 hudCheckAuxiliaryResult = -1;
@@ -2348,13 +2799,19 @@ final class HudOutputCoordinator {
         log("transport failure reason=" + reason
                 + (error == null ? "" : " error=" + error.getClass().getSimpleName()
                 + ":" + safe(error.getMessage())));
+        if (error != null && manualState != null && manualState.hudCheck != null) {
+            log("hud_check transport failure reason=" + reason + " stack="
+                    + Log.getStackTraceString(error));
+        }
         if (manualMapLiveSession != 0L) {
             log("map_live transport_failure session=" + manualMapLiveSession
                     + " reason=" + safe(reason)
                     + (error == null ? "" : " error=" + error.getClass().getSimpleName()));
         }
         if (desiredSource() != Source.NONE) {
-            worker.postDelayed(transportRecovery, DEFAULT_INTERVAL_MS);
+            if (!isHudCheckIsolatedManual() || pendingNeedsClear) {
+                worker.postDelayed(transportRecovery, DEFAULT_INTERVAL_MS);
+            }
         }
     }
 
@@ -2369,6 +2826,10 @@ final class HudOutputCoordinator {
 
     private void handleProtocolException(String reason, RuntimeException error) {
         sendFailures++;
+        if (manualState != null && manualState.hudCheck != null) {
+            log("hud_check protocol failure reason=" + reason + " stack="
+                    + Log.getStackTraceString(error));
+        }
         handleProtocolFailure(reason + " error=" + error.getClass().getSimpleName()
                 + ":" + safe(error.getMessage()));
     }
@@ -2377,10 +2838,12 @@ final class HudOutputCoordinator {
         nativeSpeed.stop("protocol-failure:" + detail);
         HudDeliveryStatus.recordFailure();
         if (manualEnabled && manualState != null && manualState.hudCheck != null) {
-            setHudCheckRoadResult(-1, "protocol-failed");
+            setHudCheckRoadResult(isHudCheckIsolatedSelection() ? -2 : -1,
+                    isHudCheckIsolatedSelection() ? "channel-excluded" : "protocol-failed");
         }
         sendScheduled = false;
         worker.removeCallbacks(sendLoop);
+        if (isHudCheckIsolatedManual() && !pendingNeedsClear) return;
         if (protocolRetryScheduled || desiredSource() == Source.NONE) {
             return;
         }

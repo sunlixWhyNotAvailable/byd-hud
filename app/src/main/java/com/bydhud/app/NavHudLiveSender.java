@@ -13,7 +13,9 @@ import android.util.Log;
 
 import org.json.JSONObject;
 
+import java.io.IOException;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
 import java.util.TreeSet;
 import java.util.concurrent.CountDownLatch;
@@ -262,6 +264,19 @@ final class NavHudLiveSender {
     }
 
     private void checkpointOutput() { checkpointOutput(null); }
+
+    private void logHudCheckUserUpdate(HudCheckState state, String reason) {
+        try {
+            log("hud_check user_update reason=" + safeReason(reason)
+                    + " state=" + state.checkpoint().toString());
+        } catch (Exception error) {
+            String detail = "hud_check user_update checkpoint failed exception="
+                    + error.getClass().getName() + ":" + safeReason(error.getMessage())
+                    + " stack=" + Log.getStackTraceString(error);
+            Log.e(TAG, detail, error);
+            log(detail);
+        }
+    }
 
     private void checkpointOutput(Runnable completion) {
         try {
@@ -581,15 +596,64 @@ final class NavHudLiveSender {
                 }
                 return;
             }
+            logHudCheckUserUpdate(next, reason);
+            if (hudCheckWriterTransitionPending) {
+                handler.removeCallbacks(hudCheckTick);
+                if (!next.running) stopDenzaOemReplay("hud-check-stopped-during-writer-change");
+                hudCheckState = next;
+                checkpointOutput();
+                MainActivity.publishSharedUiStateChange();
+                return;
+            }
+            if ((!previous.running && next.running) || (previous.running && (!next.running
+                    || HudCheckChannelPolicy.changesWriter(previous, next)))) {
+                handler.removeCallbacks(hudCheckTick);
+                stopDenzaOemReplay("hud-check-writer-change:" + safeReason(reason));
+                hudCheckState = next;
+                checkpointOutput();
+                hudCheckWriterTransitionPending = true;
+                tbtPublisher.setHudCheckTransitionPending(true);
+                ++tbtLifecycleToken;
+                long transition = ++hudCheckWriterTransitionGeneration;
+                stopManualOnWorker("hud-check-writer-change:" + safeReason(reason), false,
+                        () -> {
+                            if (transition != hudCheckWriterTransitionGeneration) return;
+                            hudCheckWriterTransitionPending = false;
+                            tbtPublisher.setHudCheckTransitionPending(false);
+                            if (hudCheckState.running && isRuntimeEnabled()) {
+                                startManualOnWorker(hudCheckState.toHudState(),
+                                        "hud-check-writer-change-complete:" + safeReason(reason));
+                                if (!hudCheckState.isDenzaOem()) {
+                                    handler.postDelayed(hudCheckTick,
+                                            hudCheckIntervalMs(hudCheckState));
+                                }
+                            } else {
+                                hudOutput.completeManualWriterChange("hud-check-transition-stopped");
+                                if (isRuntimeEnabled() && !HudPrefs.isUserShutdownActive(context)) {
+                                    selectRemainingTbtRoute(MANUAL_TBT_OWNER,
+                                            "hud-check-stopped-during-writer-change");
+                                }
+                            }
+                            MainActivity.publishSharedUiStateChange();
+                        }, true, true);
+                MainActivity.publishSharedUiStateChange();
+                return;
+            }
             handler.removeCallbacks(hudCheckTick);
             hudCheckState = next;
             checkpointOutput();
             if (next.running) {
-                if (previous.running) publishManualOnWorker(next.toHudState(), reason);
+                if (previous.running) {
+                    if (next.isDenzaOem()) {
+                        tbtPublisher.setHudCheckOutput(next);
+                        hudOutput.configureHudCheckOutput(next, reason);
+                    }
+                    publishManualOnWorker(next.toHudState(), reason);
+                }
                 else startManualOnWorker(next.toHudState(), reason);
-                handler.postDelayed(hudCheckTick, hudCheckIntervalMs(next));
-            } else if (previous.running) {
-                stopManualOnWorker(reason, !HudPrefs.isUserShutdownActive(context));
+                if (!next.isDenzaOem()) {
+                    handler.postDelayed(hudCheckTick, hudCheckIntervalMs(next));
+                }
             }
             MainActivity.publishSharedUiStateChange();
         });
@@ -972,7 +1036,8 @@ final class NavHudLiveSender {
     }
 
     private void tickHudCheck() {
-        if (!hudCheckState.running || !manualTbtActive || !isRuntimeEnabled()) return;
+        if (!hudCheckState.running || hudCheckState.isDenzaOem()
+                || !manualTbtActive || !isRuntimeEnabled()) return;
         HudCheckState previous = hudCheckState;
         hudCheckState = previous.tick();
         if (!hudCheckState.equals(previous)) {
@@ -984,6 +1049,175 @@ final class NavHudLiveSender {
                     latestManualTbtState, "hud-check-hold");
         }
         handler.postDelayed(hudCheckTick, hudCheckIntervalMs(hudCheckState));
+    }
+
+    private void startDenzaOemReplay(String reason) {
+        if (!hudCheckState.running || !hudCheckState.isDenzaOem()
+                || !manualTbtActive || !isRuntimeEnabled()) return;
+        handler.removeCallbacks(denzaOemTick);
+        long generation = ++denzaOemReplayGeneration;
+        ++denzaOemAttemptToken;
+        denzaOemFrameInFlight = false;
+        denzaOemAwaitingRecovery = false;
+        denzaOemRecoveryReady = false;
+        denzaOemPendingWriters = 0;
+        denzaOemFrameIndex = 0;
+        try {
+            if (denzaOemRecording == null) {
+                denzaOemRecording = DenzaOemRecording.load(context);
+            }
+        } catch (IOException error) {
+            denzaOemReplayActive = false;
+            String detail = "Denza OEM recording load failed generation=" + generation
+                    + " exception=" + error.getClass().getName()
+                    + ":" + safeReason(error.getMessage())
+                    + " cause=" + (error.getCause() == null ? "none"
+                    : error.getCause().getClass().getName() + ":"
+                    + safeReason(error.getCause().getMessage()));
+            Log.e(TAG, detail, error);
+            log(detail + " stack=" + Log.getStackTraceString(error));
+            return;
+        }
+        denzaOemReplayActive = true;
+        denzaOemCycleStartNanos = SystemClock.elapsedRealtimeNanos();
+        denzaOemReplayReason = safeReason(reason);
+        log("hud_check oem replay_start generation=" + generation
+                + " frames=" + denzaOemRecording.frames().size()
+                + " durationNs=" + denzaOemRecording.cycleDurationNanos()
+                + " source=" + denzaOemRecording.sourcePath()
+                + " sourceSha256=" + denzaOemRecording.sourceSha256()
+                + " reason=" + denzaOemReplayReason);
+        handler.post(denzaOemTick);
+    }
+
+    private void restartDenzaOemReplay(String reason) {
+        if (!manualTbtActive || !hudCheckState.running || !hudCheckState.isDenzaOem()
+                || !isRuntimeEnabled()) return;
+        if (denzaOemFrameInFlight) {
+            denzaOemAwaitingRecovery = true;
+            denzaOemRecoveryReady = true;
+            log("hud_check oem replay_recovery_ready_deferred reason=" + safeReason(reason)
+                    + " pendingWriters=" + denzaOemPendingWriters);
+            return;
+        }
+        log("hud_check oem replay_restart reason=" + safeReason(reason));
+        startDenzaOemReplay("recovery:" + safeReason(reason));
+    }
+
+    private void stopDenzaOemReplay(String reason) {
+        boolean wasActive = denzaOemReplayActive || denzaOemAwaitingRecovery
+                || denzaOemFrameInFlight;
+        handler.removeCallbacks(denzaOemTick);
+        ++denzaOemReplayGeneration;
+        ++denzaOemAttemptToken;
+        denzaOemReplayActive = false;
+        denzaOemFrameInFlight = false;
+        denzaOemAwaitingRecovery = false;
+        denzaOemRecoveryReady = false;
+        denzaOemPendingWriters = 0;
+        denzaOemFrameIndex = 0;
+        if (wasActive) {
+            log("hud_check oem replay_stop reason=" + safeReason(reason));
+        }
+    }
+
+    private void tickDenzaOemRecording() {
+        if (!denzaOemReplayActive || denzaOemAwaitingRecovery
+                || denzaOemFrameInFlight) return;
+        if (!manualTbtActive || !isRuntimeEnabled()
+                || !hudCheckState.running || !hudCheckState.isDenzaOem()) {
+            stopDenzaOemReplay("selection-or-runtime-ended");
+            return;
+        }
+        List<DenzaOemRecording.Frame> frames = denzaOemRecording.frames();
+        if (denzaOemFrameIndex >= frames.size()) {
+            denzaOemCycleStartNanos += denzaOemRecording.cycleDurationNanos();
+            denzaOemFrameIndex = 0;
+            log("hud_check oem replay_cycle generation=" + denzaOemReplayGeneration
+                    + " anchorElapsedNs=" + denzaOemCycleStartNanos);
+        }
+        DenzaOemRecording.Frame frame = frames.get(denzaOemFrameIndex);
+        long dueNanos = denzaOemCycleStartNanos + frame.offsetNanos;
+        long nowNanos = SystemClock.elapsedRealtimeNanos();
+        long remainingNanos = dueNanos - nowNanos;
+        if (remainingNanos > 0L) {
+            long delayMs = Math.max(1L, (remainingNanos + 999_999L) / 1_000_000L);
+            handler.postDelayed(denzaOemTick, delayMs);
+            return;
+        }
+
+        HudCheckState check = hudCheckState;
+        long replayGeneration = denzaOemReplayGeneration;
+        long attemptToken = ++denzaOemAttemptToken;
+        long latenessNanos = Math.max(0L, nowNanos - dueNanos);
+        denzaOemFrameInFlight = true;
+        denzaOemPendingWriters = check.usesSomeIp() ? 2 : 1;
+        log("hud_check oem replay_frame generation=" + replayGeneration
+                + " sequence=" + frame.sourceSequence
+                + " frameIndex=" + denzaOemFrameIndex
+                + " offsetNs=" + frame.offsetNanos
+                + " dueElapsedNs=" + dueNanos
+                + " latenessNs=" + latenessNanos
+                + " sha256=" + frame.payloadSha256
+                + " writers=" + denzaOemPendingWriters);
+        try {
+            tbtPublisher.publishDenzaOemFrame(MANUAL_TBT_OWNER, manualTbtGeneration,
+                    check, frame, "denza-oem-replay:" + frame.sourceSequence,
+                    () -> handler.post(() -> onDenzaOemWriterComplete(
+                            replayGeneration, attemptToken, false, true)));
+        } catch (RuntimeException error) {
+            String detail = "hud_check oem semantic attempt exception sequence="
+                    + frame.sourceSequence + " offsetNs=" + frame.offsetNanos
+                    + " exception=" + error.getClass().getName() + ":"
+                    + safeReason(error.getMessage());
+            Log.e(TAG, detail, error);
+            log(detail + " stack=" + Log.getStackTraceString(error));
+            handler.post(() -> onDenzaOemWriterComplete(
+                    replayGeneration, attemptToken, false, true));
+        }
+        if (check.usesSomeIp()) {
+            hudOutput.publishDenzaOemRoadInfo(check, frame,
+                    "denza-oem-replay:" + frame.sourceSequence,
+                    success -> handler.post(() -> onDenzaOemWriterComplete(
+                            replayGeneration, attemptToken, true, success)));
+        }
+    }
+
+    private void onDenzaOemWriterComplete(long replayGeneration, long attemptToken,
+            boolean rawSomeIpWriter, boolean success) {
+        if (!denzaOemReplayActive || replayGeneration != denzaOemReplayGeneration
+                || attemptToken != denzaOemAttemptToken || !denzaOemFrameInFlight) return;
+        if (rawSomeIpWriter && !success) {
+            denzaOemAwaitingRecovery = true;
+            denzaOemPendingWriters--;
+            if (denzaOemPendingWriters <= 0) denzaOemFrameInFlight = false;
+            handler.removeCallbacks(denzaOemTick);
+            log("hud_check oem replay_paused generation=" + replayGeneration
+                    + " frameIndex=" + denzaOemFrameIndex
+                    + " pendingWriters=" + denzaOemPendingWriters
+                    + " reason=raw-someip-unavailable; waiting for readiness");
+            if (!denzaOemFrameInFlight && denzaOemRecoveryReady) {
+                restartDenzaOemReplay("deferred-readiness");
+            }
+            return;
+        }
+        denzaOemPendingWriters--;
+        if (denzaOemPendingWriters > 0) return;
+        if (denzaOemAwaitingRecovery) {
+            denzaOemFrameInFlight = false;
+            log("hud_check oem replay_attempts_drained generation=" + replayGeneration
+                    + " frameIndex=" + denzaOemFrameIndex
+                    + " restartReady=" + denzaOemRecoveryReady);
+            if (denzaOemRecoveryReady) restartDenzaOemReplay("deferred-readiness");
+            return;
+        }
+        DenzaOemRecording.Frame completed = denzaOemRecording.frames().get(denzaOemFrameIndex);
+        denzaOemFrameInFlight = false;
+        denzaOemFrameIndex++;
+        log("hud_check oem replay_frame_complete generation=" + replayGeneration
+                + " sequence=" + completed.sourceSequence
+                + " nextFrameIndex=" + denzaOemFrameIndex);
+        handler.post(denzaOemTick);
     }
 
     static long hudCheckIntervalMs(HudCheckState state) {
@@ -1024,6 +1258,11 @@ final class NavHudLiveSender {
 
     private void startManualOnWorker(HudState state, String reason) {
         if (state == null || !isRuntimeEnabled()) return;
+        HudCheckState selectedCheck = state.hudCheck;
+        tbtPublisher.setHudCheckOutput(selectedCheck);
+        if (selectedCheck != null) {
+            hudOutput.configureHudCheckOutput(selectedCheck, reason);
+        }
         if (!manualTbtActive) {
             manualTbtActive = true;
             manualTbtGeneration++;
@@ -1037,9 +1276,19 @@ final class NavHudLiveSender {
                     + " reason=" + safeReason(reason));
             logRouteStartOutputPreferences("manual", generation, reason);
         }
+        if (selectedCheck != null && selectedCheck.isDenzaOem()) {
+            latestManualSourceState = state.copy();
+            latestManualTbtState = effectiveManualState(state);
+            hudOutput.setManualEnabled(true, "manual-start:" + safeReason(reason));
+            hudOutput.ensureBound("manual-start");
+            if (!denzaOemReplayActive) startDenzaOemReplay("manual-start:" + safeReason(reason));
+            return;
+        }
         publishManualOnWorker(state, reason);
         hudOutput.setManualEnabled(true, "manual-start:" + safeReason(reason));
-        hudOutput.ensureBound("manual-start");
+        if (selectedCheck == null || selectedCheck.usesSomeIp()) {
+            hudOutput.ensureBound("manual-start");
+        }
     }
 
     private void publishManualOnWorker(HudState state, String reason) {
@@ -1050,6 +1299,13 @@ final class NavHudLiveSender {
         }
         latestManualSourceState = state.copy();
         latestManualTbtState = effectiveManualState(state);
+        if (state.hudCheck != null && state.hudCheck.isDenzaOem()) {
+            // A same-writer Basic/Extended update changes the semantic companions only.
+            // The captured stream keeps its original cycle anchor and frame index.
+            tbtPublisher.setHudCheckOutput(state.hudCheck);
+            hudOutput.configureHudCheckOutput(state.hudCheck, reason);
+            return;
+        }
         tbtPublisher.publishManualFrame(
                 MANUAL_TBT_OWNER, manualTbtGeneration,
                 latestManualTbtState, "manual-frame:" + safeReason(reason));
@@ -1093,8 +1349,14 @@ final class NavHudLiveSender {
     }
 
     private void stopManualOnWorker(String reason, boolean restoreDirect, Runnable completion) {
+        stopManualOnWorker(reason, restoreDirect, completion, false, false);
+    }
+
+    private void stopManualOnWorker(String reason, boolean restoreDirect, Runnable completion,
+            boolean writerChange, boolean preserveHudCheckSelection) {
         handler.removeCallbacks(hudCheckTick);
-        if (hudCheckState.running) {
+        stopDenzaOemReplay("manual-stop:" + safeReason(reason));
+        if (hudCheckState.running && !preserveHudCheckSelection) {
             hudCheckState = hudCheckState.stop();
             MainActivity.publishSharedUiStateChange();
         }
@@ -1104,8 +1366,25 @@ final class NavHudLiveSender {
         }
         checkpointOutput();
         if (!manualTbtActive) {
-            hudOutput.stopManualOutput("manual-stop:" + safeReason(reason),
-                    () -> handler.post(() -> checkpointOutput(completion)));
+            Runnable stopped = () -> handler.post(() -> {
+                Runnable finished = () -> handler.post(() -> {
+                    clearManualHudCheckSelection(manualTbtGeneration,
+                            "manual-stop:" + safeReason(reason));
+                    checkpointOutput(completion);
+                });
+                if (writerChange && tbtPublisher.isRouteActive()) {
+                    tbtPublisher.endManualRoute(tbtPublisher.ownerPackage(),
+                            tbtPublisher.ownerGeneration(), "hud-check-start-retirement",
+                            () -> handler.post(() -> tbtPublisher.sendTeardownStatus(finished)));
+                } else {
+                    finished.run();
+                }
+            });
+            if (writerChange) {
+                hudOutput.stopManualOutputForWriterChange("manual-stop:" + safeReason(reason), stopped);
+            } else {
+                hudOutput.stopManualOutput("manual-stop:" + safeReason(reason), stopped);
+            }
             return;
         }
         long generation = manualTbtGeneration;
@@ -1113,24 +1392,74 @@ final class NavHudLiveSender {
         latestManualSourceState = null;
         latestManualTbtState = null;
         ++tbtLifecycleToken;
-        hudOutput.stopManualOutput("manual-stop:" + safeReason(reason),
+        Runnable stopped =
                 () -> handler.post(() -> {
                     if (generation == manualTbtGeneration && !manualTbtActive
                             && MANUAL_TBT_OWNER.equals(tbtPublisher.ownerPackage())
                             && generation == tbtPublisher.ownerGeneration()) {
                         tbtPublisher.endManualRoute(MANUAL_TBT_OWNER, generation,
-                                "manual-stop:" + safeReason(reason));
-                        if (restoreDirect) {
-                            selectRemainingTbtRoute(MANUAL_TBT_OWNER,
-                                    "manual-stop:" + safeReason(reason));
-                        }
-                        if (!tbtPublisher.isRouteActive()) tbtPublisher.sendTeardownStatus();
-                        log("manual tbt stop generation=" + generation
-                                + " restored=" + tbtPublisher.ownerPackage()
-                                + " reason=" + safeReason(reason));
+                                "manual-stop:" + safeReason(reason),
+                                () -> handler.post(() -> finishManualRouteStop(
+                                        generation, reason, restoreDirect, completion)));
+                        return;
                     }
+                    clearManualHudCheckSelection(generation,
+                            "manual-stop:" + safeReason(reason));
                     checkpointOutput(completion);
-                }));
+                });
+        if (writerChange) {
+            hudOutput.stopManualOutputForWriterChange("manual-stop:" + safeReason(reason), stopped);
+        } else {
+            hudOutput.stopManualOutput("manual-stop:" + safeReason(reason), stopped);
+        }
+    }
+
+    private void finishManualRouteStop(long generation, String reason,
+            boolean restoreDirect, Runnable completion) {
+        if (generation != manualTbtGeneration || manualTbtActive) {
+            checkpointOutput(completion);
+            return;
+        }
+        String stopReason = "manual-stop:" + safeReason(reason);
+        if (restoreDirect) {
+            Runnable restoreRemaining = () -> {
+                if (generation != manualTbtGeneration || manualTbtActive) return;
+                clearManualHudCheckSelection(generation, stopReason);
+                selectRemainingTbtRoute(MANUAL_TBT_OWNER, stopReason);
+                log("manual tbt stop generation=" + generation
+                        + " restored=" + tbtPublisher.ownerPackage()
+                        + " reason=" + safeReason(reason));
+                checkpointOutput(completion);
+            };
+            if (!tbtPublisher.isRouteActive()) {
+                tbtPublisher.sendTeardownStatus(() -> handler.post(restoreRemaining));
+            } else {
+                restoreRemaining.run();
+            }
+            return;
+        }
+        if (!tbtPublisher.isRouteActive()) {
+            tbtPublisher.sendTeardownStatus(() -> handler.post(() -> {
+                clearManualHudCheckSelection(generation, stopReason);
+                log("manual tbt stop generation=" + generation
+                        + " restored=" + tbtPublisher.ownerPackage()
+                        + " reason=" + safeReason(reason));
+                checkpointOutput(completion);
+            }));
+            return;
+        }
+        clearManualHudCheckSelection(generation, stopReason);
+        log("manual tbt stop generation=" + generation
+                + " restored=" + tbtPublisher.ownerPackage()
+                + " reason=" + safeReason(reason));
+        checkpointOutput(completion);
+    }
+
+    private void clearManualHudCheckSelection(long generation, String reason) {
+        if (generation != manualTbtGeneration || manualTbtActive
+                || MANUAL_TBT_OWNER.equals(tbtPublisher.ownerPackage())) return;
+        tbtPublisher.setHudCheckOutput(null);
+        hudOutput.configureHudCheckOutput(null, reason);
     }
 
     private HudState effectiveManualState(HudState state) {
@@ -1159,6 +1488,20 @@ final class NavHudLiveSender {
     private boolean manualTbtActive;
     private volatile HudCheckState hudCheckState = IDLE_HUD_CHECK;
     private final Runnable hudCheckTick = this::tickHudCheck;
+    private final Runnable denzaOemTick = this::tickDenzaOemRecording;
+    private DenzaOemRecording denzaOemRecording;
+    private boolean denzaOemReplayActive;
+    private boolean denzaOemFrameInFlight;
+    private boolean denzaOemAwaitingRecovery;
+    private boolean denzaOemRecoveryReady;
+    private long denzaOemReplayGeneration;
+    private long denzaOemCycleStartNanos;
+    private long denzaOemAttemptToken;
+    private int denzaOemFrameIndex;
+    private int denzaOemPendingWriters;
+    private String denzaOemReplayReason = "";
+    private boolean hudCheckWriterTransitionPending;
+    private long hudCheckWriterTransitionGeneration;
     private volatile HudMapLiveState mapLiveState = HudMapLiveState.STOPPED;
     private volatile HudMapProfileCalibrationState mapProfileCalibrationState =
             HudMapProfileCalibrationState.STOPPED;
@@ -1538,6 +1881,10 @@ final class NavHudLiveSender {
         this.handler = new Handler(stateThread.getLooper());
         this.hudOutput = HudOutputCoordinator.get(context);
         this.tbtPublisher = new VehicleTbtPublisher(context, handler);
+        this.tbtPublisher.setHudCheckRecoveryListener(() -> handler.post(
+                () -> restartDenzaOemReplay("instrument-proxy-ready")));
+        this.hudOutput.setDenzaOemRecoveryListener(() -> handler.post(
+                () -> restartDenzaOemReplay("someip-recovered")));
         this.wazeDirectChannel = new WazeDirectChannel(context,
                 new WazeDirectChannel.Listener() {
                     @Override

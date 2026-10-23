@@ -2757,16 +2757,34 @@ public final class MainActivity extends ComponentActivity {
                 current -> current.step(field, delta), "hud-check-step");
     }
 
-    public void composeHudCheckSelectBasicFormat(HudCheckState.Format format) {
+    public void composeHudCheckSelectFormat(HudCheckState.Format format) {
         if (!activityResumed || destroyed || exitRequested || ShanghaiTestController.snapshot().isBusy()) return;
         NavHudLiveSender.get(this).updateHudCheck(
-                current -> current.selectBasicFormat(format), "hud-check-format");
+                current -> current.selectFormat(format), "hud-check-format");
     }
 
     public void composeHudCheckSelectCodeTable(HudCheckState.CodeTable table) {
         if (!activityResumed || destroyed || exitRequested || ShanghaiTestController.snapshot().isBusy()) return;
         NavHudLiveSender.get(this).updateHudCheck(
                 current -> current.selectCodeTable(table), "hud-check-code-table");
+    }
+
+    public void composeHudCheckSelectChannel(HudCheckState.Channel channel) {
+        if (!activityResumed || destroyed || exitRequested || ShanghaiTestController.snapshot().isBusy()) return;
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.selectChannel(channel), "hud-check-channel");
+    }
+
+    public void composeHudCheckSelectAddSomeIp(boolean enabled) {
+        if (!activityResumed || destroyed || exitRequested || ShanghaiTestController.snapshot().isBusy()) return;
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.selectAddSomeIp(enabled), "hud-check-add-someip");
+    }
+
+    public void composeHudCheckSetDenzaOem(boolean enabled) {
+        if (!activityResumed || destroyed || exitRequested || ShanghaiTestController.snapshot().isBusy()) return;
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.selectDenzaOem(enabled), "hud-check-denza-oem");
     }
 
     public void composeHudCheckToggleRunning() {

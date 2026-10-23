@@ -429,7 +429,9 @@ public class NativeRoadInfoTest {
             }
             HudCheckState extended = basic.selectMode(HudCheckState.Mode.EXTENDED);
             assertEquals(basic, extended.selectMode(HudCheckState.Mode.BASIC));
-            assertSame(extended, extended.selectBasicFormat(HudCheckState.Format.A));
+            assertEquals(basic.selectBasicFormat(HudCheckState.Format.A)
+                    .selectMode(HudCheckState.Mode.EXTENDED),
+                    extended.selectBasicFormat(HudCheckState.Format.A));
             assertEquals(extended, HudCheckState.restore(extended.checkpoint()));
         }
         for (boolean oldFormat : new boolean[]{false, true}) {
@@ -515,10 +517,12 @@ public class NativeRoadInfoTest {
                 assertNull(diagnostics.changed(selected, "roadinfo", 0, "selection"));
                 HudCheckState extended = selected.selectMode(HudCheckState.Mode.EXTENDED);
                 HudCheckState extendedOriginal = original.selectMode(HudCheckState.Mode.EXTENDED);
-                assertArrayEquals(HudCheckPayload.prepareLive(extendedOriginal, empty, empty).build(0),
-                        HudCheckPayload.prepareLive(extended, empty, empty).build(0));
-                assertTrue(HudOutputCoordinator.sameHudCheckPayload(extendedOriginal, extended));
-                assertEquals(HudCheckDiagnostics.sampleKey(extendedOriginal), HudCheckDiagnostics.sampleKey(extended));
+                Map<Integer, Object> expectedExtended = new HashMap<>(expected);
+                expectedExtended.put(26, "12:34".getBytes(StandardCharsets.UTF_8));
+                assertFieldsEqual(expectedExtended,
+                        road(HudCheckPayload.prepareLive(extended, empty, empty).build(0)));
+                assertEquals(mask == 0,
+                        HudOutputCoordinator.sameHudCheckPayload(extendedOriginal, extended));
             }
         }
     }
@@ -656,8 +660,6 @@ public class NativeRoadInfoTest {
                     byte[] lanes = laneBitmap ? image : new byte[0];
                     byte[] maneuver = bitmap ? image : new byte[0];
                     Map<Integer, Object> baseline = road(HudCheckPayload.prepareLive(basic, lanes, maneuver).build(0));
-                    // The mandatory arrival-time sample belongs only to Basic.
-                    baseline.put(26, (format == HudCheckState.Format.D ? "12 км" : "").getBytes(StandardCharsets.UTF_8));
                     HudCheckState extended = basic.selectMode(HudCheckState.Mode.EXTENDED);
                     for (int index = 0; index < HudCheckState.extendedCount(); index++) {
                         HudCheckState sample = extended.stepExtended(index);

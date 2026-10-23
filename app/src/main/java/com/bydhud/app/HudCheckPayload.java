@@ -145,17 +145,16 @@ public final class HudCheckPayload {
         ByteArrayOutputStream baseline = new ByteArrayOutputStream();
         if (state.format != HudCheckState.Format.D) writeExtendedNeutralFields(baseline, "");
         ByteArrayOutputStream overrides = new ByteArrayOutputStream();
+        if (state.streetTestDestination) {
+            writeStringField(overrides, 25, STREET_TEST_DESTINATION);
+        }
+        writeStringField(overrides, 26, STREET_TEST_ARRIVAL_TIME);
+        if (state.streetTestGuidePoint) {
+            writeStringField(overrides, 31, STREET_TEST_GUIDE_POINT);
+        }
+        if (state.streetTestRoadClass) writeVarintField(overrides, 6, 7);
         if (state.mode == HudCheckState.Mode.EXTENDED) {
             writeExtendedFields(overrides, state.extendedIndex);
-        } else {
-            if (state.streetTestDestination) {
-                writeStringField(overrides, 25, STREET_TEST_DESTINATION);
-            }
-            writeStringField(overrides, 26, STREET_TEST_ARRIVAL_TIME);
-            if (state.streetTestGuidePoint) {
-                writeStringField(overrides, 31, STREET_TEST_GUIDE_POINT);
-            }
-            if (state.streetTestRoadClass) writeVarintField(overrides, 6, 7);
         }
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepareHudCheck(frame, options,
                 state.format, state.liveNativeManeuver(), state.effectiveLaneCodes(),
@@ -163,7 +162,7 @@ public final class HudCheckPayload {
         String geometry = geometryDiagnostics(frame, state);
         DirectTbtPayload.Prepared withBaseline = prepared.withHudCheckBaseline(
                 baseline.toByteArray(), overrides.toByteArray(), geometry);
-        return state.mode == HudCheckState.Mode.BASIC && state.streetTestMapState
+        return state.streetTestMapState
                 ? withBaseline.withFixedCounter(2) : withBaseline;
     }
 
@@ -200,7 +199,8 @@ public final class HudCheckPayload {
     /** Returns auxiliary events for the current extended case; Basic has none. */
     public static List<Packet> auxiliaryPackets(Context context, HudCheckState source) {
         HudCheckState state = source == null ? new HudCheckState() : source;
-        if (state.mode != HudCheckState.Mode.EXTENDED) return Collections.emptyList();
+        if (state.mode != HudCheckState.Mode.EXTENDED || !state.usesSomeIp()
+                || state.isDenzaOem()) return Collections.emptyList();
         if (context != null) HudGraphicPayload.setContext(context);
         List<Packet> result = new ArrayList<>();
         switch (state.extendedIndex) {

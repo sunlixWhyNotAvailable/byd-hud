@@ -15,6 +15,8 @@ public final class HudCheckState {
 
     public enum CodeTable { BYD, AMAP, HUAWEI }
 
+    public enum Channel { BASIC, SOMEIP, INSTRUMENT, CLUSTER_DEBUG, AMAP }
+
     private static final int LEGACY_GEOMETRY_FIRST_INDEX = HudCheckGeometry.FIRST_EXTENDED_INDEX;
     private static final int LEGACY_GEOMETRY_END_INDEX = HudCheckLiveScenario.FIRST_EXTENDED_INDEX;
     private static final String EXTENDED_BASELINE_LANES = "S* | S | S* | S | S*";
@@ -121,10 +123,14 @@ public final class HudCheckState {
     public final int extendedIndex;
     public final Format format;
     public final CodeTable codeTable;
+    public final Channel channel;
+    public final boolean addSomeIp;
+    public final boolean denzaOem;
 
     public HudCheckState() {
         this(Mode.BASIC, false, true, 0, 0, 0, 0, 0, false, false, false, 0,
-                Format.NO_PNG, CodeTable.BYD, false, false, false, false);
+                Format.NO_PNG, CodeTable.BYD, false, false, false, false,
+                Channel.BASIC, false, false);
     }
 
     private HudCheckState(Mode mode, boolean running, boolean automatic,
@@ -134,7 +140,8 @@ public final class HudCheckState {
                           boolean transliterate, int extendedIndex, Format format,
                           CodeTable codeTable, boolean streetTestDestination,
                           boolean streetTestGuidePoint, boolean streetTestMapState,
-                          boolean streetTestRoadClass) {
+                          boolean streetTestRoadClass, Channel channel,
+                          boolean addSomeIp, boolean denzaOem) {
         this.mode = mode == null ? Mode.BASIC : mode;
         this.running = running;
         this.automatic = automatic;
@@ -153,6 +160,9 @@ public final class HudCheckState {
         this.extendedIndex = wrap(extendedIndex, extendedCount());
         this.format = format == null ? Format.NO_PNG : format;
         this.codeTable = codeTable == null ? CodeTable.BYD : codeTable;
+        this.channel = channel == null ? Channel.BASIC : channel;
+        this.addSomeIp = addSomeIp;
+        this.denzaOem = denzaOem;
     }
 
     public HudCheckState selectMode(Mode value) {
@@ -163,31 +173,89 @@ public final class HudCheckState {
                         distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
                         laneBitmap, transliterate, extendedIndex, format, codeTable,
                         streetTestDestination, streetTestGuidePoint, streetTestMapState,
-                        streetTestRoadClass);
+                        streetTestRoadClass, channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState selectBasicFormat(Format value) {
+        return selectFormat(value);
+    }
+
+    public HudCheckState selectFormat(Format value) {
         Format selected = value == null ? Format.NO_PNG : value;
-        if (mode != Mode.BASIC || format == selected) return this;
+        if (!isLiveCheck() || isDenzaOem() || format == selected) return this;
         return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
                 laneBitmap, transliterate, extendedIndex, selected, codeTable,
                 streetTestDestination, streetTestGuidePoint, streetTestMapState,
-                streetTestRoadClass);
+                streetTestRoadClass, channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState selectCodeTable(CodeTable value) {
         CodeTable selected = value == null ? CodeTable.BYD : value;
-        if (mode != Mode.BASIC || codeTable == selected) return this;
+        if (!isLiveCheck() || isDenzaOem() || codeTable == selected) return this;
         return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
                 laneBitmap, transliterate, extendedIndex, format, selected,
                 streetTestDestination, streetTestGuidePoint, streetTestMapState,
-                streetTestRoadClass);
+                streetTestRoadClass, channel, addSomeIp, denzaOem);
+    }
+
+    public HudCheckState selectChannel(Channel value) {
+        Channel selected = value == null ? Channel.BASIC : value;
+        if (!isLiveCheck() || channel == selected) return this;
+        return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
+                distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
+                laneBitmap, transliterate, extendedIndex, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass, selected, addSomeIp, denzaOem);
+    }
+
+    public HudCheckState selectAddSomeIp(boolean value) {
+        if (!isLiveCheck() || addSomeIp == value) return this;
+        return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
+                distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
+                laneBitmap, transliterate, extendedIndex, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass, channel, value, denzaOem);
+    }
+
+    public HudCheckState selectDenzaOem(boolean value) {
+        if (!isLiveCheck() || denzaOem == value) return this;
+        return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
+                distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
+                laneBitmap, transliterate, extendedIndex, format, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass, channel, addSomeIp, value);
     }
 
     public CodeTable effectiveCodeTable() {
         return codeTable;
+    }
+
+    public boolean effectiveAddSomeIp() {
+        return isLiveCheck() && addSomeIp
+                && channel != Channel.BASIC && channel != Channel.SOMEIP;
+    }
+
+    public boolean usesSomeIp() {
+        if (!isLiveCheck()) return false;
+        return channel == Channel.BASIC || channel == Channel.SOMEIP || effectiveAddSomeIp();
+    }
+
+    public boolean usesInstrument() {
+        return isLiveCheck() && (channel == Channel.BASIC || channel == Channel.INSTRUMENT);
+    }
+
+    public boolean usesClusterDebug() {
+        return isLiveCheck() && channel == Channel.CLUSTER_DEBUG;
+    }
+
+    public boolean usesAmap() {
+        return isLiveCheck() && (channel == Channel.BASIC || channel == Channel.AMAP);
+    }
+
+    public boolean isDenzaOem() {
+        return mode != Mode.SHANGHAI && denzaOem;
     }
 
     public boolean effectiveManeuverBitmap() {
@@ -221,6 +289,8 @@ public final class HudCheckState {
                 .put("streetTestMapState", streetTestMapState)
                 .put("streetTestRoadClass", streetTestRoadClass)
                 .put("format", format.name()).put("codeTable", codeTable.name())
+                .put("channel", channel.name()).put("addSomeIp", addSomeIp)
+                .put("denzaOem", denzaOem)
                 .put("extendedCount", extendedCount());
     }
 
@@ -232,6 +302,7 @@ public final class HudCheckState {
         }
         Format format = Format.NO_PNG;
         CodeTable codeTable = CodeTable.BYD;
+        Channel channel = Channel.BASIC;
         try {
             format = Format.valueOf(state.optString("format", Format.NO_PNG.name()));
         } catch (IllegalArgumentException ignored) {
@@ -242,6 +313,11 @@ public final class HudCheckState {
         } catch (IllegalArgumentException ignored) {
             // Keep older or unknown profiles on the established BYD mapping.
         }
+        try {
+            channel = Channel.valueOf(state.optString("channel", Channel.BASIC.name()));
+        } catch (IllegalArgumentException ignored) {
+            // Keep older or unknown checkpoints on the ordinary Basic pipeline.
+        }
         return new HudCheckState(Mode.valueOf(state.optString("mode", "BASIC")),
                 state.optBoolean("running"), state.optBoolean("automatic", true),
                 state.optInt("maneuver"), state.optInt("lane"), state.optInt("distance"),
@@ -249,7 +325,8 @@ public final class HudCheckState {
                 state.optBoolean("laneBitmap"), state.optBoolean("transliterate"), extended,
                 format, codeTable, state.optBoolean("streetTestDestination"),
                 state.optBoolean("streetTestGuidePoint"), state.optBoolean("streetTestMapState"),
-                state.optBoolean("streetTestRoadClass"));
+                state.optBoolean("streetTestRoadClass"), channel,
+                state.optBoolean("addSomeIp"), state.optBoolean("denzaOem"));
     }
 
     public HudCheckState toggleRun() {
@@ -257,18 +334,20 @@ public final class HudCheckState {
         return new HudCheckState(mode, !running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap,
                 transliterate, extendedIndex, format, codeTable, streetTestDestination,
-                streetTestGuidePoint, streetTestMapState, streetTestRoadClass);
+                streetTestGuidePoint, streetTestMapState, streetTestRoadClass,
+                channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState stop() {
         return running ? new HudCheckState(mode, false, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap,
                 transliterate, extendedIndex, format, codeTable, streetTestDestination,
-                streetTestGuidePoint, streetTestMapState, streetTestRoadClass) : this;
+                streetTestGuidePoint, streetTestMapState, streetTestRoadClass,
+                channel, addSomeIp, denzaOem) : this;
     }
 
     public HudCheckState step(Field field, int delta) {
-        if (field == null || delta == 0) return this;
+        if (field == null || delta == 0 || isDenzaOem()) return this;
         switch (field) {
             case MANEUVER:
                 return replace(maneuverIndex + delta, laneIndex, distanceIndex, streetIndex,
@@ -291,13 +370,13 @@ public final class HudCheckState {
     }
 
     public HudCheckState stepExtended(int delta) {
-        return mode == Mode.EXTENDED && !automatic && delta != 0
+        return mode == Mode.EXTENDED && !automatic && !isDenzaOem() && delta != 0
                 ? replace(maneuverIndex, laneIndex, distanceIndex, streetIndex,
                         trafficLightIndex, extendedIndex + delta) : this;
     }
 
     public HudCheckState tick() {
-        return running && automatic && mode == Mode.EXTENDED
+        return running && automatic && mode == Mode.EXTENDED && !isDenzaOem()
                 ? replace(maneuverIndex, laneIndex, distanceIndex, streetIndex,
                         trafficLightIndex, extendedIndex + 1) : this;
     }
@@ -307,7 +386,7 @@ public final class HudCheckState {
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
                 maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
                 streetTestDestination, streetTestGuidePoint, streetTestMapState,
-                streetTestRoadClass);
+                streetTestRoadClass, channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState withManeuverBitmap(boolean value) {
@@ -316,7 +395,7 @@ public final class HudCheckState {
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
                 value, laneBitmap, transliterate, extendedIndex, format, codeTable,
                 streetTestDestination, streetTestGuidePoint, streetTestMapState,
-                streetTestRoadClass);
+                streetTestRoadClass, channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState withLaneBitmap(boolean value) {
@@ -325,7 +404,7 @@ public final class HudCheckState {
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
                 maneuverBitmap, value, transliterate, extendedIndex, format, codeTable,
                 streetTestDestination, streetTestGuidePoint, streetTestMapState,
-                streetTestRoadClass);
+                streetTestRoadClass, channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState withTransliterate(boolean value) {
@@ -333,35 +412,39 @@ public final class HudCheckState {
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
                 maneuverBitmap, laneBitmap, value, extendedIndex, format, codeTable,
                 streetTestDestination, streetTestGuidePoint, streetTestMapState,
-                streetTestRoadClass);
+                streetTestRoadClass, channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState withStreetTestDestination(boolean value) {
         return streetTestDestination == value ? this : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
                 maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
-                value, streetTestGuidePoint, streetTestMapState, streetTestRoadClass);
+                value, streetTestGuidePoint, streetTestMapState, streetTestRoadClass,
+                channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState withStreetTestGuidePoint(boolean value) {
         return streetTestGuidePoint == value ? this : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
                 maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
-                streetTestDestination, value, streetTestMapState, streetTestRoadClass);
+                streetTestDestination, value, streetTestMapState, streetTestRoadClass,
+                channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState withStreetTestMapState(boolean value) {
         return streetTestMapState == value ? this : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
                 maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
-                streetTestDestination, streetTestGuidePoint, value, streetTestRoadClass);
+                streetTestDestination, streetTestGuidePoint, value, streetTestRoadClass,
+                channel, addSomeIp, denzaOem);
     }
 
     public HudCheckState withStreetTestRoadClass(boolean value) {
         return streetTestRoadClass == value ? this : new HudCheckState(mode, running, automatic,
                 maneuverIndex, laneIndex, distanceIndex, streetIndex, trafficLightIndex,
                 maneuverBitmap, laneBitmap, transliterate, extendedIndex, format, codeTable,
-                streetTestDestination, streetTestGuidePoint, streetTestMapState, value);
+                streetTestDestination, streetTestGuidePoint, streetTestMapState, value,
+                channel, addSomeIp, denzaOem);
     }
 
     public String maneuverLabel(boolean ukrainian) {
@@ -538,7 +621,8 @@ public final class HudCheckState {
                                   int trafficLight, int extended) {
         return new HudCheckState(mode, running, automatic, maneuver, lanes, distance, street,
                 trafficLight, maneuverBitmap, laneBitmap, transliterate, extended, format, codeTable,
-                streetTestDestination, streetTestGuidePoint, streetTestMapState, streetTestRoadClass);
+                streetTestDestination, streetTestGuidePoint, streetTestMapState, streetTestRoadClass,
+                channel, addSomeIp, denzaOem);
     }
 
     private int nextLaneIndex(int current, int delta) {
@@ -621,7 +705,8 @@ public final class HudCheckState {
                 && streetTestGuidePoint == that.streetTestGuidePoint
                 && streetTestMapState == that.streetTestMapState
                 && streetTestRoadClass == that.streetTestRoadClass
-                && mode == that.mode && format == that.format && codeTable == that.codeTable;
+                && mode == that.mode && format == that.format && codeTable == that.codeTable
+                && channel == that.channel && addSomeIp == that.addSomeIp && denzaOem == that.denzaOem;
     }
 
     @Override
@@ -629,7 +714,8 @@ public final class HudCheckState {
         return Objects.hash(mode, running, automatic, maneuverIndex, laneIndex, distanceIndex,
                 streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap, transliterate,
                 streetTestDestination, streetTestGuidePoint, streetTestMapState,
-                streetTestRoadClass, extendedIndex, format, codeTable);
+                streetTestRoadClass, extendedIndex, format, codeTable,
+                channel, addSomeIp, denzaOem);
     }
 
     private static class Label {

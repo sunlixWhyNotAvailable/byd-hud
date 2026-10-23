@@ -103,6 +103,7 @@ final class UserSettingsDiagnostics {
         output.put("effectiveMapImageProfiles", resolvedProfiles);
         UpdateHintAppearance hint = UpdateHintAppearance.Companion.read(context);
         return new JSONObject().put("output", output)
+                .put("hudCheck", NavHudLiveSender.hudCheckSnapshot().checkpoint())
                 .put("ui", new JSONObject().put("language", HudPrefs.uiLanguage(context))
                         .put("darkTheme", HudPrefs.isDarkTheme(context)))
                 .put("logging", new JSONObject().put("storageLimitGb", HudPrefs.storageLimitGb(context))

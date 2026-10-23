@@ -15,6 +15,8 @@ import androidx.core.content.ContextCompat;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -85,6 +87,7 @@ final class InstrumentProxyManager {
     private long guidanceBarrierToken;
     private int terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
     private boolean terminalClearIncludeNavigationFields = true;
+    private boolean terminalClearClusterDebug;
     private long terminalClearOutputGeneration;
     private final List<ResultCallback> terminalClearCallbacks = new ArrayList<>();
     private PendingTerminalGuidanceClear deferredTerminalClear;
@@ -149,6 +152,7 @@ final class InstrumentProxyManager {
     private boolean trafficLightCapable;
     private boolean nativeSpeedCapable;
     private boolean navigationOutputReady;
+    private boolean clusterDebugOutputReady;
     private boolean shanghaiSuspended;
     private boolean shanghaiHelperAcknowledged;
 
@@ -309,6 +313,7 @@ final class InstrumentProxyManager {
                     .put("capabilityMode", current.capabilityMode.name())
                     .put("shellRuntimeReady", current.state == State.READY && current.proxy != null)
                     .put("navigationOutputReady", current.navigationOutputReady)
+                    .put("clusterDebugOutputReady", current.clusterDebugOutputReady)
                     .put("directFidCapable", current.directFidCapable)
                     .put("trafficLightCapable", current.trafficLightCapable)
                     .put("nativeSpeedCapable", current.nativeSpeedCapable)
@@ -354,6 +359,7 @@ final class InstrumentProxyManager {
         boolean cancelledStart = false;
         synchronized (lock) {
             shanghaiSuspended = true;
+            clusterDebugOutputReady = false;
             outputRetry.cancel();
             if (state == State.READY && proxy != null && proxyBinder != null
                     && proxyBinder.isBinderAlive()) {
@@ -415,9 +421,10 @@ final class InstrumentProxyManager {
         }
         boolean failed = false;
         boolean resumed = false;
-        boolean readyPublished = false;
+        boolean navigationReadyPublished = false;
+        boolean clusterDebugReadyPublished = false;
         try {
-            if (current != null && navigationCapable) {
+            if (current != null) {
                 final IInstrumentNavigationProxy active = current;
                 final long activeGeneration = currentGeneration;
                 Bundle result = runShanghaiTransition(
@@ -438,13 +445,17 @@ final class InstrumentProxyManager {
                 if (resumed && state == State.READY && proxy == current
                         && generation == currentGeneration && proxyBinder != null
                         && proxyBinder.isBinderAlive()) {
-                    navigationOutputReady = true;
-                    readyPublished = true;
+                    clusterDebugOutputReady = true;
+                    clusterDebugReadyPublished = true;
+                    if (navigationCapable) {
+                        navigationOutputReady = true;
+                        navigationReadyPublished = true;
+                    }
                     lock.notifyAll();
                 }
                 restart = runtimeActive && outputRetry.isActive();
             }
-            if (readyPublished) notifyReadyListeners();
+            if (navigationReadyPublished || clusterDebugReadyPublished) notifyReadyListeners();
             if (restart) ensureStarted(failed
                     ? "shanghai-resume-recovery" : "shanghai-resumed");
         }
@@ -554,7 +565,8 @@ final class InstrumentProxyManager {
         readyListeners.addIfAbsent(listener);
         boolean ready;
         synchronized (lock) {
-            ready = state == State.READY && proxy != null && navigationOutputReady;
+            ready = state == State.READY && proxy != null
+                    && (navigationOutputReady || clusterDebugOutputReady);
         }
         if (ready) listener.run();
     }
@@ -685,6 +697,19 @@ final class InstrumentProxyManager {
                         : staleNavigationOutputResult());
     }
 
+    void sendClusterDebugStatus(int status, ResultCallback callback) {
+        if (!InstrumentProxyContract.validStatus(status)) {
+            deliver(callback, Result.unavailable("invalid navigation status"));
+            return;
+        }
+        long outputGeneration = navigationOutputGenerationSnapshot();
+        submitCall("clusterdebug_status", callback,
+                (current, currentGeneration) -> isNavigationOutputGenerationCurrent(
+                        outputGeneration)
+                        ? current.sendClusterDebugStatus(currentGeneration, status)
+                        : staleNavigationOutputResult());
+    }
+
     void sendNativeEta(int[] values, AtomicLong admissionRevision,
             long expectedAdmissionRevision, ResultCallback callback) {
         if (!NativeEtaTransportPolicy.validInstrumentValues(values)) {
@@ -729,6 +754,25 @@ final class InstrumentProxyManager {
     void sendGuidance(int compatibilityProfile, int icon, int distanceMeters, String road,
             int[] laneDirections, int[] laneRecommendations,
             boolean includeNavigationFields, ResultCallback callback) {
+        queueGuidance(compatibilityProfile, icon, distanceMeters, road,
+                laneDirections, laneRecommendations, includeNavigationFields,
+                false, callback);
+    }
+
+    void sendClusterDebugGuidance(int icon, int distanceMeters, String road,
+            ResultCallback callback) {
+        if (!ClusterDebugPayload.validGuidance(icon, distanceMeters, road)) {
+            deliver(callback, Result.unavailable("invalid or oversized ClusterDebug guidance"));
+            return;
+        }
+        queueGuidance(ManeuverCompatibilityProfile.AMAP, icon, distanceMeters, road,
+                new int[0], new int[0], true, true, callback);
+    }
+
+    private void queueGuidance(int compatibilityProfile, int icon, int distanceMeters,
+            String road, int[] laneDirections, int[] laneRecommendations,
+            boolean includeNavigationFields, boolean clusterDebug,
+            ResultCallback callback) {
         if (!InstrumentProxyContract.validGuidance(compatibilityProfile,
                 icon, distanceMeters, road, laneDirections, laneRecommendations)) {
             deliver(callback, Result.unavailable("invalid guidance frame"));
@@ -743,7 +787,7 @@ final class InstrumentProxyManager {
             PendingGuidance next = new PendingGuidance(
                     compatibilityProfile, icon, distanceMeters, preserveText(road),
                     laneDirections, laneRecommendations, includeNavigationFields,
-                    outputGeneration, callback);
+                    clusterDebug, outputGeneration, callback);
             deferredPath = guidanceBarrierActive;
             if (deferredPath) {
                 superseded = deferredGuidance;
@@ -931,7 +975,20 @@ final class InstrumentProxyManager {
 
     void sendTerminalGuidanceClear(int compatibilityProfile,
             boolean includeNavigationFields, ResultCallback callback) {
-        if (!InstrumentProxyContract.validCompatibilityProfile(compatibilityProfile)) {
+        enqueueTerminalGuidanceClear(compatibilityProfile, includeNavigationFields,
+                false, callback);
+    }
+
+    void sendClusterDebugTerminalGuidanceClear(ResultCallback callback) {
+        enqueueTerminalGuidanceClear(ManeuverCompatibilityProfile.AMAP,
+                true, true, callback);
+    }
+
+    private void enqueueTerminalGuidanceClear(int compatibilityProfile,
+            boolean includeNavigationFields, boolean clusterDebug,
+            ResultCallback callback) {
+        if (!clusterDebug
+                && !InstrumentProxyContract.validCompatibilityProfile(compatibilityProfile)) {
             deliver(callback, Result.unavailable("invalid guidance profile"));
             return;
         }
@@ -956,20 +1013,22 @@ final class InstrumentProxyManager {
                     deferredSuperseded = deferredGuidance;
                     deferredGuidance = null;
                 }
-                if (terminalClearIncludeNavigationFields == includeNavigationFields
+                if (terminalClearClusterDebug == clusterDebug
+                        && terminalClearIncludeNavigationFields == includeNavigationFields
                         && terminalClearProfile == compatibilityProfile
                         && terminalClearOutputGeneration == navigationOutputGeneration) {
                     if (callback != null) terminalClearCallbacks.add(callback);
                 } else {
                     if (deferredTerminalClear != null
                             && deferredTerminalClear.matches(compatibilityProfile,
-                                    includeNavigationFields, navigationOutputGeneration)) {
+                                    includeNavigationFields, clusterDebug,
+                                    navigationOutputGeneration)) {
                         deferredTerminalClear.addCallback(callback);
                     } else {
                         deferredTerminalSuperseded = deferredTerminalClear;
                         deferredTerminalClear = new PendingTerminalGuidanceClear(
                                 compatibilityProfile, includeNavigationFields,
-                                navigationOutputGeneration, callback);
+                                clusterDebug, navigationOutputGeneration, callback);
                     }
                 }
             } else {
@@ -977,6 +1036,7 @@ final class InstrumentProxyManager {
                 terminalClearInFlight = false;
                 terminalClearProfile = compatibilityProfile;
                 terminalClearIncludeNavigationFields = includeNavigationFields;
+                terminalClearClusterDebug = clusterDebug;
                 terminalClearOutputGeneration = navigationOutputGeneration;
                 barrierToken = ++guidanceBarrierToken;
                 expectedEpoch = callEpoch;
@@ -1019,20 +1079,26 @@ final class InstrumentProxyManager {
             long outputGeneration) {
         int outgoingProfile;
         boolean includeNavigationFields;
+        boolean clusterDebug;
         synchronized (callLock) {
             if (!guidanceBarrierActive || requestToken != guidanceBarrierToken
                     || requestEpoch != callEpoch) {
                 return;
             }
             includeNavigationFields = terminalClearIncludeNavigationFields;
+            clusterDebug = terminalClearClusterDebug;
             terminalClearInFlight = true;
             outgoingProfile = terminalClearProfile;
         }
-        executeCall("terminal_guidance_clear",
+        executeCall(clusterDebug ? "terminal_clusterdebug_guidance_clear"
+                        : "terminal_guidance_clear",
                 result -> finishTerminalGuidanceClear(requestToken, result),
                 (current, currentGeneration) -> isNavigationOutputGenerationCurrent(
                         outputGeneration)
-                        ? current.sendGuidance(currentGeneration, outgoingProfile,
+                        ? clusterDebug
+                                ? current.sendClusterDebugGuidance(currentGeneration,
+                                        0, -1, "")
+                                : current.sendGuidance(currentGeneration, outgoingProfile,
                                 0, -1, "", new int[0], new int[0],
                                 includeNavigationFields)
                         : staleNavigationOutputResult());
@@ -1057,6 +1123,7 @@ final class InstrumentProxyManager {
                 guidanceBarrierActive = true;
                 terminalClearProfile = nextTerminal.compatibilityProfile;
                 terminalClearIncludeNavigationFields = nextTerminal.includeNavigationFields;
+                terminalClearClusterDebug = nextTerminal.clusterDebug;
                 terminalClearOutputGeneration = nextTerminal.outputGeneration;
                 terminalClearCallbacks.addAll(nextTerminal.callbacks);
                 nextBarrierToken = ++guidanceBarrierToken;
@@ -1068,6 +1135,7 @@ final class InstrumentProxyManager {
                 guidanceBarrierActive = false;
                 terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
                 terminalClearIncludeNavigationFields = true;
+                terminalClearClusterDebug = false;
                 terminalClearOutputGeneration = navigationOutputGeneration;
                 deferred = deferredGuidance;
                 deferredGuidance = null;
@@ -1113,10 +1181,14 @@ final class InstrumentProxyManager {
             guidanceScheduled = false;
         }
         if (request == null) return;
-        executeCall("guidance", request.callback,
+        executeCall(request.clusterDebug ? "clusterdebug_guidance" : "guidance",
+                request.callback,
                 (current, currentGeneration) -> isNavigationOutputGenerationCurrent(
                         request.outputGeneration)
-                        ? current.sendGuidance(currentGeneration,
+                        ? request.clusterDebug
+                                ? current.sendClusterDebugGuidance(currentGeneration,
+                                        request.icon, request.distanceMeters, request.road)
+                                : current.sendGuidance(currentGeneration,
                                 request.compatibilityProfile, request.icon,
                                 request.distanceMeters, request.road,
                                 request.laneDirections, request.laneRecommendations,
@@ -1197,10 +1269,16 @@ final class InstrumentProxyManager {
             current = proxy;
             currentBinder = proxyBinder;
             currentGeneration = generation;
-            outputReady = navigationOutputReady || operation.startsWith("native_speed:");
+            if (isClusterDebugOperation(operation)) {
+                outputReady = clusterDebugOutputReady;
+            } else {
+                outputReady = navigationOutputReady || operation.startsWith("native_speed:");
+            }
         }
         if (!outputReady) {
-            deliver(callback, Result.unavailable("navigation output capability unavailable"));
+            deliver(callback, Result.unavailable(isClusterDebugOperation(operation)
+                    ? "ClusterDebug shell output unavailable"
+                    : "navigation output capability unavailable"));
             return;
         }
         if (current == null || currentBinder == null) {
@@ -1215,6 +1293,7 @@ final class InstrumentProxyManager {
             activeOperationGeneration = currentGeneration;
             activeOperationCallback = callback;
             activeOperationTerminal = "terminal_guidance_clear".equals(operation)
+                    || "terminal_clusterdebug_guidance_clear".equals(operation)
                     || operation.startsWith("traffic_light_clear:");
         }
         worker.schedule(
@@ -1225,7 +1304,9 @@ final class InstrumentProxyManager {
         try {
             result = Result.from(remoteCall.invoke(current, currentGeneration));
         } catch (RemoteException | RuntimeException error) {
-            result = Result.unavailable(describe(error));
+            result = Result.unavailable(isClusterDebugOperation(operation)
+                    ? describeClusterDebugFailure(operation, error)
+                    : describe(error));
             handleCallFailure(currentGeneration, currentBinder, error);
         }
         boolean currentResult;
@@ -1340,6 +1421,7 @@ final class InstrumentProxyManager {
                 terminalClearInFlight = false;
                 terminalClearProfile = ManeuverCompatibilityProfile.AMAP;
                 terminalClearIncludeNavigationFields = true;
+                terminalClearClusterDebug = false;
                 terminalClearOutputGeneration = navigationOutputGeneration;
                 guidanceBarrierToken++;
                 deferred = deferredGuidance;
@@ -1676,6 +1758,7 @@ final class InstrumentProxyManager {
                 outputRetry.cancel();
                 capabilityMode = CapabilityMode.NONE;
                 navigationOutputReady = false;
+                clusterDebugOutputReady = false;
                 nextRetryAtMs = Long.MAX_VALUE;
                 unregisterHandoffReceiver();
                 worker.execute(() -> cleanupHelper("capability-blocked"));
@@ -1708,6 +1791,7 @@ final class InstrumentProxyManager {
             helperIdentity = connectedIdentity;
             capabilityMode = connectedMode;
             navigationOutputReady = false;
+            clusterDebugOutputReady = false;
             trafficLightCapable = connectedTrafficLight;
             nativeSpeedCapable = InstrumentProxyContract.hasCapability(result,
                     InstrumentProxyContract.CAP_NATIVE_SPEED);
@@ -1725,7 +1809,7 @@ final class InstrumentProxyManager {
                 + " capabilities=" + connectedMode);
         // Do not hold the manager lock across Binder. Publish navigation readiness only after
         // the output resume succeeds and this generation is still the active connection.
-        boolean shouldResume = connectedNavigationOutput && !ShanghaiOutputGate.isSuspended()
+        boolean shouldResume = !ShanghaiOutputGate.isSuspended()
                 && !new ShanghaiMockGps(context).hasPendingRecovery();
         if (shouldResume) {
             try {
@@ -1739,18 +1823,23 @@ final class InstrumentProxyManager {
             }
         }
         boolean outputReady = false;
+        boolean clusterDebugReady = false;
         synchronized (lock) {
             if (shouldResume && proxy == candidate && proxyBinder == binder
                     && state == State.READY && generation == requestGeneration
                     && !shanghaiSuspended && binder.isBinderAlive()) {
-                navigationOutputReady = true;
-                outputReady = true;
+                clusterDebugOutputReady = true;
+                clusterDebugReady = true;
+                if (connectedNavigationOutput) {
+                    navigationOutputReady = true;
+                    outputReady = true;
+                }
                 lock.notifyAll();
             }
         }
         worker.execute(() -> clearStartupDiagnostic(connectedIdentity));
         LogcatRecorder.recoverShellCapture(context);
-        if (outputReady) notifyReadyListeners();
+        if (outputReady || clusterDebugReady) notifyReadyListeners();
     }
 
     Bundle registerWork(String id, String type, java.io.File artifact, JSONObject request,
@@ -2088,6 +2177,7 @@ final class InstrumentProxyManager {
         pingToken++;
         capabilityMode = CapabilityMode.NONE;
         navigationOutputReady = false;
+        clusterDebugOutputReady = false;
         trafficLightCapable = false;
         directFidCapable = false;
         nativeSpeedCapable = false;
@@ -2203,6 +2293,18 @@ final class InstrumentProxyManager {
                 + (message.isEmpty() ? "" : ": " + message);
     }
 
+    private static boolean isClusterDebugOperation(String operation) {
+        return operation != null && (operation.startsWith("clusterdebug_")
+                || "terminal_clusterdebug_guidance_clear".equals(operation));
+    }
+
+    private static String describeClusterDebugFailure(String operation, Throwable error) {
+        StringWriter trace = new StringWriter();
+        if (error != null) error.printStackTrace(new PrintWriter(trace));
+        return "stage=ipc_call;operation=" + safe(operation) + "\n"
+                + (error == null ? "unknown ClusterDebug IPC failure" : trace.toString());
+    }
+
     private static String safe(String value) {
         return value == null ? "" : value.trim();
     }
@@ -2236,12 +2338,14 @@ final class InstrumentProxyManager {
         final int[] laneDirections;
         final int[] laneRecommendations;
         final boolean includeNavigationFields;
+        final boolean clusterDebug;
         final long outputGeneration;
         final ResultCallback callback;
 
         PendingGuidance(int compatibilityProfile, int icon, int distanceMeters,
                 String road, int[] laneDirections, int[] laneRecommendations,
-                boolean includeNavigationFields, long outputGeneration,
+                boolean includeNavigationFields, boolean clusterDebug,
+                long outputGeneration,
                 ResultCallback callback) {
             this.compatibilityProfile = compatibilityProfile;
             this.icon = icon;
@@ -2250,6 +2354,7 @@ final class InstrumentProxyManager {
             this.laneDirections = laneDirections.clone();
             this.laneRecommendations = laneRecommendations.clone();
             this.includeNavigationFields = includeNavigationFields;
+            this.clusterDebug = clusterDebug;
             this.outputGeneration = outputGeneration;
             this.callback = callback;
         }
@@ -2268,21 +2373,26 @@ final class InstrumentProxyManager {
     private static final class PendingTerminalGuidanceClear {
         final int compatibilityProfile;
         final boolean includeNavigationFields;
+        final boolean clusterDebug;
         final long outputGeneration;
         final List<ResultCallback> callbacks = new ArrayList<>();
 
         PendingTerminalGuidanceClear(int compatibilityProfile,
-                boolean includeNavigationFields, long outputGeneration,
+                boolean includeNavigationFields, boolean clusterDebug,
+                long outputGeneration,
                 ResultCallback callback) {
             this.compatibilityProfile = compatibilityProfile;
             this.includeNavigationFields = includeNavigationFields;
+            this.clusterDebug = clusterDebug;
             this.outputGeneration = outputGeneration;
             addCallback(callback);
         }
 
-        boolean matches(int profile, boolean includeFields, long generation) {
+        boolean matches(int profile, boolean includeFields, boolean useClusterDebug,
+                long generation) {
             return compatibilityProfile == profile
                     && includeNavigationFields == includeFields
+                    && clusterDebug == useClusterDebug
                     && outputGeneration == generation;
         }
 
