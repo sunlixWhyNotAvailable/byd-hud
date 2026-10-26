@@ -116,6 +116,11 @@ final class ShellShanghaiRoute {
 
     private static void writeCoverage(File directory, ShanghaiDiagnosticAdb diagnostics)
             throws java.io.IOException {
-        ShellWorkFiles.write(new File(directory, "diagnostic-coverage.json"), diagnostics.coverageJson());
+        File file = new File(directory, "diagnostic-coverage.json");
+        try {
+            ShellWorkFiles.write(file, diagnostics.coverageJson());
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
+        }
     }
 }

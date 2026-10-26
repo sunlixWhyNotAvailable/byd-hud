@@ -251,6 +251,8 @@ final class NavCaptureStore {
             file.delete();
             Log.e(TAG, "direct artifact failed " + file.getAbsolutePath(), e);
             return "";
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
         }
     }
 
@@ -296,6 +298,7 @@ final class NavCaptureStore {
             rotated = rotatedFile(file, suffix);
             try {
                 Files.move(file.toPath(), rotated.toPath());
+                NavigationLogStorage.markStoragePathMoved(file, rotated);
                 break;
             } catch (FileAlreadyExistsException collision) {
                 if (suffix == Long.MAX_VALUE) {
@@ -305,6 +308,8 @@ final class NavCaptureStore {
                 }
                 suffix++;
             } catch (IOException | RuntimeException error) {
+                NavigationLogStorage.markStorageFileChanged(file);
+                NavigationLogStorage.markStorageFileChanged(rotated);
                 WazeCaptureDebugWriter.recordWriteFailure(
                         "rotate shard failed: " + rotated.getName() + ": " + error);
                 Log.e(TAG, "rotate shard failed " + file.getAbsolutePath()
@@ -320,6 +325,8 @@ final class NavCaptureStore {
         } catch (IOException e) {
             WazeCaptureDebugWriter.recordWriteFailure("create active log: " + e);
             Log.e(TAG, "create active log failed " + file.getAbsolutePath(), e);
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
         }
         return true;
     }

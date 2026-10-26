@@ -33,6 +33,7 @@ final class ShanghaiEventJournal implements Closeable, ShanghaiSomeIpClient.Even
     private final AtomicLong dropped = new AtomicLong();
     private final AtomicLong writeFailures = new AtomicLong();
     private final Map<Long, TopicStats> topics = new LinkedHashMap<>();
+    private final File file;
     private final BufferedWriter writer;
     private final Thread writerThread;
     private final LongSupplier elapsedRealtimeNanos;
@@ -50,10 +51,10 @@ final class ShanghaiEventJournal implements Closeable, ShanghaiSomeIpClient.Even
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
             throw new IllegalStateException("Could not create Shanghai journal directory");
         }
+        this.file = file;
         for (Long topic : requestedTopics) topics.put(topic, new TopicStats(topic));
         this.elapsedRealtimeNanos = elapsedRealtimeNanos;
-        writer = new BufferedWriter(new OutputStreamWriter(
-                new FileOutputStream(file, false), StandardCharsets.UTF_8), 128 * 1024);
+        writer = openWriter(file);
         writerThread = new Thread(this::writeLoop, "shanghai-someip-journal");
         writerThread.setDaemon(true);
         writerThread.start();
@@ -120,13 +121,18 @@ final class ShanghaiEventJournal implements Closeable, ShanghaiSomeIpClient.Even
                 writer.newLine();
                 persisted.incrementAndGet();
                 synchronized (topics) { topics.get(item.topic).persisted(hash); }
-                if ((sequence & 63L) == 0L) writer.flush();
+                if ((sequence & 63L) == 0L) {
+                    writer.flush();
+                    NavigationLogStorage.markStorageFileChanged(file);
+                }
             }
             writer.flush();
+            NavigationLogStorage.markStorageFileChanged(file);
         } catch (Throwable error) {
             writeFailures.incrementAndGet();
             firstError = error.toString();
         } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
             Item item;
             while ((item = queue.poll()) != null) {
                 queuedBytes.addAndGet(-item.payload.length);
@@ -173,6 +179,8 @@ final class ShanghaiEventJournal implements Closeable, ShanghaiSomeIpClient.Even
         catch (Exception error) {
             firstError = error.toString();
             writeFailures.incrementAndGet();
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
         }
         closed = !writerThread.isAlive() && writeFailures.get() == 0;
     }
@@ -182,6 +190,15 @@ final class ShanghaiEventJournal implements Closeable, ShanghaiSomeIpClient.Even
         StringBuilder result = new StringBuilder(64);
         for (byte item : digest) result.append(String.format(java.util.Locale.ROOT, "%02x", item & 0xff));
         return result.toString();
+    }
+
+    private static BufferedWriter openWriter(File file) throws Exception {
+        try {
+            return new BufferedWriter(new OutputStreamWriter(
+                    new FileOutputStream(file, false), StandardCharsets.UTF_8), 128 * 1024);
+        } finally {
+            if (file != null) NavigationLogStorage.markStorageFileChanged(file);
+        }
     }
 
     private static final class Item {

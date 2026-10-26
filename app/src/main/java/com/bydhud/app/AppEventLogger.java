@@ -33,6 +33,11 @@ final class AppEventLogger {
         WazeCaptureDebugWriter.get().appEvent(context, line);
     }
 
+    static void retentionEvent(Context context, String line) {
+        Log.i(TAG, line);
+        WazeCaptureDebugWriter.get().retentionEvent(context, line);
+    }
+
     static boolean writeEvent(
             Context context,
             String line,
@@ -48,7 +53,7 @@ final class AppEventLogger {
             long wallClockMs,
             String targetDay) {
         boolean written = append(context, targetDay, EVENTS_FILE,
-                timestamp(wallClockMs) + " " + line + "\n", false);
+                timestamp(wallClockMs) + " " + line + "\n");
         if (written) NavigationLogStorage.enforceNavCaptureRetention(context);
         return written;
     }
@@ -58,6 +63,11 @@ final class AppEventLogger {
     }
 
     static boolean writeBatch(Context context, String targetDay, List<String> lines) {
+        return writeBatch(context, targetDay, lines, true);
+    }
+
+    static boolean writeBatch(
+            Context context, String targetDay, List<String> lines, boolean requestRetention) {
         if (context == null || targetDay == null || lines == null || lines.isEmpty()) return false;
         synchronized (WRITE_LOCK) {
             int index = 0;
@@ -100,7 +110,9 @@ final class AppEventLogger {
                     NavCaptureStore.rotate(append.file);
                 }
             }
-            if (anyWritten) NavigationLogStorage.enforceNavCaptureRetention(context);
+            if (requestRetention && anyWritten) {
+                NavigationLogStorage.enforceNavCaptureRetention(context);
+            }
             return allWritten;
         }
     }
@@ -132,18 +144,21 @@ final class AppEventLogger {
             Context context,
             String targetDay,
             String name,
-            String text,
-            boolean ignored) {
+            String text) {
         synchronized (WRITE_LOCK) {
             File file = NavigationLogStorage.withReadLock(() -> {
                 File target = file(context, targetDay, name);
-                try (FileWriter writer = new FileWriter(target, true)) {
-                    writer.write(text);
-                    return target;
+                try {
+                    try (FileWriter writer = new FileWriter(target, true)) {
+                        writer.write(text);
+                        return target;
+                    }
                 } catch (IOException e) {
                     WazeCaptureDebugWriter.recordWriteFailure("events append: " + e);
                     Log.e(TAG, "write failed: " + target.getAbsolutePath(), e);
                     return null;
+                } finally {
+                    NavigationLogStorage.markStorageFileChanged(target);
                 }
             });
             if (file != null) WazeCaptureDebugWriter.recordWriteSuccess();

@@ -39,23 +39,46 @@ final class NavigatorRouteArtifact {
             String fileName = header.producerEpoch + "-" + header.routeRevision + ".json.gz";
             File target = new File(routeDir, fileName);
             File temporary = new File(routeDir, fileName + ".tmp");
-            if (target.isFile()) return !temporary.exists() || temporary.delete();
-            if (temporary.exists() && !temporary.delete()) return false;
-
+            boolean temporaryChanged = false;
+            boolean renameAttempted = false;
+            boolean moved = false;
             try {
+                if (target.isFile()) {
+                    if (temporary.exists()) {
+                        temporaryChanged = true;
+                        return temporary.delete();
+                    }
+                    return true;
+                }
+                if (temporary.exists()) {
+                    temporaryChanged = true;
+                    if (!temporary.delete()) return false;
+                }
+                temporaryChanged = true;
                 writeJsonGzip(temporary, route);
                 if (target.exists()) {
                     temporary.delete();
                     return target.isFile();
                 }
+                renameAttempted = true;
                 if (!temporary.renameTo(target)) {
                     temporary.delete();
                     return target.isFile();
                 }
+                moved = true;
                 return true;
             } catch (IOException | JSONException | RuntimeException error) {
                 temporary.delete();
                 return false;
+            } finally {
+                if (moved) {
+                    NavigationLogStorage.markStoragePathMoved(temporary, target);
+                } else if (renameAttempted) {
+                    NavigationLogStorage.markStorageFileChanged(temporary);
+                    NavigationLogStorage.markStorageFileChanged(target);
+                } else if (temporaryChanged) {
+                    NavigationLogStorage.markStorageFileChanged(temporary);
+                }
             }
         }
     }

@@ -185,7 +185,8 @@ final class DenzaTransferDiagnostics {
     }
 
     private static void writeStatus(Request request, String status, JSONObject details) {
-        AtomicFile file = new AtomicFile(new File(request.directory, "status.json"));
+        File statusPath = new File(request.directory, "status.json");
+        AtomicFile file = new AtomicFile(statusPath);
         try {
             JSONObject record = new JSONObject(request.baseJson)
                     .put("status", status)
@@ -207,6 +208,12 @@ final class DenzaTransferDiagnostics {
                 } catch (IOException error) {
                     if (output != null) file.failWrite(output);
                     throw new StatusWriteException(error);
+                } finally {
+                    NavigationLogStorage.markStorageFileChanged(statusPath);
+                    NavigationLogStorage.markStorageFileChanged(
+                            new File(statusPath.getPath() + ".bak"));
+                    NavigationLogStorage.markStorageFileChanged(
+                            new File(statusPath.getPath() + ".new"));
                 }
             });
         } catch (Exception error) {
@@ -575,7 +582,8 @@ final class DenzaTransferDiagnostics {
                     boolean commandRecorded = false;
                     JSONObject result = new JSONObject();
                     try {
-                        output = openCommandOutput(new File(request.directory, command.fileName));
+                        File outputFile = new File(request.directory, command.fileName);
+                        output = openCommandOutput(outputFile);
                         result.put("command", command.command.name().toLowerCase(Locale.ROOT))
                                 .put("file", command.fileName)
                                 .put("status", "running")
@@ -842,33 +850,51 @@ final class DenzaTransferDiagnostics {
     }
 
     private static final class CommandOutput extends OutputStream {
+        private final File file;
         private final FileOutputStream output;
         private long bytes;
         private boolean closed;
 
-        CommandOutput(FileOutputStream output) {
+        CommandOutput(File file, FileOutputStream output) {
+            this.file = file;
             this.output = output;
         }
 
         @Override public void write(int value) throws IOException {
-            withStorageReadLock(() -> output.write(value));
-            bytes++;
+            try {
+                withStorageReadLock(() -> output.write(value));
+                bytes++;
+            } finally {
+                NavigationLogStorage.markStorageFileChanged(file);
+            }
         }
 
         @Override public void write(byte[] buffer, int offset, int length) throws IOException {
             if (length == 0) return;
-            withStorageReadLock(() -> output.write(buffer, offset, length));
-            bytes += length;
+            try {
+                withStorageReadLock(() -> output.write(buffer, offset, length));
+                bytes += length;
+            } finally {
+                NavigationLogStorage.markStorageFileChanged(file);
+            }
         }
 
         @Override public void flush() throws IOException {
-            withStorageReadLock(output::flush);
+            try {
+                withStorageReadLock(output::flush);
+            } finally {
+                NavigationLogStorage.markStorageFileChanged(file);
+            }
         }
 
         @Override public void close() throws IOException {
             if (closed) return;
             closed = true;
-            withStorageReadLock(output::close);
+            try {
+                withStorageReadLock(output::close);
+            } finally {
+                NavigationLogStorage.markStorageFileChanged(file);
+            }
         }
 
         long bytes() { return bytes; }
@@ -885,9 +911,11 @@ final class DenzaTransferDiagnostics {
                     return new FileOutputStream(file, false);
                 } catch (IOException error) {
                     throw new StatusWriteException(error);
+                } finally {
+                    NavigationLogStorage.markStorageFileChanged(file);
                 }
             });
-            return new CommandOutput(output);
+            return new CommandOutput(file, output);
         } catch (StatusWriteException error) {
             throw error.io;
         }

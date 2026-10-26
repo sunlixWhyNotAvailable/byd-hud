@@ -39,8 +39,9 @@ final class NavigationLogStorage {
     private static final String WRITE_PROBE = ".write_probe";
     private static final Object PUBLIC_DIR_CACHE_LOCK = new Object();
     private static final Map<String, CachedDir> PUBLIC_DIR_CACHE = new HashMap<>();
-    private static final Object RETENTION_THROTTLE_LOCK = new Object();
     private static final Object RETENTION_WORKER_LOCK = new Object();
+    private static final NavigationStorageInventory USAGE = new NavigationStorageInventory();
+    private static final Object USAGE_REFRESH_LOCK = new Object();
     private static final Object TOMBSTONE_CLEANUP_LOCK = new Object();
     private static final Object ACTIVE_DIRECT_SESSION_LOCK = new Object();
     private static final Set<String> ACTIVE_DIRECT_SESSIONS = new HashSet<>();
@@ -114,12 +115,14 @@ final class NavigationLogStorage {
     }
     private static final long BYTES_PER_GB = 1024L * 1024L * 1024L;
     private static final long RETENTION_MIN_INTERVAL_MS = 30000L;
+    private static final long FULL_RECONCILIATION_NANOS = 600_000_000_000L;
     private static final long RETENTION_BATCH_FILE_LIMIT = 64L;
     private static final long RETENTION_BATCH_TIME_MS = 150L;
     private static final long RETENTION_BATCH_PAUSE_MS = 20L;
     private static final long PUBLIC_DIR_CACHE_TTL_MS = 30000L;
     private static boolean retentionWorkerRunning;
     private static RetentionRequest pendingRetentionRequest;
+    private static long lastRetentionCompletedMs;
     private static boolean tombstoneCleanupRunning;
 
     //stores resolved public/fallback roots briefly so hot paths avoid repeated storage probing.
@@ -411,7 +414,7 @@ final class NavigationLogStorage {
     }
 
     //Enumerates one consistent logical-day view; same-name fragments are merged across roots.
-    static StorageSnapshot snapshotAccessibleStorage(Context context) {
+    static StorageSnapshot snapshotAccessibleStorage(Context context, boolean forceInventory) {
         if (context == null) {
             return new StorageSnapshot(
                     Collections.emptyList(), Collections.emptyList(), 0L, 0);
@@ -426,8 +429,55 @@ final class NavigationLogStorage {
         String activeLogcatDay = LogcatRecorder.activeStartDay();
         Context app = context.getApplicationContext();
         List<StorageRoot> roots = withWriteLock(() -> accessibleRootsLocked(app));
+        NavigationStorageInventory.Snapshot usage;
+        try {
+            usage = refreshUsage(app, rootFiles(roots), forceInventory, "storage");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("storage inventory interrupted", error);
+        } catch (IOException error) {
+            throw new IllegalStateException("storage inventory unavailable", error);
+        }
         return withReadLock(() -> snapshotAccessibleStorageLocked(
-                roots, activeDay, activeLogcatDay, reportDays));
+                roots, activeDay, activeLogcatDay, reportDays, usage));
+    }
+
+    static void markStorageFileChanged(File path) {
+        if (path != null) USAGE.markChanged(path);
+    }
+
+    static void markStoragePathMoved(File from, File to) {
+        markStorageFileChanged(from);
+        markStorageFileChanged(to);
+    }
+
+    private static NavigationStorageInventory.Snapshot refreshUsage(
+            Context context, List<File> roots, boolean force, String reason)
+            throws IOException, InterruptedException {
+        long started = SystemClock.elapsedRealtime();
+        long cpuStarted = SystemClock.currentThreadTimeMillis();
+        try {
+            NavigationStorageInventory.Snapshot result;
+            synchronized (USAGE_REFRESH_LOCK) {
+                markStorageFileChanged(LogcatRecorder.retentionActiveFile(context));
+                markStorageFileChanged(ShanghaiTestController.retentionActiveDirectory(context));
+                NavigationStorageInventory.Snapshot previous = USAGE.currentSnapshot();
+                boolean due = previous == null || System.nanoTime() - previous.lastFullCompletedNanos
+                        >= FULL_RECONCILIATION_NANOS;
+                result = USAGE.refresh(roots, force || due);
+            }
+            if (result.fullScan) {
+                logRetention(context, "storage_inventory reason=" + reason
+                        + " mode=full bytes=" + result.totalBytes
+                        + " visitedFiles=" + result.visitedFiles
+                        + " elapsedMs=" + (SystemClock.elapsedRealtime() - started)
+                        + " cpuMs=" + (SystemClock.currentThreadTimeMillis() - cpuStarted));
+            }
+            return result;
+        } catch (IOException | InterruptedException | RuntimeException error) {
+            USAGE.invalidate();
+            throw error;
+        }
     }
 
     //Atomically disconnects every accessible fragment before any recursive deletion begins.
@@ -570,10 +620,9 @@ final class NavigationLogStorage {
         }
         scheduleNavCaptureRetention(new RetentionRequest(
                 context.getApplicationContext(),
-                activeNavCaptureDay(),
-                LogcatRecorder.activeStartDay(),
                 retentionLimitBytes(context),
                 "general",
+                false,
                 null));
     }
 
@@ -584,35 +633,31 @@ final class NavigationLogStorage {
         }
         scheduleNavCaptureRetention(new RetentionRequest(
                 context.getApplicationContext(),
-                activeNavCaptureDay(),
-                LogcatRecorder.activeStartDay(),
                 retentionLimitBytes(context),
                 safePathSegment(reason, "manual"),
+                true,
                 onComplete));
     }
 
     //captures one coalesced retention request so worker threads do not touch UI or capture state.
     private static final class RetentionRequest {
         final Context context;
-        final String activeDay;
-        final String activeLogcatDay;
         final long maxBytes;
         final String reason;
-        final Runnable onComplete;
+        final boolean force;
+        final List<Runnable> completions = new ArrayList<>();
 
         RetentionRequest(
                 Context context,
-                String activeDay,
-                String activeLogcatDay,
                 long maxBytes,
                 String reason,
+                boolean force,
                 Runnable onComplete) {
             this.context = context;
-            this.activeDay = activeDay;
-            this.activeLogcatDay = activeLogcatDay;
             this.maxBytes = maxBytes;
             this.reason = safePathSegment(reason, "unknown");
-            this.onComplete = onComplete;
+            this.force = force;
+            if (onComplete != null) completions.add(onComplete);
         }
     }
 
@@ -653,18 +698,6 @@ final class NavigationLogStorage {
 
         long elapsedMs() {
             return Math.max(0L, SystemClock.elapsedRealtime() - startMs);
-        }
-    }
-
-    private static final class RetentionOutcome {
-        final long beforeBytes;
-        final long afterBytes;
-        final RetentionStats stats;
-
-        RetentionOutcome(long beforeBytes, long afterBytes, RetentionStats stats) {
-            this.beforeBytes = beforeBytes;
-            this.afterBytes = afterBytes;
-            this.stats = stats;
         }
     }
 
@@ -775,15 +808,13 @@ final class NavigationLogStorage {
             return;
         }
         synchronized (RETENTION_WORKER_LOCK) {
+            if (!request.force && (retentionWorkerRunning || !retentionIntervalElapsed())) {
+                return;
+            }
             if (retentionWorkerRunning) {
-                if (pendingRetentionRequest != null
-                        && pendingRetentionRequest.onComplete != null
-                        && request.onComplete == null) {
-                    logRetention(request.context, "retention_deferred reason=force-request-pending");
-                    return;
-                }
+                if (pendingRetentionRequest != null)
+                    request.completions.addAll(pendingRetentionRequest.completions);
                 pendingRetentionRequest = request;
-                logRetention(request.context, "retention_deferred reason=worker-running");
                 return;
             }
             pendingRetentionRequest = request;
@@ -809,7 +840,15 @@ final class NavigationLogStorage {
             }
             try {
                 runScheduledRetention(request);
+            } catch (IOException | InterruptedException | RuntimeException error) {
+                USAGE.invalidate();
+                logRetention(request.context, "retention_failed reason=" + request.reason
+                        + " cause=" + Log.getStackTraceString(error));
+                if (error instanceof InterruptedException) Thread.currentThread().interrupt();
             } finally {
+                synchronized (RETENTION_WORKER_LOCK) {
+                    lastRetentionCompletedMs = SystemClock.elapsedRealtime();
+                }
                 runRetentionCompletion(request);
             }
         }
@@ -817,94 +856,60 @@ final class NavigationLogStorage {
 
     //returns UI cache refresh to the caller after worker retention finishes or defers.
     private static void runRetentionCompletion(RetentionRequest request) {
-        if (request == null || request.onComplete == null) {
-            return;
-        }
-        try {
-            request.onComplete.run();
-        } catch (RuntimeException e) {
-            logWarn("retention completion failed: " + e.getClass().getSimpleName());
-        }
-    }
-
-    //runs one retention pass only when storage is over limit and parser-critical work is quiet.
-    private static void runScheduledRetention(RetentionRequest request) {
-        if (request.context == null || request.maxBytes <= 0L) {
-            return;
-        }
-        List<File> roots = rootFiles(accessibleRootsLocked(request.context));
-        long beforeBytes = datedFolderSizeBytes(roots);
-        if (beforeBytes <= request.maxBytes) {
-            return;
-        }
-        try {
-            RetentionStats stats = new RetentionStats(
-                    request.context, beforeBytes, request.maxBytes);
-            String activeDay = activeNavCaptureDay();
-            String activeLogcatDay = LogcatRecorder.retentionActiveStartDay();
-            runNavCaptureRetention(
-                    roots,
-                    activeDay,
-                    activeLogcatDay,
-                    activeDirectSessionsSnapshot(),
-                    request.maxBytes,
-                    stats,
-                    new File(request.context.getFilesDir(), "runtime-incidents"));
-            RetentionOutcome outcome = new RetentionOutcome(
-                    beforeBytes,
-                    Math.max(0L, beforeBytes - stats.deletedBytes),
-                    stats);
-            logRetention(request.context, "retention_start reason=" + request.reason
-                    + " bytes=" + outcome.beforeBytes
-                    + " maxBytes=" + request.maxBytes);
-            logRetention(request.context, "retention_end reason=" + request.reason
-                    + " files=" + outcome.stats.deletedFiles
-                    + " bytesDeleted=" + outcome.stats.deletedBytes
-                    + " beforeBytes=" + outcome.beforeBytes
-                    + " afterBytes=" + outcome.afterBytes
-                    + " elapsedMs=" + outcome.stats.elapsedMs());
-        } finally {
-            if (request.onComplete == null) {
-                MainActivity.requestStorageRefreshAfterMutation(
-                        request.context, "retention-" + request.reason);
+        for (Runnable completion : request.completions) {
+            try {
+                completion.run();
+            } catch (RuntimeException error) {
+                logRetention(request.context, "retention_completion_failed reason=" + request.reason
+                        + " cause=" + Log.getStackTraceString(error));
             }
         }
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static void runNavCaptureRetention(
-            File root,
-            String activeDay,
-            String activeLogcatDay,
-            long maxBytes,
-            RetentionStats stats) {
-        if (root == null) {
+    //runs one retention pass only when storage is over limit and parser-critical work is quiet.
+    private static void runScheduledRetention(RetentionRequest request)
+            throws IOException, InterruptedException {
+        if (request.context == null || request.maxBytes <= 0L) {
             return;
         }
-        List<File> roots = new ArrayList<>();
-        roots.add(root);
-        runNavCaptureRetention(
-                roots,
-                activeDay,
-                activeLogcatDay,
-                activeDirectSessionsSnapshot(),
-                maxBytes,
-                stats);
+        long started = SystemClock.elapsedRealtime();
+        long cpuStarted = SystemClock.currentThreadTimeMillis();
+        List<File> roots = rootFiles(accessibleRootsLocked(request.context));
+        NavigationStorageInventory.Snapshot usage = refreshUsage(
+                request.context, roots, request.force, request.reason);
+        long visited = usage.visitedFiles;
+        if (usage.totalBytes > request.maxBytes && !usage.fullScan) {
+            usage = refreshUsage(request.context, roots, true, "pre-delete");
+            visited += usage.visitedFiles;
+        }
+        long beforeBytes = usage.totalBytes;
+        RetentionStats stats = new RetentionStats(request.context, beforeBytes, request.maxBytes);
+        if (beforeBytes > request.maxBytes) {
+            runNavCaptureRetention(
+                    roots, usage,
+                    activeNavCaptureDay(),
+                    LogcatRecorder.retentionActiveStartDay(),
+                    activeDirectSessionsSnapshot(),
+                    request.maxBytes,
+                    stats,
+                    new File(request.context.getFilesDir(), "runtime-incidents"));
+        }
+        NavigationStorageInventory.Snapshot after = beforeBytes > request.maxBytes
+                ? refreshUsage(request.context, roots, false, "post-delete") : usage;
+        logRetention(request.context, "retention_end reason=" + request.reason
+                + " mode=" + (usage.fullScan ? "full" : "dirty")
+                + " visitedFiles=" + visited + " filesDeleted=" + stats.deletedFiles
+                + " bytesDeleted=" + stats.deletedBytes + " beforeBytes=" + beforeBytes
+                + " afterBytes=" + after.totalBytes + " maxBytes=" + request.maxBytes
+                + " elapsedMs=" + (SystemClock.elapsedRealtime() - started)
+                + " cpuMs=" + (SystemClock.currentThreadTimeMillis() - cpuStarted));
+        if (beforeBytes > request.maxBytes && request.completions.isEmpty())
+            MainActivity.requestStorageRefreshAfterMutation(request.context, "retention-" + request.reason);
     }
 
     private static void runNavCaptureRetention(
             List<File> roots,
-            String activeDay,
-            String activeLogcatDay,
-            Set<String> activeDirectSessions,
-            long maxBytes,
-            RetentionStats stats) {
-        runNavCaptureRetention(roots, activeDay, activeLogcatDay, activeDirectSessions,
-                maxBytes, stats, null);
-    }
-
-    private static void runNavCaptureRetention(
-            List<File> roots,
+            NavigationStorageInventory.Snapshot usage,
             String activeDay,
             String activeLogcatDay,
             Set<String> activeDirectSessions,
@@ -914,7 +919,7 @@ final class NavigationLogStorage {
         if (roots == null || roots.isEmpty() || maxBytes <= 0L) {
             return;
         }
-        long beforeBytes = datedFolderSizeBytes(roots);
+        long beforeBytes = usage.totalBytes;
         if (beforeBytes <= maxBytes) {
             return;
         }
@@ -922,17 +927,18 @@ final class NavigationLogStorage {
                 roots,
                 activeDay,
                 activeLogcatDay,
-                activeDirectSessions);
+                activeDirectSessions, usage);
         long accountedBytes = beforeBytes;
         for (RetentionCandidate candidate : candidates) {
             if (accountedBytes <= maxBytes) {
                 return;
             }
+            if (candidate.estimatedBytes <= 0L) continue;
             DetachedCandidate detached = detachRetentionCandidate(candidate);
             if (detached == null) {
                 continue;
             }
-            long deletedBefore = stats == null ? 0L : stats.deletedBytes;
+            long deletedBefore = stats.deletedBytes;
             for (File tombstone : detached.tombstones) {
                 deleteRecursively(tombstone, tombstone.getParentFile(), stats);
             }
@@ -943,9 +949,7 @@ final class NavigationLogStorage {
                     && !isProtectedStorageDay(candidate.day)) {
                 RuntimeIncidentRecorder.deleteDay(incidentRoot, candidate.day);
             }
-            long deleted = stats == null
-                    ? candidate.estimatedBytes
-                    : Math.max(0L, stats.deletedBytes - deletedBefore);
+            long deleted = Math.max(0L, stats.deletedBytes - deletedBefore);
             if (deleted > 0L) {
                 logInfo("retention detached kind=" + candidate.kind
                         + " path=" + candidate.primary().getAbsolutePath()
@@ -959,7 +963,8 @@ final class NavigationLogStorage {
             List<File> roots,
             String activeDay,
             String activeLogcatDay,
-            Set<String> activeDirectSessions) {
+            Set<String> activeDirectSessions,
+            NavigationStorageInventory.Snapshot usage) {
         String safeActiveDay = safePathSegment(activeDay, "");
         String safeActiveLogcatDay = safePathSegment(activeLogcatDay, "");
         List<RetentionCandidate> days = new ArrayList<>();
@@ -979,7 +984,7 @@ final class NavigationLogStorage {
                         || hasActiveDirectSessionForDay(child.getName(), activeDirectSessions)) {
                     continue;
                 }
-                days.add(candidateForDirectory(root, child, child.getName(), "day", ""));
+                days.add(candidateForDirectory(root, child, child.getName(), "day", "", usage));
             }
 
             for (File day : children) {
@@ -988,10 +993,10 @@ final class NavigationLogStorage {
                     continue;
                 }
                 collectDirectSessionCandidates(
-                        root, day, WAZE_DIRECT_DIR, activeDirectSessions, directSessions);
+                        root, day, WAZE_DIRECT_DIR, activeDirectSessions, directSessions, usage);
                 collectDirectSessionCandidates(
-                        root, day, GMAPS_DIRECT_DIR, activeDirectSessions, directSessions);
-                collectHistoricalCropSessionCandidates(root, day, cropSessions);
+                        root, day, GMAPS_DIRECT_DIR, activeDirectSessions, directSessions, usage);
+                collectHistoricalCropSessionCandidates(root, day, cropSessions, usage);
             }
         }
 
@@ -1015,7 +1020,8 @@ final class NavigationLogStorage {
             File day,
             String directDir,
             Set<String> activeDirectSessions,
-            List<RetentionCandidate> candidates) {
+            List<RetentionCandidate> candidates,
+            NavigationStorageInventory.Snapshot usage) {
         File parent = new File(day, directDir);
         File[] sessions = parent.listFiles();
         if (sessions == null || !isCanonicalDescendant(day, parent, true)) {
@@ -1031,14 +1037,15 @@ final class NavigationLogStorage {
                 continue;
             }
             candidates.add(candidateForDirectory(
-                    root, session, day.getName(), "direct-session", key));
+                    root, session, day.getName(), "direct-session", key, usage));
         }
     }
 
     private static void collectHistoricalCropSessionCandidates(
             File root,
             File day,
-            List<RetentionCandidate> candidates) {
+            List<RetentionCandidate> candidates,
+            NavigationStorageInventory.Snapshot usage) {
         File parent = new File(day, WAZE_CROP_DIR);
         File[] sessions = parent.listFiles();
         if (sessions == null || !isCanonicalDescendant(day, parent, true)) {
@@ -1050,7 +1057,7 @@ final class NavigationLogStorage {
                 continue;
             }
             candidates.add(candidateForDirectory(
-                    root, session, day.getName(), "crop-session", ""));
+                    root, session, day.getName(), "crop-session", "", usage));
         }
     }
 
@@ -1059,14 +1066,15 @@ final class NavigationLogStorage {
             File directory,
             String day,
             String kind,
-            String directSessionKey) {
+            String directSessionKey,
+            NavigationStorageInventory.Snapshot usage) {
         return new RetentionCandidate(
                 root,
                 Collections.singletonList(directory),
                 day,
                 kind,
                 directSessionKey,
-                folderSizeBytes(directory, root),
+                usage.bytes(directory),
                 directory.lastModified());
     }
 
@@ -1097,6 +1105,7 @@ final class NavigationLogStorage {
                     rollbackRenamedFragments(renamed);
                     return null;
                 }
+                markStoragePathMoved(source, tombstone);
                 renamed.add(new RenamedFragment(source, tombstone));
             }
             if (renamed.isEmpty()) {
@@ -1156,78 +1165,16 @@ final class NavigationLogStorage {
         return false;
     }
 
-    private static long lastRetentionElapsedMs;
-
     //guard recursive folder scans so capture frames do not pay retention cost every time.
     private static boolean shouldRunRetentionNow() {
-        long now = SystemClock.elapsedRealtime();
-        synchronized (RETENTION_THROTTLE_LOCK) {
-            if (lastRetentionElapsedMs > 0L
-                    && now - lastRetentionElapsedMs < RETENTION_MIN_INTERVAL_MS) {
-                return false;
-            }
-            lastRetentionElapsedMs = now;
-            return true;
+        synchronized (RETENTION_WORKER_LOCK) {
+            return !retentionWorkerRunning && retentionIntervalElapsed();
         }
     }
 
-    private static long folderSizeBytes(File file, File allowedRoot) {
-        if (file == null || !file.exists()) {
-            return 0L;
-        }
-        if (!isCanonicalDescendant(allowedRoot, file, false)) {
-            return 0L;
-        }
-        if (file.isFile()) {
-            return Math.max(0L, file.length());
-        }
-        long total = 0L;
-        File[] children = file.listFiles();
-        if (children == null) {
-            return 0L;
-        }
-        for (File child : children) {
-            total += folderSizeBytes(child, allowedRoot);
-            if (total < 0L) {
-                return Long.MAX_VALUE;
-            }
-        }
-        return total;
-    }
-
-    //excludes untouched legacy siblings from both retention accounting and deletion.
-    private static long datedFolderSizeBytes(File root) {
-        if (root == null || !root.isDirectory()) {
-            return 0L;
-        }
-        long total = 0L;
-        File[] children = root.listFiles();
-        if (children == null) {
-            return 0L;
-        }
-        for (File child : children) {
-            if (child != null
-                    && child.isDirectory()
-                    && (isDayFolder(child) || isSafeTombstone(child))
-                    && isCanonicalDescendant(root, child, true)) {
-                total += folderSizeBytes(child, root);
-                if (total < 0L) {
-                    return Long.MAX_VALUE;
-                }
-            }
-        }
-        return total;
-    }
-
-    private static long datedFolderSizeBytes(List<File> roots) {
-        long total = 0L;
-        for (File root : roots) {
-            total += datedFolderSizeBytes(root);
-            if (total < 0L) {
-                return Long.MAX_VALUE;
-            }
-        }
-        return total;
+    private static boolean retentionIntervalElapsed() {
+        return lastRetentionCompletedMs == 0L
+                || SystemClock.elapsedRealtime() - lastRetentionCompletedMs >= RETENTION_MIN_INTERVAL_MS;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1235,6 +1182,14 @@ final class NavigationLogStorage {
             File file,
             File allowedRoot,
             RetentionStats stats) {
+        try {
+            return deleteTree(file, allowedRoot, stats);
+        } finally {
+            markStorageFileChanged(file);
+        }
+    }
+
+    private static boolean deleteTree(File file, File allowedRoot, RetentionStats stats) {
         if (file == null || !file.exists()) {
             return false;
         }
@@ -1248,7 +1203,7 @@ final class NavigationLogStorage {
             File[] children = file.listFiles();
             if (children != null) {
                 for (File child : children) {
-                    deleteRecursively(child, allowedRoot, stats);
+                    deleteTree(child, allowedRoot, stats);
                 }
             }
         }
@@ -1327,7 +1282,8 @@ final class NavigationLogStorage {
             List<StorageRoot> roots,
             String activeDay,
             String activeLogcatDay,
-            Map<String, Long> reportDays) {
+            Map<String, Long> reportDays,
+            NavigationStorageInventory.Snapshot usage) {
         Set<String> activeDirectSessions = activeDirectSessionsSnapshot();
         Map<String, MutableStorageDay> merged = new LinkedHashMap<>();
         long totalBytes = 0L;
@@ -1344,7 +1300,7 @@ final class NavigationLogStorage {
                         || !isCanonicalDescendant(root.dir, child, true)) {
                     continue;
                 }
-                long bytes = folderSizeBytes(child, root.dir);
+                long bytes = usage.bytes(child);
                 int sessions = countSessions(child);
                 MutableStorageDay day = merged.get(child.getName());
                 if (day == null) {
@@ -1460,6 +1416,7 @@ final class NavigationLogStorage {
                 return new DayRetirement(false, day, active,
                         Collections.emptyList(), rolledBack ? "rename failed" : "rollback failed");
             }
+            markStoragePathMoved(source, tombstone);
             renamed.add(new RenamedFragment(source, tombstone));
         }
 
@@ -1511,6 +1468,7 @@ final class NavigationLogStorage {
                     || !fragment.tombstone.renameTo(fragment.source))) {
                 ok = false;
             }
+            markStoragePathMoved(fragment.tombstone, fragment.source);
         }
         return ok;
     }
@@ -1566,7 +1524,7 @@ final class NavigationLogStorage {
         for (File child : children) {
             if (child != null
                     && child.isDirectory()
-                    && isDayFolder(child)
+                    && (isDayFolder(child) || isSafeTombstone(child))
                     && isCanonicalDescendant(root, child, true)) {
                 return true;
             }
@@ -1635,9 +1593,9 @@ final class NavigationLogStorage {
             return;
         }
         try {
-            AppEventLogger.event(context, "nav_capture " + message);
-        } catch (RuntimeException ignored) {
-            //retention must stay best-effort because logging can itself depend on external storage.
+            AppEventLogger.retentionEvent(context, "nav_capture " + message);
+        } catch (RuntimeException error) {
+            logWarn("retention diagnostic failed: " + Log.getStackTraceString(error));
         }
     }
 

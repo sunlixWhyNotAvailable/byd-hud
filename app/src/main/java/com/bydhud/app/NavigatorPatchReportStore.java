@@ -461,26 +461,30 @@ final class NavigatorPatchReportStore {
             throw new IOException("cannot create daily navigator patch report directory");
         byte[] bytes = (report.toString() + "\n").getBytes(StandardCharsets.UTF_8);
         if (bytes.length > MAX_REPORT_BYTES) throw new IOException("daily navigator patch report exceeds size limit");
-        try (RandomAccessFile output = new RandomAccessFile(file, "rw")) {
-            long complete = output.length();
-            byte[] tail = new byte[8192];
-            boolean found = false;
-            while (complete > 0 && !found) {
-                int count = (int) Math.min(complete, tail.length);
-                complete -= count;
-                output.seek(complete);
-                output.readFully(tail, 0, count);
-                for (int i = count - 1; i >= 0; i--) {
-                    if (tail[i] != '\n') continue;
-                    complete += i + 1;
-                    found = true;
-                    break;
+        try {
+            try (RandomAccessFile output = new RandomAccessFile(file, "rw")) {
+                long complete = output.length();
+                byte[] tail = new byte[8192];
+                boolean found = false;
+                while (complete > 0 && !found) {
+                    int count = (int) Math.min(complete, tail.length);
+                    complete -= count;
+                    output.seek(complete);
+                    output.readFully(tail, 0, count);
+                    for (int i = count - 1; i >= 0; i--) {
+                        if (tail[i] != '\n') continue;
+                        complete += i + 1;
+                        found = true;
+                        break;
+                    }
                 }
+                output.setLength(complete);
+                output.seek(complete);
+                output.write(bytes);
+                output.getFD().sync();
             }
-            output.setLength(complete);
-            output.seek(complete);
-            output.write(bytes);
-            output.getFD().sync();
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
         }
         return file;
     }

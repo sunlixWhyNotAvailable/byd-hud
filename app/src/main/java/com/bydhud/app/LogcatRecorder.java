@@ -237,6 +237,43 @@ final class LogcatRecorder {
         return activeStartDay();
     }
 
+    static File retentionActiveFile(Context context) {
+        Session active = activeSession;
+        if (active != null) return active.logFile.file();
+        Session finalizing = finalizingSession;
+        if (finalizing != null) return finalizing.logFile.file();
+        if (context == null) return null;
+
+        android.content.SharedPreferences saved = ShellRuntimeSession.prefs(context);
+        String id = saved.getString("capture_id", "");
+        String day = saved.getString("capture_day", "");
+        String path = saved.getString("capture_directory", "");
+        if (id.isEmpty() && day.isEmpty() && path.isEmpty()) return null;
+        if (!id.matches("\\d{8}_\\d{6}_\\d{3}") || !day.matches("\\d{8}")
+                || path.isEmpty()) {
+            throw new IllegalStateException("Persisted Logcat retention identity is incomplete or invalid");
+        }
+        File directory = new File(path);
+        if (!directory.isAbsolute()) {
+            throw new IllegalStateException("Persisted Logcat retention path is not absolute");
+        }
+        directory = directory.toPath().normalize().toFile();
+        File logcatDir = directory.getParentFile();
+        File logsDir = logcatDir == null ? null : logcatDir.getParentFile();
+        File dayDir = logsDir == null ? null : logsDir.getParentFile();
+        File rootDir = dayDir == null ? null : dayDir.getParentFile();
+        if (!("system_" + id).equals(directory.getName())
+                || logcatDir == null || !"logcat".equals(logcatDir.getName())
+                || logsDir == null || !"logs".equals(logsDir.getName())
+                || dayDir == null || !day.equals(dayDir.getName())
+                || rootDir == null || !NavigationLogStorage.ROOT_DIR.equals(rootDir.getName())) {
+            throw new IllegalStateException("Persisted Logcat retention path is outside its dated root");
+        }
+        File part = new File(directory, "logcat.log.part");
+        return saved.getBoolean("capture_stop", false) && !part.isFile()
+                ? new File(directory, "logcat.log") : part;
+    }
+
     static synchronized String statusText() {
         StringBuilder text = new StringBuilder(lastStatus);
         Session session = activeSession != null ? activeSession : finalizingSession;
@@ -1212,6 +1249,12 @@ final class LogcatRecorder {
             } catch (Exception error) {
                 if (output != null) file.failWrite(output);
                 throw error;
+            } finally {
+                NavigationLogStorage.markStorageFileChanged(session.manifestFile);
+                NavigationLogStorage.markStorageFileChanged(
+                        new File(session.manifestFile.getPath() + ".bak"));
+                NavigationLogStorage.markStorageFileChanged(
+                        new File(session.manifestFile.getPath() + ".new"));
             }
         } catch (Exception error) {
             if (error instanceof IOException) throw (IOException) error;
@@ -1222,11 +1265,15 @@ final class LogcatRecorder {
     private static void writeFile(File file, byte[] bytes) throws IOException {
         try {
             NavigationLogStorage.withReadLock(() -> {
-                try (FileOutputStream output = new FileOutputStream(file, false)) {
-                    output.write(bytes);
-                    output.flush();
+                try {
+                    try (FileOutputStream output = new FileOutputStream(file, false)) {
+                        output.write(bytes);
+                        output.flush();
+                    }
                 } catch (IOException error) {
                     throw new FileWriteException(error);
+                } finally {
+                    NavigationLogStorage.markStorageFileChanged(file);
                 }
             });
         } catch (FileWriteException error) {

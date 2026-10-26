@@ -288,11 +288,16 @@ final class ShanghaiDiagnostics {
     }
 
     private void writeCoverage(Coverage coverage) {
-        try (FileOutputStream output = new FileOutputStream(new File(directory, "coverage.json"), false)) {
-            output.write(coverage.toJson().toString(2).getBytes(StandardCharsets.UTF_8));
+        File file = new File(directory, "coverage.json");
+        try {
+            try (FileOutputStream output = new FileOutputStream(file, false)) {
+                output.write(coverage.toJson().toString(2).getBytes(StandardCharsets.UTF_8));
+            }
         } catch (Throwable error) {
             failure = failure.isEmpty() ? "coverage write failed: " + error : failure;
             state = State.FAILED;
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
         }
     }
 

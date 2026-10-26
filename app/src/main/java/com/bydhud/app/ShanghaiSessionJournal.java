@@ -18,6 +18,7 @@ final class ShanghaiSessionJournal implements Closeable {
     private final ArrayBlockingQueue<String> queue = new ArrayBlockingQueue<>(CAPACITY);
     private final AtomicLong written = new AtomicLong();
     private final AtomicLong dropped = new AtomicLong();
+    private final File file;
     private final BufferedWriter writer;
     private final Thread thread;
     private volatile boolean accepting = true;
@@ -25,8 +26,8 @@ final class ShanghaiSessionJournal implements Closeable {
     private volatile String error = "";
 
     ShanghaiSessionJournal(File file) throws Exception {
-        writer = new BufferedWriter(new OutputStreamWriter(
-                new FileOutputStream(file, false), StandardCharsets.UTF_8), 64 * 1024);
+        this.file = file;
+        writer = openWriter(file);
         thread = new Thread(this::loop, "shanghai-session-journal");
         thread.setDaemon(true);
         thread.start();
@@ -49,13 +50,19 @@ final class ShanghaiSessionJournal implements Closeable {
                 writer.write(line);
                 writer.newLine();
                 long count = written.incrementAndGet();
-                if ((count & 63L) == 0L) writer.flush();
+                if ((count & 63L) == 0L) {
+                    writer.flush();
+                    NavigationLogStorage.markStorageFileChanged(file);
+                }
             }
             writer.flush();
+            NavigationLogStorage.markStorageFileChanged(file);
         } catch (Throwable failure) {
             error = failure.toString();
             dropped.addAndGet(queue.size());
             queue.clear();
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
         }
     }
 
@@ -77,7 +84,17 @@ final class ShanghaiSessionJournal implements Closeable {
         }
         try { writer.close(); }
         catch (Exception failure) { error = failure.toString(); }
+        finally { NavigationLogStorage.markStorageFileChanged(file); }
         closed = !thread.isAlive() && error.isEmpty();
+    }
+
+    private static BufferedWriter openWriter(File file) throws Exception {
+        try {
+            return new BufferedWriter(new OutputStreamWriter(
+                    new FileOutputStream(file, false), StandardCharsets.UTF_8), 64 * 1024);
+        } finally {
+            if (file != null) NavigationLogStorage.markStorageFileChanged(file);
+        }
     }
 
     private static String limit(String value, int maximum) {

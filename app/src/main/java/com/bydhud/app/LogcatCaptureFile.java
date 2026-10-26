@@ -33,6 +33,7 @@ final class LogcatCaptureFile {
         }
         output = opener.open(part);
         started = true;
+        NavigationLogStorage.markStorageFileChanged(part);
     }
 
     synchronized void append(byte[] bytes) throws IOException {
@@ -46,47 +47,71 @@ final class LogcatCaptureFile {
             throw new IndexOutOfBoundsException();
         }
         if (length == 0) return;
-        if (!started) {
-            if (saved.exists() || !part.createNewFile()) {
-                throw new IOException("Capture log already exists: " + part);
-            }
-            try {
-                output = opener.open(part);
-                started = true;
-            } catch (IOException | RuntimeException error) {
-                // This attempt created the file; never remove existing or nonempty evidence.
-                if (part.isFile() && part.length() == 0L && !part.delete()) {
-                    error.addSuppressed(new IOException("Unable to remove unopened capture " + part));
+        boolean changed = false;
+        try {
+            if (!started) {
+                if (saved.exists() || !part.createNewFile()) {
+                    throw new IOException("Capture log already exists: " + part);
                 }
-                throw error;
+                changed = true;
+                try {
+                    output = opener.open(part);
+                    started = true;
+                } catch (IOException | RuntimeException error) {
+                    // This attempt created the file; never remove existing or nonempty evidence.
+                    if (part.isFile() && part.length() == 0L && !part.delete()) {
+                        error.addSuppressed(new IOException("Unable to remove unopened capture " + part));
+                    }
+                    throw error;
+                }
             }
+            changed = true;
+            output.write(bytes, offset, length);
+        } finally {
+            if (changed) NavigationLogStorage.markStorageFileChanged(part);
         }
-        output.write(bytes, offset, length);
     }
 
     synchronized void finish() throws IOException {
         if (finished) return;
-        if (output != null) {
-            FileOutputStream current = output;
-            output = null;
-            IOException failure = null;
-            try {
-                current.flush();
-            } catch (IOException error) {
-                failure = error;
+        boolean changed = started;
+        boolean renameAttempted = false;
+        boolean moved = false;
+        try {
+            if (output != null) {
+                FileOutputStream current = output;
+                output = null;
+                IOException failure = null;
+                try {
+                    current.flush();
+                } catch (IOException error) {
+                    failure = error;
+                }
+                try {
+                    current.close();
+                } catch (IOException error) {
+                    if (failure == null) failure = error;
+                    else failure.addSuppressed(error);
+                }
+                if (failure != null) throw failure;
             }
-            try {
-                current.close();
-            } catch (IOException error) {
-                if (failure == null) failure = error;
-                else failure.addSuppressed(error);
+            if (started) {
+                if (saved.exists()) {
+                    throw new IOException("Unable to finalize " + part);
+                }
+                renameAttempted = true;
+                if (!part.renameTo(saved)) throw new IOException("Unable to finalize " + part);
+                moved = true;
             }
-            if (failure != null) throw failure;
+            finished = true;
+        } finally {
+            if (moved) NavigationLogStorage.markStoragePathMoved(part, saved);
+            else if (renameAttempted) {
+                NavigationLogStorage.markStorageFileChanged(part);
+                NavigationLogStorage.markStorageFileChanged(saved);
+            }
+            else if (changed) NavigationLogStorage.markStorageFileChanged(part);
         }
-        if (started && (saved.exists() || !part.renameTo(saved))) {
-            throw new IOException("Unable to finalize " + part);
-        }
-        finished = true;
     }
 
     synchronized File file() {

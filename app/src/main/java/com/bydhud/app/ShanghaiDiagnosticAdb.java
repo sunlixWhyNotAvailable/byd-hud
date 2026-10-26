@@ -131,18 +131,27 @@ final class ShanghaiDiagnosticAdb implements AutoCloseable {
     }
 
     private static void writeResult(File file, LocalAdbBridge.ShellResult result) throws IOException {
-        try (FileOutputStream output = new FileOutputStream(file, false)) {
-            output.write(("status=" + result.status + " exit=" + result.exitCode
-                    + " truncated=" + result.truncated + " droppedBytes=" + result.droppedBytes
-                    + "\n" + result.output + "\n").getBytes(StandardCharsets.UTF_8));
+        try {
+            try (FileOutputStream output = new FileOutputStream(file, false)) {
+                output.write(("status=" + result.status + " exit=" + result.exitCode
+                        + " truncated=" + result.truncated + " droppedBytes=" + result.droppedBytes
+                        + "\n" + result.output + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
         }
     }
 
     private static void writeError(File file, Throwable error) {
-        try (FileOutputStream output = new FileOutputStream(file, false)) {
-            output.write((error.getClass().getName() + ": "
-                    + String.valueOf(error.getMessage())).getBytes(StandardCharsets.UTF_8));
-        } catch (IOException ignored) { }
+        try {
+            try (FileOutputStream output = new FileOutputStream(file, false)) {
+                output.write((error.getClass().getName() + ": "
+                        + String.valueOf(error.getMessage())).getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (IOException ignored) {
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
+        }
     }
 
     static final class StreamState {
@@ -163,9 +172,14 @@ final class ShanghaiDiagnosticAdb implements AutoCloseable {
         void start(LocalAdbBridge.ShanghaiStreamSession session, File file, boolean watchReady)
                 throws IOException {
             this.session = session;
-            OutputStream output = new WatchOutputStream(
-                    new FileOutputStream(file, false), bytes, droppedBytes, ready, helperError,
-                    watchReady, watchReady ? 32L * 1024L * 1024L : 128L * 1024L * 1024L);
+            OutputStream output;
+            try {
+                output = new WatchOutputStream(new FileOutputStream(file, false), file,
+                        bytes, droppedBytes, ready, helperError, watchReady,
+                        watchReady ? 32L * 1024L * 1024L : 128L * 1024L * 1024L);
+            } finally {
+                NavigationLogStorage.markStorageFileChanged(file);
+            }
             status = "starting";
             thread = new Thread(() -> {
                 status = "streaming";
@@ -242,6 +256,7 @@ final class ShanghaiDiagnosticAdb implements AutoCloseable {
                 .getBytes(StandardCharsets.UTF_8);
         private static final byte[] ERROR = "\"event\":\"adas_sampler_error\""
                 .getBytes(StandardCharsets.UTF_8);
+        private final File file;
         private final AtomicLong bytes;
         private final AtomicLong droppedBytes;
         private final AtomicBoolean ready;
@@ -251,9 +266,10 @@ final class ShanghaiDiagnosticAdb implements AutoCloseable {
         private int readyMatch;
         private int errorMatch;
 
-        WatchOutputStream(OutputStream output, AtomicLong bytes, AtomicLong droppedBytes,
+        WatchOutputStream(OutputStream output, File file, AtomicLong bytes, AtomicLong droppedBytes,
                 AtomicBoolean ready, AtomicBoolean helperError, boolean watchReady, long maxBytes) {
             super(output);
+            this.file = file;
             this.bytes = bytes;
             this.droppedBytes = droppedBytes;
             this.ready = ready;
@@ -264,8 +280,12 @@ final class ShanghaiDiagnosticAdb implements AutoCloseable {
 
         @Override public void write(int value) throws IOException {
             if (bytes.get() < maxBytes) {
-                super.write(value);
-                bytes.incrementAndGet();
+                try {
+                    super.write(value);
+                    bytes.incrementAndGet();
+                } finally {
+                    NavigationLogStorage.markStorageFileChanged(file);
+                }
             } else {
                 droppedBytes.incrementAndGet();
             }
@@ -276,12 +296,24 @@ final class ShanghaiDiagnosticAdb implements AutoCloseable {
             long remaining = Math.max(0L, maxBytes - bytes.get());
             int accepted = (int) Math.min(length, remaining);
             if (accepted > 0) {
-                out.write(value, offset, accepted);
-                bytes.addAndGet(accepted);
+                try {
+                    out.write(value, offset, accepted);
+                    bytes.addAndGet(accepted);
+                } finally {
+                    NavigationLogStorage.markStorageFileChanged(file);
+                }
             }
             droppedBytes.addAndGet(length - accepted);
             if (watchReady) {
                 for (int index = offset; index < offset + length; index++) inspect(value[index]);
+            }
+        }
+
+        @Override public void close() throws IOException {
+            try {
+                super.close();
+            } finally {
+                NavigationLogStorage.markStorageFileChanged(file);
             }
         }
 

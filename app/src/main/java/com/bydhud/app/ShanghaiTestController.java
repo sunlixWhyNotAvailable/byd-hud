@@ -50,6 +50,29 @@ final class ShanghaiTestController {
         return cached.protectsDay(day) || ShanghaiDiagnostics.isDayWriting(day);
     }
 
+    // The shell writes this subtree in another process, so its dirty set is not ours.
+    static synchronized File retentionActiveDirectory(Context context) throws IOException {
+        Run run = instance == null ? null : instance.current;
+        if (run != null && run.directory != null) return run.directory;
+        String saved = ShellRuntimeSession.prefs(context).getString("shanghai_work", "");
+        if (saved.isEmpty()) return null;
+        try {
+            JSONObject state = new JSONObject(saved);
+            String path = state.optString("directory");
+            if (path.isEmpty()) return null; // Reset-only operations have no evidence directory.
+            File directory = new File(path);
+            String day = state.optString("day");
+            if (!directory.isAbsolute() || !day.matches("[0-9]{8}")
+                    || !("shanghai_" + state.getString("id")).equals(directory.getName())
+                    || !path.replace('\\', '/').endsWith("/" + day + "/logs/logcat/" + directory.getName())) {
+                throw new IOException("Persisted Shanghai inventory directory is invalid: " + path);
+            }
+            return directory;
+        } catch (org.json.JSONException error) {
+            throw new IOException("Persisted Shanghai inventory identity is invalid", error);
+        }
+    }
+
     private ShanghaiMockGps gps() {
         if (gps == null) gps = new ShanghaiMockGps(context);
         return gps;
@@ -677,6 +700,7 @@ final class ShanghaiTestController {
             synchronized (this) {
                 try { ShanghaiTestService.finish(context); }
                 catch (RuntimeException error) { record(run, "service_stop_error", describe(error)); }
+                NavigationLogStorage.markStorageFileChanged(run.directory);
                 current = null;
                 if (!run.cleanupFailed) ShellRuntimeSession.prefs(context).edit().remove("shanghai_work").commit();
             }
@@ -703,9 +727,14 @@ final class ShanghaiTestController {
                 .put("captureId", run.logcat.captureId()).put("manifest", run.logcat.manifestFile().getAbsolutePath())
                 .put("startedByShanghai", run.logcat.startedByShanghai).put("mode", run.logcat.mode())
                 .put("fromWallMs", run.startedWallMs).put("toWallMs", System.currentTimeMillis()));
-        try (FileOutputStream out = new FileOutputStream(new File(run.directory, "shanghai-session.json"))) {
-            out.write(summary.toString(2).getBytes(StandardCharsets.UTF_8));
-            out.getFD().sync();
+        File file = new File(run.directory, "shanghai-session.json");
+        try {
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                out.write(summary.toString(2).getBytes(StandardCharsets.UTF_8));
+                out.getFD().sync();
+            }
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
         }
     }
 
@@ -831,7 +860,7 @@ final class ShanghaiTestController {
         String secondaryFailures = "";
         String cleanupDetail = "";
         String stopReason = "";
-        File directory;
+        volatile File directory;
         ShanghaiRoute route;
         LogcatRecorder.CaptureLease logcat;
         ShanghaiDiagnostics diagnostics;

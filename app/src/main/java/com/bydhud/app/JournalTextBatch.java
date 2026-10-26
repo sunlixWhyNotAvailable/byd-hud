@@ -20,8 +20,12 @@ final class JournalTextBatch {
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
             throw new IOException("journal directory unavailable: " + parent);
         }
-        try (FileWriter writer = new FileWriter(file, true)) {
-            for (String line : lines) writer.write(line);
+        try {
+            try (FileWriter writer = new FileWriter(file, true)) {
+                for (String line : lines) writer.write(line);
+            }
+        } finally {
+            NavigationLogStorage.markStorageFileChanged(file);
         }
         return true;
     }

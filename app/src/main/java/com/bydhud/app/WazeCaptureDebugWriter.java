@@ -162,10 +162,16 @@ final class WazeCaptureDebugWriter {
         final String fileName;
         final String line;
         final int byteCount;
+        final boolean requestRetention;
         WriterTask owner;
 
         TextWrite(TextKind kind, Context context, String day, File directory,
                 String fileName, String line) {
+            this(kind, context, day, directory, fileName, line, true);
+        }
+
+        TextWrite(TextKind kind, Context context, String day, File directory,
+                String fileName, String line, boolean requestRetention) {
             this.kind = kind;
             this.context = context;
             this.day = day;
@@ -173,6 +179,7 @@ final class WazeCaptureDebugWriter {
             this.fileName = fileName;
             this.line = line;
             this.byteCount = JournalTextBatch.byteCount(line);
+            this.requestRetention = requestRetention;
         }
     }
 
@@ -475,13 +482,21 @@ final class WazeCaptureDebugWriter {
     }
 
     boolean appEvent(Context context, String line) {
+        return appEvent(context, line, true);
+    }
+
+    boolean retentionEvent(Context context, String line) {
+        return appEvent(context, line, false);
+    }
+
+    private boolean appEvent(Context context, String line, boolean requestRetention) {
         Context app = context == null ? null : context.getApplicationContext();
         if (app == null || line == null) return false;
         long eventWallClockMs = System.currentTimeMillis();
         String targetDay = NavCaptureStore.todayDir(eventWallClockMs);
         return postText("app_event", new TextWrite(TextKind.APP_EVENT, app,
                 targetDay, null, AppEventLogger.EVENTS_FILE,
-                AppEventLogger.queuedEvent(line, eventWallClockMs)), null, false);
+                AppEventLogger.queuedEvent(line, eventWallClockMs), requestRetention), null, false);
     }
 
     boolean someIpTx(Runnable work) {
@@ -895,7 +910,10 @@ final class WazeCaptureDebugWriter {
         switch (key.kind) {
             case APP_EVENT:
                 // Batch writers split at the first record that crosses the existing file limit.
-                return AppEventLogger.writeBatch(key.context, key.day, lines);
+                boolean requestRetention = false;
+                for (TextWrite write : writes) requestRetention |= write.requestRetention;
+                return AppEventLogger.writeBatch(
+                        key.context, key.day, lines, requestRetention);
             case NAV_CAPTURE:
                 return NavCaptureStore.writeBatch(key.context, key.day, key.fileName, lines);
             case DIRECT:

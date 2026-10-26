@@ -72,6 +72,7 @@ public final class MainActivity extends ComponentActivity {
     private static final AtomicReference<MainActivity> RESUMED_ACTIVITY = new AtomicReference<>();
     private static final AtomicBoolean STORAGE_SCAN_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean STORAGE_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
+    private static final AtomicBoolean STORAGE_FULL_INVENTORY_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean APP_SCAN_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean APP_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean RUNTIME_STATUS_REFRESH_IN_PROGRESS =
@@ -377,9 +378,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static StorageCacheState scanStorageState(Context context) {
+    private static StorageCacheState scanStorageState(Context context, boolean fullInventory) {
         NavigationLogStorage.StorageSnapshot snapshot =
-                NavigationLogStorage.snapshotAccessibleStorage(context);
+                NavigationLogStorage.snapshotAccessibleStorage(context, fullInventory);
         List<ComposeStorageDay> days = new ArrayList<>();
         List<String> paths = new ArrayList<>();
         SimpleDateFormat labelFormat = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
@@ -407,10 +408,15 @@ public final class MainActivity extends ComponentActivity {
 
     //guards Storage tab responsiveness by moving recursive folder scans off the UI snapshot path.
     public void composeRequestStorageRefresh(boolean force) {
-        requestStorageRefresh(getApplicationContext(), force, "compose");
+        requestStorageRefresh(getApplicationContext(), force, "compose", force);
     }
 
     private static void requestStorageRefresh(Context context, boolean force, String reason) {
+        requestStorageRefresh(context, force, reason, false);
+    }
+
+    private static void requestStorageRefresh(
+            Context context, boolean force, String reason, boolean fullInventory) {
         Context appContext = context.getApplicationContext();
         StorageCacheState current = storageCacheState;
         long now = SystemClock.elapsedRealtime();
@@ -422,41 +428,44 @@ public final class MainActivity extends ComponentActivity {
         if (!force && !stale) {
             return;
         }
-        if (!STORAGE_SCAN_IN_PROGRESS.compareAndSet(false, true)) {
-            if (force) {
-                STORAGE_FORCE_REFRESH_PENDING.set(true);
+        synchronized (STORAGE_SCAN_IN_PROGRESS) {
+            if (!STORAGE_SCAN_IN_PROGRESS.compareAndSet(false, true)) {
+                if (force) {
+                    if (fullInventory) STORAGE_FULL_INVENTORY_PENDING.set(true);
+                    STORAGE_FORCE_REFRESH_PENDING.set(true);
+                }
+                return;
             }
             if (!current.hasCache()) {
                 storageCacheState = current.withCalculating(true);
                 publishSharedUiStateChange();
             }
-            return;
-        }
-        if (!current.hasCache()) {
-            storageCacheState = current.withCalculating(true);
-            publishSharedUiStateChange();
         }
         Thread worker = new Thread(() -> {
             StorageCacheState next;
             try {
-                next = scanStorageState(appContext);
+                next = scanStorageState(appContext, fullInventory);
             } catch (RuntimeException e) {
                 String detail = e.getClass().getSimpleName() + ": "
                         + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' ');
                 next = storageCacheState.withScanError(detail);
-                AppEventLogger.event(appContext, "storage_scan failed "
-                        + e.getClass().getSimpleName() + " "
-                        + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
-            } finally {
-                STORAGE_SCAN_IN_PROGRESS.set(false);
+                AppEventLogger.retentionEvent(appContext, "storage_scan failed "
+                        + android.util.Log.getStackTraceString(e));
             }
-            storageCacheState = next;
-            AppEventLogger.event(appContext, "ui_storage_refresh reason=" + reason
+            boolean pendingRefresh;
+            boolean pendingFullInventory;
+            synchronized (STORAGE_SCAN_IN_PROGRESS) {
+                storageCacheState = next;
+                STORAGE_SCAN_IN_PROGRESS.set(false);
+                pendingRefresh = STORAGE_FORCE_REFRESH_PENDING.getAndSet(false);
+                pendingFullInventory = STORAGE_FULL_INVENTORY_PENDING.getAndSet(false);
+            }
+            AppEventLogger.retentionEvent(appContext, "ui_storage_refresh reason=" + reason
                     + " roots=" + next.rootPaths.size()
                     + " days=" + next.storageDays.size());
             publishSharedUiStateChange();
-            if (STORAGE_FORCE_REFRESH_PENDING.getAndSet(false)) {
-                requestStorageRefresh(appContext, true, "pending-force");
+            if (pendingRefresh) {
+                requestStorageRefresh(appContext, true, "pending-force", pendingFullInventory);
             }
         }, "BydHudStorageScan");
         worker.setPriority(Thread.MIN_PRIORITY);
@@ -1608,7 +1617,7 @@ public final class MainActivity extends ComponentActivity {
         NavigationLogStorage.forceNavCaptureRetention(
                 this,
                 "storage-limit-changed",
-                () -> handler.post(() -> composeRequestStorageRefresh(true)));
+                () -> requestStorageRefreshAfterMutation(getApplicationContext(), "storage-limit-changed"));
     }
 
     //exposes one-folder deletion so Compose can show progress instead of blocking the UI.
