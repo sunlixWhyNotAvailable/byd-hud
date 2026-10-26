@@ -45,14 +45,14 @@ public final class HudMapImage {
             output = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888);
             output.eraseColor(Color.TRANSPARENT);
             // 100% means one source pixel per HUD pixel; 20% selects five times
-            // as much map. Bound the source window instead of moving its outer edge.
+            // as much map, limited to the source size. Offsets may expose empty edges.
             float cropWidth = WIDTH * 100f / scalePercent;
             float cropHeight = HEIGHT * 100f / scalePercent;
             float fit = Math.min(1f, Math.min(sourceWidth / cropWidth, sourceHeight / cropHeight));
             cropWidth *= fit;
             cropHeight *= fit;
-            float left = (sourceWidth - cropWidth) * (1f + x / 100f) / 2f;
-            float top = (sourceHeight - cropHeight) * (1f - y / 100f) / 2f;
+            float left = (sourceWidth - cropWidth) / 2f + sourceWidth * x / 100f;
+            float top = (sourceHeight - cropHeight) / 2f - sourceHeight * y / 100f;
             RectF window = new RectF(left, top, left + cropWidth, top + cropHeight);
             Matrix transform = new Matrix();
             transform.setRectToRect(window, new RectF(0, 0, WIDTH, HEIGHT), Matrix.ScaleToFit.FILL);
