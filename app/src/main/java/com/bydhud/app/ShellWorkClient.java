@@ -268,6 +268,8 @@ final class ShellWorkClient {
                 expectation.put("snapshotPaths", files);
             }
             expectation.put("stage", "REGISTERING");
+            expectation.remove("error");
+            expectation.remove("diagnostic");
             writeExpectation(context, expectation);
             if ("log".equals(type)) logPins.put(id, strings(original.optJSONArray("days")));
             InstrumentProxyManager proxy = InstrumentProxyManager.get(context);
@@ -303,8 +305,18 @@ final class ShellWorkClient {
             AppEventLogger.event(context, "shell_work_registered id=" + safeId(id)
                     + " type=" + type + " files=" + files.length());
         } catch (Exception error) {
-            expectation.put("stage", "REGISTER_FAILED").put("error", safeError(error));
-            boolean interrupted = error instanceof java.io.InterruptedIOException || Thread.currentThread().isInterrupted();
+            boolean unknown = error instanceof InstrumentProxyManager.ShellWorkOutcomeUnknownException;
+            boolean notDispatched = error instanceof InstrumentProxyManager.ShellWorkNotDispatchedException;
+            boolean interrupted = !unknown && !notDispatched
+                    && (error instanceof java.io.InterruptedIOException || Thread.currentThread().isInterrupted());
+            String stage = unknown ? "REGISTER_UNKNOWN" : notDispatched ? "REGISTERING" : "REGISTER_FAILED";
+            try {
+                expectation.put("stage", stage).put("error", shortFailure(error))
+                        .put("diagnostic", FailureDiagnostics.formatBounded(
+                                error, "register-work", stage, 24 * 1024));
+            } catch (Exception recordFailure) {
+                error.addSuppressed(recordFailure);
+            }
             // A lost Binder reply can follow a durable batch; keep its cursor for recovery.
             if (interrupted) {
                 try {
@@ -315,7 +327,8 @@ final class ShellWorkClient {
                     error.addSuppressed(unavailable);
                 }
             }
-            writeExpectation(context, expectation);
+            try { writeExpectation(context, expectation); }
+            catch (IOException recordFailure) { error.addSuppressed(recordFailure); }
             if (interrupted) Thread.currentThread().interrupt();
             throw error;
         }
@@ -363,16 +376,77 @@ final class ShellWorkClient {
             if (!before.equals(expected.toString())) writeExpectation(context, expected);
             return value;
         } catch (org.json.JSONException | RuntimeException error) {
-            throw new IOException("Cannot read trusted shell operation state", error);
+            throw new IOException(FailureDiagnostics.format(
+                    error, "work-state", "decode-or-persist"), error);
         }
     }
 
     static void launch(Context context, File artifactJob) throws IOException {
+        launch(context, artifactJob, false);
+    }
+
+    private static void launch(Context context, File artifactJob, boolean verifiedRegisteredRetry)
+            throws IOException {
         JSONObject expected = expected(context, artifactJob);
         JSONObject input = expected.optJSONObject("input");
         boolean cleanupOnly = "shanghai".equals(expected.optString("type"))
                 && input != null && "cleanup".equals(input.optString("action"));
-        InstrumentProxyManager.get(context).launchWork(expected.optString("id"), cleanupOnly);
+        String previousStage = expected.optString("stage");
+        if ("LAUNCH_FAILED".equals(previousStage)) {
+            JSONObject observed = state(context, artifactJob);
+            String status = observed.optString("state");
+            if ("RUNNING".equals(status) || terminal(status)) return;
+            throw new IOException(expected.optString("error", "Previous shell launch failed"));
+        }
+        if ("LAUNCH_UNKNOWN".equals(previousStage) || "LAUNCH_PENDING".equals(previousStage)
+                || "LAUNCH_SENT".equals(previousStage) || "CANCEL_PENDING".equals(previousStage)
+                || "CANCEL_UNKNOWN".equals(previousStage) || "CANCEL_SENT".equals(previousStage)) {
+            JSONObject observed = state(context, artifactJob);
+            String status = observed.optString("state");
+            if ("RUNNING".equals(status) || terminal(status) || "UNCERTAIN".equals(status)) return;
+            if (!"REGISTERED".equals(status))
+                throw new IOException("Shell launch state is " + status + "; no replay was sent");
+            if ("LAUNCH_UNKNOWN".equals(previousStage) || "LAUNCH_PENDING".equals(previousStage)
+                    || "CANCEL_PENDING".equals(previousStage) || "CANCEL_UNKNOWN".equals(previousStage)
+                    || "CANCEL_SENT".equals(previousStage) || !verifiedRegisteredRetry) return;
+        }
+        try {
+            expected.put("stage", "LAUNCH_PENDING");
+            expected.remove("error");
+            expected.remove("diagnostic");
+            writeExpectation(context, expected);
+        } catch (org.json.JSONException error) {
+            throw new IOException("Cannot persist shell launch intent", error);
+        }
+        try {
+            InstrumentProxyManager.get(context).launchWork(expected.optString("id"), cleanupOnly);
+            try { expected.put("stage", "LAUNCH_SENT"); }
+            catch (org.json.JSONException error) {
+                throw new IOException("Cannot record shell launch acknowledgement", error);
+            }
+            writeExpectation(context, expected);
+        } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException error) {
+            recordLaunchFailure(context, expected, error, "LAUNCH_UNKNOWN");
+            throw error;
+        } catch (InstrumentProxyManager.ShellWorkNotDispatchedException error) {
+            recordLaunchFailure(context, expected, error, "REGISTERED");
+            throw error;
+        } catch (IOException | RuntimeException error) {
+            recordLaunchFailure(context, expected, error, "LAUNCH_FAILED");
+            throw error;
+        }
+    }
+
+    private static void recordLaunchFailure(Context context, JSONObject expected,
+            Throwable failure, String stage) {
+        try {
+            expected.put("stage", stage).put("error", shortFailure(failure))
+                    .put("diagnostic", FailureDiagnostics.formatBounded(
+                            failure, "launch-work", stage, 24 * 1024));
+            writeExpectation(context, expected);
+        } catch (Exception recordFailure) {
+            failure.addSuppressed(recordFailure);
+        }
     }
 
     static JSONObject await(Context context, File artifact, Consumer<JSONObject> progress) throws Exception {
@@ -381,18 +455,78 @@ final class ShellWorkClient {
         JSONObject expected = expected(context, artifact);
         if (!expected.optBoolean("registrationComplete", true)
                 || "REGISTERING".equals(expected.optString("stage"))
+                || "REGISTER_UNKNOWN".equals(expected.optString("stage"))
                 || "REGISTER_FAILED".equals(expected.optString("stage"))) {
-            prepare(context, expected.getString("type"), expected.getString("id"), expected.getJSONObject("input"));
+            while (true) {
+                if (Thread.currentThread().isInterrupted())
+                    throw new java.io.InterruptedIOException("Shell registration remains pending; artifacts retained");
+                try {
+                    prepare(context, expected.getString("type"), expected.getString("id"),
+                            expected.getJSONObject("input"));
+                    break;
+                } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
+                    if (!"register-work".equals(unknown.operation)) throw unknown;
+                    try { Thread.sleep(100); }
+                    catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        unknown.addSuppressed(interrupted);
+                        throw new InstrumentProxyManager.ShellWorkOutcomeUnknownException(
+                                "register-work", expected.optString("id"),
+                                "wait was interrupted while registration remained unresolved",
+                                unknown.retainedCall, unknown);
+                    }
+                } catch (InstrumentProxyManager.ShellWorkNotDispatchedException busy) {
+                    try { Thread.sleep(100); }
+                    catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        java.io.InterruptedIOException failure = new java.io.InterruptedIOException(
+                                "Shell registration was not dispatched before interruption");
+                        failure.initCause(interrupted);
+                        throw failure;
+                    }
+                }
+            }
         }
         long start = android.os.SystemClock.elapsedRealtime();
         String lastProgress = "";
         boolean cancelSent = false;
         boolean registeredRetrySent = false;
         try {
-            launch(context, artifact);
+            while (true) {
+                try {
+                    launch(context, artifact);
+                    break;
+                } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
+                    if ("launch-work".equals(unknown.operation)) break;
+                    if (!"work-state".equals(unknown.operation)
+                            || Thread.currentThread().isInterrupted()) throw unknown;
+                    Thread.sleep(100);
+                } catch (InstrumentProxyManager.ShellWorkNotDispatchedException busy) {
+                    Thread.sleep(100);
+                }
+            }
             while (true) {
                 if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
-                JSONObject current = state(context, artifact);
+                JSONObject current;
+                try { current = state(context, artifact); }
+                catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
+                    if (!"work-state".equals(unknown.operation)
+                            || Thread.currentThread().isInterrupted()) throw unknown;
+                    Thread.sleep(100);
+                    continue;
+                } catch (InstrumentProxyManager.ShellWorkNotDispatchedException busy) {
+                    Thread.sleep(100);
+                    continue;
+                }
+                if ("UNCERTAIN".equals(current.optString("state"))) {
+                    JSONObject result = current.optJSONObject("result");
+                    String detail = result == null ? "unknown"
+                            : result.optString("diagnostic", result.optString("error", "unknown"));
+                    throw new InstrumentProxyManager.ShellWorkOutcomeUnknownException(
+                            "worker-result", expected.optString("id"),
+                            "helper persisted UNCERTAIN state: " + detail, false,
+                            new IOException(detail));
+                }
                 JSONObject sign = current.optJSONObject("signRequest");
                 if (sign != null && !sign.optString("id").isEmpty()) serviceSigning(context, artifact, sign);
                 JSONObject phase = current.optJSONObject("progress");
@@ -404,29 +538,61 @@ final class ShellWorkClient {
                 if ("FAILED".equals(status) || "CANCELLED".equals(status)
                         || "INTERRUPTED".equals(status)) {
                     JSONObject result = current.optJSONObject("result");
-                    throw new IOException(result == null ? "Shell work " + status.toLowerCase()
+                    IOException failure = new IOException(result == null ? "Shell work " + status.toLowerCase()
                             : result.optString("error", "Shell work " + status.toLowerCase()));
+                    if (result != null && !result.optString("diagnostic").isEmpty())
+                        failure.addSuppressed(new IOException(result.optString("diagnostic")));
+                    throw failure;
                 }
                 if (!registeredRetrySent && android.os.SystemClock.elapsedRealtime() - start > 15_000
                         && "REGISTERED".equals(status)) {
                     // A registered operation can be relaunched once. Started work is never replayed.
-                    launch(context, artifact);
+                    launch(context, artifact, true);
                     registeredRetrySent = true;
                 }
                 Thread.sleep(100);
             }
         } catch (InterruptedException cancelled) {
-            if (!cancelSent) { cancel(context, artifact); cancelSent = true; }
+            java.io.InterruptedIOException interrupted = new java.io.InterruptedIOException(
+                    "Shell work cancellation requested; artifacts retained until worker completion is confirmed");
+            interrupted.initCause(cancelled);
+            try {
+                if (!cancelSent) { cancel(context, artifact); cancelSent = true; }
+            } catch (Exception cancellationFailure) {
+                interrupted.addSuppressed(cancellationFailure);
+            }
             long deadline = android.os.SystemClock.elapsedRealtime() + 10_000;
+            Throwable lastStateFailure = null;
+            boolean terminalObserved = false;
             while (android.os.SystemClock.elapsedRealtime() < deadline) {
                 try {
                     JSONObject current = state(context, artifact);
-                    if (terminal(current.optString("state"))) break;
-                    Thread.sleep(50);
-                } catch (Exception ignored) { break; }
+                    String state = current.optString("state");
+                    if ("UNCERTAIN".equals(state)) {
+                        JSONObject result = current.optJSONObject("result");
+                        String detail = result == null ? "unknown"
+                                : result.optString("diagnostic", result.optString("error", "unknown"));
+                        lastStateFailure = new IOException("Helper state is UNCERTAIN: " + detail);
+                    } else if (terminal(state)) {
+                        terminalObserved = true;
+                        break;
+                    }
+                } catch (Exception statusFailure) {
+                    lastStateFailure = statusFailure;
+                }
+                try { Thread.sleep(50); }
+                catch (InterruptedException repeatedInterrupt) { interrupted.addSuppressed(repeatedInterrupt); }
             }
+            if (terminalObserved) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            }
+            if (lastStateFailure != null) interrupted.addSuppressed(lastStateFailure);
             Thread.currentThread().interrupt();
-            throw new java.io.InterruptedIOException("Shell work cancelled; artifacts retained until worker exits");
+            throw new InstrumentProxyManager.ShellWorkOutcomeUnknownException(
+                    "cancel-await", expected.optString("id"),
+                    "cancellation was not confirmed within 10 seconds; artifacts were retained",
+                    false, interrupted);
         }
     }
 
@@ -436,11 +602,83 @@ final class ShellWorkClient {
 
     static boolean cancel(Context context, File artifact, boolean resetAnyMockGps) throws IOException {
         JSONObject expected = expected(context, artifact);
-        if (!InstrumentProxyManager.get(context).cancelWork(
-                expected.optString("id"), resetAnyMockGps)) {
-            throw new IOException("Trusted shell worker did not acknowledge cancellation");
+        JSONObject observed = state(context, artifact);
+        String status = observed.optString("state");
+        if (terminal(status)) return true;
+        if ("UNCERTAIN".equals(status))
+            throw new InstrumentProxyManager.ShellWorkOutcomeUnknownException(
+                    "cancel-work", expected.optString("id"),
+                    "helper state is UNCERTAIN; cancellation was not sent", false,
+                    new IOException(observed.optJSONObject("result") == null ? "unknown"
+                            : observed.optJSONObject("result").optString("diagnostic", "unknown")));
+        String previousStage = expected.optString("stage");
+        boolean previousResetAny = expected.optBoolean("cancelResetAny");
+        if ("CANCEL_SENT".equals(previousStage)) {
+            if (previousResetAny || !resetAnyMockGps)
+                return true;
+        }
+        if ("CANCEL_PENDING".equals(previousStage) || "CANCEL_UNKNOWN".equals(previousStage)) {
+            if (previousResetAny || !resetAnyMockGps)
+                throw new InstrumentProxyManager.ShellWorkOutcomeUnknownException(
+                        "cancel-work", expected.optString("id"),
+                        "the previous cancellation request is unresolved; no replay was sent", false,
+                        new IOException(expected.optString("diagnostic", "Cancellation outcome unknown")));
+        }
+        try {
+            expected.put("stage", "CANCEL_PENDING").put("cancelResetAny", resetAnyMockGps);
+            writeExpectation(context, expected);
+        } catch (org.json.JSONException error) {
+            throw new IOException("Cannot persist cancellation intent", error);
+        }
+        try {
+            if (!InstrumentProxyManager.get(context).cancelWork(
+                    expected.optString("id"), resetAnyMockGps)) {
+                throw new IOException("Trusted shell worker did not acknowledge cancellation");
+            }
+            try {
+                expected.put("stage", "CANCEL_SENT");
+                expected.remove("error");
+                expected.remove("diagnostic");
+            }
+            catch (org.json.JSONException error) {
+                throw new IOException("Cannot persist cancellation acknowledgement", error);
+            }
+            writeExpectation(context, expected);
+        } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException error) {
+            recordCancelFailure(context, expected, error, "CANCEL_UNKNOWN");
+            throw error;
+        } catch (InstrumentProxyManager.ShellWorkNotDispatchedException error) {
+            if (previousStage.startsWith("CANCEL_")) {
+                try { expected.put("cancelResetAny", previousResetAny); }
+                catch (org.json.JSONException recordFailure) { error.addSuppressed(recordFailure); }
+            }
+            recordCancelFailure(context, expected, error, previousStage);
+            throw error;
+        } catch (IOException | RuntimeException error) {
+            recordCancelFailure(context, expected, error, "CANCEL_FAILED");
+            throw error;
         }
         return true;
+    }
+
+    private static void recordCancelFailure(Context context, JSONObject expected,
+            Throwable failure, String stage) {
+        try {
+            expected.put("stage", stage).put("cancelResetAny", expected.optBoolean("cancelResetAny"))
+                    .put("error", shortFailure(failure))
+                    .put("diagnostic", FailureDiagnostics.formatBounded(
+                            failure, "cancel-work", stage, 24 * 1024));
+            writeExpectation(context, expected);
+        } catch (Exception recordFailure) {
+            failure.addSuppressed(recordFailure);
+        }
+    }
+
+    private static String shortFailure(Throwable failure) {
+        String text = FailureDiagnostics.format(failure, "", "");
+        int newline = text.indexOf('\n');
+        String summary = newline < 0 ? text : text.substring(0, newline);
+        return summary.length() > 256 ? summary.substring(0, 256) : summary;
     }
 
     private static void serviceSigning(Context context, File artifact, JSONObject request)
@@ -528,9 +766,20 @@ final class ShellWorkClient {
         }
     }
 
-    static boolean hasRequest(Context context, String type, String id) {
-        try { expected(context, job(context, type, id)); return true; }
-        catch (IOException ignored) { return false; }
+    static boolean hasRequest(Context context, String type, String id)
+            throws InstrumentProxyManager.ShellWorkOutcomeUnknownException {
+        try {
+            File artifact = job(context, type, id);
+            if (java.nio.file.Files.notExists(expectationFile(context, type, id).toPath()))
+                return false;
+            expected(context, artifact);
+            return true;
+        } catch (IOException | RuntimeException error) {
+            throw new InstrumentProxyManager.ShellWorkOutcomeUnknownException(
+                    "read-work-expectation", id,
+                    "request presence or identity could not be verified; artifacts retained",
+                    false, error);
+        }
     }
 
     static boolean retained(Context context, NavigatorPatchStore.Profile profile) {

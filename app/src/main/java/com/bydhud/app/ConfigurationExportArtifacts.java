@@ -87,7 +87,8 @@ final class ConfigurationExportArtifacts {
         if (ShellWorkEntryPoint.currentJob == null) {
             try { next = Math.min(next, ShellWorkClient.retireExports(context, false)); }
             catch (Exception error) {
-                log.accept("cleanup_failed shell=" + ShellExportCleanup.failure(error));
+                log.accept("cleanup_failed shell="
+                        + FailureDiagnostics.format(error, "configuration-export", "retirement"));
                 // Keep the persisted cleanup job: a temporary transport loss must not lose expiry.
                 next = Math.min(next, now + RETRY_MS);
             }

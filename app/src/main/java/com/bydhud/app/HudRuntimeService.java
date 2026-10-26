@@ -305,11 +305,6 @@ public final class HudRuntimeService extends Service {
         return inFlight ? StartDecision.IN_FLIGHT : StartDecision.REQUEST;
     }
 
-    static StartDecision startDecisionForTest(boolean shutdown, boolean runtimeAllowed,
-            boolean servicePresent, boolean inFlight, boolean hardResetPending) {
-        return startDecision(shutdown, runtimeAllowed, servicePresent, inFlight, hardResetPending);
-    }
-
     //Acquires the one startup gate used by all production start callers.
     static boolean tryAcquireStartRequest() {
         return START_IN_FLIGHT.compareAndSet(false, true);
@@ -318,10 +313,6 @@ public final class HudRuntimeService extends Service {
     //Rechecks the production marker after the gate closes the check/start race.
     static boolean shouldSkipStartAfterGate(boolean hardResetPending) {
         return !hardResetPending && HudRuntimeState.isServicePresent();
-    }
-
-    static void clearStartRequestForTest() {
-        clearStartRequestGate();
     }
 
     private static void clearStartRequestGate() {

@@ -413,7 +413,8 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         recenterButton.setPadding(dp(8), dp(8), dp(8), dp(8));
         if (surface == null || !surface.isValid()) return;
         Rect frame = surfaceView.getHolder().getSurfaceFrame();
-        surfaceChanged(surfaceView.getHolder(), 0, frame.width(), frame.height());
+        surfaceChanged(surfaceView.getHolder(), android.graphics.PixelFormat.RGBA_8888,
+                frame.width(), frame.height());
         NavAppDisplayController.get(this).onSurfaceWindowChanged();
     }
 

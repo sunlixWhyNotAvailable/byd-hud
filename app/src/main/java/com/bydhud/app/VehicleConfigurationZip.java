@@ -2437,14 +2437,6 @@ final class VehicleConfigurationZip {
         }
     }
 
-    static List<String> maskNetworkAddressesForTest(List<String> values) {
-        NetworkMasker masker = new NetworkMasker();
-        List<String> masked = new ArrayList<>();
-        if (values == null) return masked;
-        for (String value : values) masked.add(masker.mask(value == null ? "" : value));
-        return masked;
-    }
-
     private static final class NetworkMasker {
         private final Map<String, String> ipAliases = new LinkedHashMap<>();
         private final Map<String, String> macAliases = new LinkedHashMap<>();

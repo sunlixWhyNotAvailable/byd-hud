@@ -19,6 +19,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.zip.ZipEntry;
@@ -56,7 +57,9 @@ final class LogShareZip {
         PROGRESS_LISTENER.remove();
     }
 
-    enum CollectionOutcome { FULL, PARTIAL, FAILED }
+    private static final Set<String> UNCERTAIN_EXPORT_PINS = ConcurrentHashMap.newKeySet();
+
+    enum CollectionOutcome { FULL, PARTIAL, FAILED, UNKNOWN }
 
     static final class Result {
         final boolean ok;
@@ -70,7 +73,7 @@ final class LogShareZip {
         }
         Result(CollectionOutcome outcome, File file, String detail, boolean patchReportsIncomplete) {
             this.outcome = outcome;
-            this.ok = outcome != CollectionOutcome.FAILED;
+            this.ok = outcome == CollectionOutcome.FULL || outcome == CollectionOutcome.PARTIAL;
             this.file = file;
             this.detail = detail == null ? "" : detail;
             this.patchReportsIncomplete = patchReportsIncomplete;
@@ -94,7 +97,7 @@ final class LogShareZip {
         }
     }
 
-    private static final class SnapshotFile {
+    static final class SnapshotFile {
         final File file;
         final String entryName;
         final long length;
@@ -157,9 +160,17 @@ final class LogShareZip {
     static Result createIndependent(Context context, List<String> days, String uploadId, String operationId) {
         File job = null;
         boolean pinned = false;
+        Exception prepareRetryable = null;
         try {
             job = ShellWorkClient.job(context, "log", operationId);
-            if (!ShellWorkClient.hasRequest(context, "log", operationId)) {
+            boolean hasRequest = ShellWorkClient.hasRequest(context, "log", operationId);
+            if (hasRequest && UNCERTAIN_EXPORT_PINS.remove(operationId)) {
+                pinned = true;
+            } else if (!hasRequest && UNCERTAIN_EXPORT_PINS.contains(operationId)) {
+                return new Result(CollectionOutcome.UNKNOWN, null,
+                        "previous export outcome is still unknown; retry reconciliation", false);
+            }
+            if (!hasRequest) {
                 checkedDays(days);
                 List<JSONObject> reportList = NavigatorPatchReportStore.snapshotAll(context);
                 Map<String, Long> reportDays = NavigatorPatchReportStore.reportDays(reportList);
@@ -187,21 +198,61 @@ final class LogShareZip {
                     }
                 } finally { NavigationLogStorage.unlockTopologyWrite(); }
                 JSONObject health = freezeIncidentSources(context, days, job, sources, omissions);
-                ShellWorkClient.prepare(context, "log", operationId, new JSONObject()
+                JSONObject input = new JSONObject()
                         .put("sources", sources).put("reports", reports).put("health", health)
                         .put("checkpoint", checkpoint).put("days", new org.json.JSONArray(days))
                         .put("omissions", new org.json.JSONArray(omissions))
-                        .put("uploadId", uploadId));
+                        .put("uploadId", uploadId);
+                try {
+                    ShellWorkClient.prepare(context, "log", operationId, input);
+                } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
+                    if (Thread.currentThread().isInterrupted()) throw unknown;
+                    prepareRetryable = unknown;
+                } catch (InstrumentProxyManager.ShellWorkNotDispatchedException busy) {
+                    if (Thread.currentThread().isInterrupted()) throw busy;
+                    prepareRetryable = busy;
+                }
             } else {
-                NavigationLogStorage.withWriteLock(() -> NavigationLogStorage.pinExportDays(days));
-                pinned = true;
+                if (!pinned) {
+                    NavigationLogStorage.withWriteLock(
+                            () -> NavigationLogStorage.pinExportDays(days));
+                    pinned = true;
+                }
             }
-            JSONObject result = ShellWorkClient.await(context, job, current -> {
-                String stage = current.optString("phase");
-                if ("COPYING".equals(stage) || "ARCHIVING".equals(stage)) phase(Phase.valueOf(stage), 0);
-            });
+            JSONObject result;
+            try {
+                result = awaitExport(context, job, operationId);
+            } catch (Exception awaitFailure) {
+                if (prepareRetryable != null) awaitFailure.addSuppressed(prepareRetryable);
+                throw awaitFailure;
+            }
             return new Result(CollectionOutcome.valueOf(result.getString("outcome")),
                     new File(result.getString("file")), result.optString("detail"), result.optBoolean("incompleteReports"));
+        } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException error) {
+            Log.e(TAG, "shell export result unknown id=" + operationId, error);
+            if (pinned) {
+                UNCERTAIN_EXPORT_PINS.add(operationId);
+                pinned = false;
+            }
+            return new Result(CollectionOutcome.UNKNOWN, null, error.toString(), false);
+        } catch (InterruptedException | InterruptedIOException error) {
+            Thread.currentThread().interrupt();
+            boolean retain = job != null;
+            if (retain) {
+                try { retain = ShellWorkClient.hasRequest(context, "log", operationId); }
+                catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
+                    error.addSuppressed(unknown);
+                }
+            }
+            if (retain) {
+                Log.e(TAG, "shell export interrupted with persisted request id=" + operationId, error);
+                if (pinned) {
+                    UNCERTAIN_EXPORT_PINS.add(operationId);
+                    pinned = false;
+                }
+                return new Result(CollectionOutcome.UNKNOWN, null, error.toString(), false);
+            }
+            return failure(error.toString());
         } catch (Exception error) {
             if (error instanceof InterruptedException) Thread.currentThread().interrupt();
             return failure(error.toString());
@@ -209,6 +260,13 @@ final class LogShareZip {
             // The persistent job also pins its sources across application death.
             if (pinned) NavigationLogStorage.unpinExportDays(days);
         }
+    }
+
+    private static JSONObject awaitExport(Context context, File job, String operationId) throws Exception {
+        return ShellWorkClient.await(context, job, current -> {
+            String stage = current.optString("phase");
+            if ("COPYING".equals(stage) || "ARCHIVING".equals(stage)) phase(Phase.valueOf(stage), 0);
+        });
     }
 
     static JSONObject runInShell(Context context, JSONObject input) throws Exception {
@@ -429,9 +487,17 @@ final class LogShareZip {
                 if (removed.files > 0) AppEventLogger.event(app, "storage_share_cleanup files="
                         + removed.files + " bytes=" + removed.bytes);
                 ShellWorkClient.retireExports(app, true);
+            } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException error) {
+                CLEANUP_STARTED.set(false);
+                String diagnostic = FailureDiagnostics.formatBounded(error,
+                        "log-export", "retirement", 4096).replace('\n', ' ').replace('\r', ' ');
+                AppEventLogger.event(app, "shell_export_cleanup_deferred stage=retirement reason="
+                        + diagnostic);
             } catch (Exception error) {
+                String diagnostic = FailureDiagnostics.formatBounded(error,
+                        "log-export", "startup-cleanup", 4096).replace('\n', ' ').replace('\r', ' ');
                 AppEventLogger.event(app, "shell_export_cleanup_deferred stage=startup reason="
-                        + ShellExportCleanup.failure(error));
+                        + diagnostic);
             }
         }, "BydHudExportCleanup");
         worker.setPriority(Thread.MIN_PRIORITY);
@@ -498,7 +564,7 @@ final class LogShareZip {
         return files;
     }
 
-    private static void collectFiles(
+    static void collectFiles(
             File dayRoot,
             String prefix,
             List<SnapshotFile> output,
@@ -640,8 +706,8 @@ final class LogShareZip {
             return new FileInputStream(new File(file.getParentFile(), "logcat.log"));
         }
     }
-    private static boolean appendLog(File file) {
-        return file.getName().matches("(?i).+\\.(log|jsonl)(\\.\\d+)?")
+    static boolean appendLog(File file) {
+        return file.getName().matches("(?i).+\\.(log|jsonl)(\\.\\d+|\\.part-\\d+)?")
                 || file.getName().equals("logcat.log.part") || file.getName().equals("logcat.txt");
     }
     private static void trimIncompleteLine(File file, String name, List<String> omissions) throws IOException {

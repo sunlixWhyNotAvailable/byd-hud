@@ -319,6 +319,7 @@ private data class Copy(
     val hudFailed: String,
     val adbOk: String,
     val adbNotGranted: String,
+    val adbChecking: String,
     val permissionsOk: String,
     val permissionsMissing: String,
     val ukr: String,
@@ -1042,7 +1043,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 withContext(Dispatchers.IO) {
                     activity.composeSaveMapProfile(editor.originalSource, editor.draft)
                 }
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                AppEventLogger.event(activity, FailureDiagnostics.format(
+                    error, "map_profile", "save_ui"))
                 false
             }
             mapProfileSaving = false
@@ -1072,7 +1075,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         updateScope.launch {
             val deleted = try {
                 withContext(Dispatchers.IO) { activity.composeDeleteMapProfile(source) }
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                AppEventLogger.event(activity, FailureDiagnostics.format(
+                    error, "map_profile", "delete_ui"))
                 false
             }
             mapProfileDeleting = false
@@ -1140,12 +1145,23 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
 
     fun startNavigatorAssetDownload(assetId: String) {
         if (navigatorAssetActionPending) return
-        try {
-            activity.composeStartNavigatorAssetDownload(assetId)
-            refresh()
-        } catch (error: Exception) {
-            activity.composeAppendStatus("Navigator download failed: ${error.message}")
-            refresh()
+        navigatorAssetActionPending = true
+        updateScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    activity.composeStartNavigatorAssetDownload(assetId)
+                }
+            } catch (error: Exception) {
+                AppEventLogger.event(activity, FailureDiagnostics.format(
+                    error, "navigator_asset", "download_admission"))
+                activity.composeAppendStatus(language.choose(
+                    "Не вдалося розпочати завантаження ресурсу навігатора.",
+                    "Could not start the navigator asset download.",
+                    "Не удалось начать загрузку ресурса навигатора.") + " " + error.toString())
+            } finally {
+                navigatorAssetActionPending = false
+                refresh()
+            }
         }
     }
 
@@ -1169,7 +1185,13 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                     }
                 }
             } catch (error: Exception) {
-                activity.composeAppendStatus("Navigator install check failed: ${error.message}")
+                AppEventLogger.event(activity, FailureDiagnostics.format(
+                    error, "navigator_asset", "install_admission"))
+                activity.composeAppendStatus(language.choose(
+                    "Не вдалося перевірити можливість встановлення ресурсу навігатора.",
+                    "Could not check whether the navigator asset can be installed.",
+                    "Не удалось проверить возможность установки ресурса навигатора.")
+                        + " " + error.toString())
             } finally {
                 navigatorAssetActionPending = false
                 refresh()
@@ -1190,7 +1212,12 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                     activity.composeRestoreNavigatorAsset(assetId)
                 }
             } catch (error: Exception) {
-                activity.composeAppendStatus("Navigator restore failed: ${error.message}")
+                AppEventLogger.event(activity, FailureDiagnostics.format(
+                    error, "navigator_asset", "restore"))
+                activity.composeAppendStatus(language.choose(
+                    "Не вдалося відновити ресурс навігатора.",
+                    "Could not restore the navigator asset.",
+                    "Не удалось восстановить ресурс навигатора.") + " " + error.toString())
             } finally {
                 navigatorAssetActionPending = false
                 refresh()
@@ -2185,9 +2212,22 @@ private fun Header(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             HudStatusPill(hudStatus, copy, palette)
             // ADB reflects persisted authorization evidence; Permissions reflects current grants.
-            Pill(if (snapshot.adbAuthorized) copy.adbOk else copy.adbNotGranted,
-                if (snapshot.adbAuthorized) palette.green else palette.red,
-                if (snapshot.adbAuthorized) palette.greenSoft else palette.redSoft)
+            Pill(
+                when {
+                    !snapshot.adbAuthorizationStatusAvailable -> copy.adbChecking
+                    snapshot.adbAuthorized -> copy.adbOk
+                    else -> copy.adbNotGranted
+                },
+                when {
+                    !snapshot.adbAuthorizationStatusAvailable -> palette.muted
+                    snapshot.adbAuthorized -> palette.green
+                    else -> palette.red
+                },
+                when {
+                    !snapshot.adbAuthorizationStatusAvailable -> palette.panelAlt
+                    snapshot.adbAuthorized -> palette.greenSoft
+                    else -> palette.redSoft
+                })
             Pill(if (snapshot.settingsPermissionsGranted) copy.permissionsOk else copy.permissionsMissing,
                 if (snapshot.settingsPermissionsGranted) palette.green else palette.red,
                 if (snapshot.settingsPermissionsGranted) palette.greenSoft else palette.redSoft)
@@ -11360,6 +11400,7 @@ private fun enCopy() = Copy(
     hudFailed = "HUD: failed",
     adbOk = "ADB: OK",
     adbNotGranted = "ADB: not granted",
+    adbChecking = "ADB: checking",
     permissionsOk = "Permissions: OK",
     permissionsMissing = "Permissions: missing",
     ukr = "Укр",
@@ -11606,6 +11647,7 @@ private fun uaCopy() = enCopy().copy(
     hudIdle = "HUD: очікує",
     hudFailed = "HUD: помилка",
     adbNotGranted = "ADB: не видано",
+    adbChecking = "ADB: перевірка",
     permissionsOk = "Права: OK",
     permissionsMissing = "Права: немає",
     dark = "Темна",
@@ -11853,6 +11895,7 @@ private fun ruCopy() = enCopy().copy(
     hudFailed = "HUD: ошибка",
     adbOk = "ADB: ОК",
     adbNotGranted = "ADB: нет доступа",
+    adbChecking = "ADB: проверка",
     permissionsOk = "Разрешения: ОК",
     permissionsMissing = "Разрешения: отсутствуют",
     ukr = "Укр",

@@ -708,11 +708,6 @@ final class VehicleTbtPublisher {
         }
     }
 
-    static boolean shouldReplaceOwnerForTest(
-            boolean currentHasHudPriority, boolean nextHasHudPriority) {
-        return !currentHasHudPriority || nextHasHudPriority;
-    }
-
     static boolean shouldClearGuidanceForGenerationReplacementForTest(
             boolean active, String currentOwner, long currentGeneration,
             String incomingOwner, long incomingGeneration) {

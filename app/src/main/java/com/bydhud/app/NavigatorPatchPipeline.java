@@ -195,26 +195,28 @@ final class NavigatorPatchPipeline {
             throws Exception {
         REPORT_ID.set(operationId);
         REPORT_STAGE.set("MATERIALIZE");
-        Exception failure = null;
+        Throwable failure = null;
         try {
             reportStage(context, "MATERIALIZE", "IN_PROGRESS", "");
             WorkerPatchResult result = workerPrepare(context, profileId, selectedSource,
                     transaction, expected);
             reportScan(context, operationId, "OUTPUT_VERIFIED", result.output);
             return result;
-        } catch (Exception error) {
+        } catch (Exception | OutOfMemoryError error) {
             failure = error;
             // Cancellation interrupts the worker; still retain its last reached stage.
             boolean interrupted = Thread.interrupted();
             try {
                 reportStage(context, REPORT_STAGE.get(),
                         error instanceof OperationCancelledException || interrupted
-                                ? "CANCELLED" : "FAILED", clean(error.getMessage()));
+                                ? "CANCELLED" : "FAILED",
+                        FailureDiagnostics.formatBounded(error, operationId, REPORT_STAGE.get(), 1000));
             } catch (Exception reportError) {
                 error.addSuppressed(reportError);
             } finally {
                 if (interrupted) Thread.currentThread().interrupt();
             }
+            AppEventLogger.event(context, FailureDiagnostics.format(error, operationId, REPORT_STAGE.get()));
             throw error;
         } finally {
             boolean interrupted = Thread.interrupted();
@@ -275,6 +277,20 @@ final class NavigatorPatchPipeline {
         if (id == null || id.isEmpty()) return;
         REPORT_STAGE.set(stage);
         NavigatorPatchReportStore.recordStage(context, id, stage, outcome, reason, null);
+    }
+
+    private static void reportStageFailure(Context context, String stage, Throwable failure)
+            throws Exception {
+        try {
+            reportStage(context, stage, "OPTIONAL_FAILED",
+                    FailureDiagnostics.formatBounded(failure, REPORT_ID.get(), stage, 1000));
+        } catch (IOException reportFailure) {
+            failure.addSuppressed(reportFailure);
+            AppEventLogger.event(context, FailureDiagnostics.format(failure, REPORT_ID.get(), stage));
+            if (failure instanceof Exception) throw (Exception) failure;
+            if (failure instanceof Error) throw (Error) failure;
+            throw new IOException("Could not retain patch failure", failure);
+        }
     }
 
     private static void importComponentReports(Context context, String id, File transaction)
@@ -417,6 +433,7 @@ final class NavigatorPatchPipeline {
             }
             return result;
         } catch (Exception error) {
+            AppEventLogger.event(context, FailureDiagnostics.format(error, profile.id, "scan-worker"));
             if (claimed && !NavigatorPatchWorkerClient.retained(context, profile)) {
                 if (NavigatorPatchStore.isCancellationRequested(context, profile)
                         || error instanceof OperationCancelledException
@@ -465,6 +482,7 @@ final class NavigatorPatchPipeline {
             transaction = null;
             return prepared;
         } catch (Exception error) {
+            AppEventLogger.event(context, FailureDiagnostics.format(error, profile.id, "prepare-worker"));
             if (claimed && !NavigatorPatchWorkerClient.retained(context, profile)) {
                 if (NavigatorPatchStore.isCancellationRequested(context, profile)
                         || error instanceof OperationCancelledException
@@ -473,7 +491,7 @@ final class NavigatorPatchPipeline {
                             "Patch preparation cancelled");
                 } else {
                     NavigatorPatchStore.transition(context, profile,
-                            NavigatorPatchStore.FAILED, error.getMessage());
+                            NavigatorPatchStore.FAILED, error.toString());
                 }
             }
             if (!NavigatorPatchWorkerClient.retained(context, profile)) deleteTree(transaction);
@@ -550,6 +568,7 @@ final class NavigatorPatchPipeline {
                 publishPrepared(context, profile, operation, result);
             }
         } catch (Exception error) {
+            AppEventLogger.event(context, FailureDiagnostics.format(error, profile.id, "recover-worker"));
             if (!registered || NavigatorPatchWorkerClient.retained(context, profile)) return;
             if (NavigatorPatchStore.isCancellationRequested(context, profile))
                 NavigatorPatchStore.markCancelled(context, profile, "Cancelled");
@@ -728,11 +747,11 @@ final class NavigatorPatchPipeline {
         } catch (Exception | OutOfMemoryError error) {
             if (Thread.currentThread().isInterrupted()) throw new OperationCancelledException();
             if (accepted || !patched.isDirectory()) throw error;
-            reportStage(context, "MAP", "OPTIONAL_FAILED", clean(error.getMessage()));
+            reportStageFailure(context, "MAP", error);
             AppEventLogger.event(context, "navigator_patch stage=map profile=" + profile.id
-                    + " code=MAP_PATCH_FAILED detail=" + clean(error.getMessage()));
+                    + " code=MAP_PATCH_FAILED detail=" + FailureDiagnostics.format(error, profile.id, "map-patch"));
             return withMap(baseline, NavigatorPatchStore.FAILED,
-                    clean(error.getMessage()), baseline.mapRevision);
+                    clean(error.toString()), baseline.mapRevision);
         } finally {
             deleteTree(candidate);
         }
@@ -986,8 +1005,9 @@ final class NavigatorPatchPipeline {
             NavigatorPatchStore.transition(context, profile, NavigatorPatchStore.IDLE, "");
             return profile;
         } catch (Exception error) {
+            AppEventLogger.event(context, FailureDiagnostics.format(error, expectedProfile.id, "select-source"));
             NavigatorPatchStore.transition(
-                    context, expectedProfile, NavigatorPatchStore.FAILED, error.getMessage());
+                    context, expectedProfile, NavigatorPatchStore.FAILED, error.toString());
             throw error;
         } finally {
             input.delete();
@@ -1086,9 +1106,11 @@ final class NavigatorPatchPipeline {
             return withMap(navigation, map.state, map.reason, map.revision);
         } catch (IOException | OutOfMemoryError error) {
             checkWorkerInterrupted();
+            AppEventLogger.event(context,
+                    FailureDiagnostics.format(error, metadata.profile.id, "map-inspection"));
             return withMap(navigation, error instanceof OutOfMemoryError
                             ? NavigatorPatchStore.FAILED : NavigatorPatchStore.UNSUPPORTED,
-                    "Map inspection: " + clean(error.getMessage()), "");
+                    "Map inspection: " + clean(error.toString()), "");
         }
     }
 
@@ -1372,10 +1394,10 @@ final class NavigatorPatchPipeline {
                     replaceFile(gmsCore, gmsCoreMember);
                     GmapsDiagnosticPatcher.verifyGmsCore(gmsCoreMember);
                 } catch (Exception gmsCoreError) {
-                    reportStage(context, "GMS_CORE", "OPTIONAL_FAILED", clean(gmsCoreError.getMessage()));
+                    reportStageFailure(context, "GMS_CORE", gmsCoreError);
                     AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
                             + " stage=gms_core code=GMS_CORE_PATCH_FAILED detail="
-                            + clean(gmsCoreError.getMessage()));
+                            + FailureDiagnostics.format(gmsCoreError, "gmaps", "gms-core"));
                     gmsCoreFailed = true;
                 }
             }
@@ -1396,10 +1418,10 @@ final class NavigatorPatchPipeline {
                             audioMember, optional, new File(transaction, "gmaps-audio-report.json"));
                     replaceFile(optional, audioMember);
                 } catch (Exception optionalError) {
-                    reportStage(context, "AUDIO", "OPTIONAL_FAILED", clean(optionalError.getMessage()));
+                    reportStageFailure(context, "AUDIO", optionalError);
                     AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
                             + " stage=optional code=OPTIONAL_PATCH_FAILED detail="
-                            + clean(optionalError.getMessage()));
+                            + FailureDiagnostics.format(optionalError, "gmaps", "audio"));
                     optionalFailed = true;
                 }
             }
@@ -1421,10 +1443,10 @@ final class NavigatorPatchPipeline {
                             validatedProfile);
                     replaceFile(pip, pipMember);
                 } catch (Exception pipError) {
-                    reportStage(context, "PIP", "OPTIONAL_FAILED", clean(pipError.getMessage()));
+                    reportStageFailure(context, "PIP", pipError);
                     AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
                             + " stage=pip code=PIP_PATCH_FAILED detail="
-                            + clean(pipError.getMessage()));
+                            + FailureDiagnostics.format(pipError, "gmaps", "pip"));
                     auxiliaryFailed = true;
                 }
             }
@@ -2007,13 +2029,14 @@ final class NavigatorPatchPipeline {
 
     private static void saveFailure(Context context, NavigatorPatchStore.Profile profile,
             Exception error) {
+        AppEventLogger.event(context, FailureDiagnostics.format(error, profile.id, "compatibility-scan"));
         ScanResult failure = new ScanResult(profile, "", "", -1L, "",
                 NavigatorPatchStore.FAILED, NavigatorPatchStore.NOT_CHECKED,
                 NavigatorPatchStore.NOT_CHECKED,
                 NavigatorPatchStore.NOT_CHECKED,
-                clean(error.getMessage()));
+                clean(error.toString()));
         if (!NavigatorPatchStore.completeScanUnlessCancelled(
-                context, failure, NavigatorPatchStore.FAILED, error.getMessage())) {
+                context, failure, NavigatorPatchStore.FAILED, error.toString())) {
             NavigatorPatchStore.markCancelled(context, profile, "Check cancelled");
         }
     }

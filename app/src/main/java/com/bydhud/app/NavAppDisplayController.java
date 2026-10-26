@@ -127,16 +127,6 @@ final class NavAppDisplayController {
                 .put("autoContainerReadback", "not_queried");
     }
 
-    //parses source data here so downstream HUD code receives normalized navigation fields.
-    static NavAppDisplayState parseTaskForTest(String packageName, String dumpsys) {
-        return parseTask(packageName, dumpsys);
-    }
-
-    static NavAppDisplayState parseTaskIdForTest(
-            String logicalPackage, int targetTaskId, String dumpsys) {
-        return parseTaskId(logicalPackage, targetTaskId, dumpsys);
-    }
-
     static int dashboardModeForWidgetForTest(int mode) {
         return mode == WIDGET_MODE_MINI
                 ? HudPrefs.DASHBOARD_MODE_PARTIAL
@@ -408,7 +398,7 @@ final class NavAppDisplayController {
                     -1,
                     NavAppDisplayState.DISPLAY_UNKNOWN,
                     false,
-                    "check failed: " + safe(e.getMessage())));
+                    "check failed: " + failureDetail(normalized, "display-check", e)));
         }
     }
 
@@ -557,7 +547,7 @@ final class NavAppDisplayController {
                         current);
             } catch (RuntimeException error) {
                 reportSteeringFailure(
-                        normalized, "runtime " + error.getClass().getSimpleName());
+                        normalized, "runtime " + failureDetail(normalized, "steering-move", error));
             } finally {
                 if (!executingMove) endMove(normalized);
             }
@@ -567,7 +557,7 @@ final class NavAppDisplayController {
             worker.start();
         } catch (RuntimeException error) {
             endMove(normalized);
-            reportSteeringFailure(normalized, "worker " + error.getClass().getSimpleName());
+            reportSteeringFailure(normalized, "worker " + failureDetail(normalized, "steering-worker", error));
         }
     }
 
@@ -609,7 +599,7 @@ final class NavAppDisplayController {
             worker.start();
         } catch (RuntimeException error) {
             endMove(normalized);
-            notifyMoveCompletion(completion, "worker " + error.getClass().getSimpleName());
+            notifyMoveCompletion(completion, "worker " + failureDetail(normalized, "move-worker", error));
         }
     }
 
@@ -685,7 +675,7 @@ final class NavAppDisplayController {
             endMove("");
             notifyAutomaticTbtCompletion(
                     request.completion,
-                    "automatic TBT worker failed: " + error.getClass().getSimpleName());
+                    "automatic TBT worker failed: " + failureDetail("", "automatic-tbt-worker", error));
         }
     }
 
@@ -712,7 +702,7 @@ final class NavAppDisplayController {
                 }
             }
         } catch (RuntimeException failure) {
-            error = "automatic TBT failed: " + safe(failure.getMessage());
+            error = "automatic TBT failed: " + failureDetail("", "automatic-tbt", failure);
         } finally {
             endMove("");
             notifyAutomaticTbtCompletion(request.completion, error);
@@ -813,7 +803,7 @@ final class NavAppDisplayController {
                 }
             }
         } catch (RuntimeException e) {
-            error = "widget command failed: " + safe(e.getMessage());
+            error = "widget command failed: " + failureDetail("", "widget-command", e);
         } finally {
             finishWidgetOperation(token);
             endMove("");
@@ -891,7 +881,8 @@ final class NavAppDisplayController {
             }
             return "";
         } catch (IOException | SecurityException e) {
-            return "widget AutoContainer " + command + " failed: " + safe(e.getMessage());
+            return "widget AutoContainer " + command + " failed: "
+                    + failureDetail("", "widget-autocontainer:" + command, e);
         }
     }
 
@@ -924,7 +915,7 @@ final class NavAppDisplayController {
         try {
             completion.accept(error == null ? "" : error);
         } catch (RuntimeException e) {
-            log("", "widget completion failed " + e.getClass().getSimpleName());
+            log("", FailureDiagnostics.format(e, "widget-command", "completion"));
         }
     }
 
@@ -1056,8 +1047,7 @@ final class NavAppDisplayController {
                             ClusterProjectionService.cachedDiagnosticSnapshot());
                 }
             } catch (RuntimeException error) {
-                log(packageName, "denza_diagnostic_start_failed type="
-                        + error.getClass().getSimpleName());
+                log(packageName, FailureDiagnostics.format(error, "denza-diagnostic", "start"));
             }
         }
         try {
@@ -1346,7 +1336,8 @@ final class NavAppDisplayController {
                     -1,
                     NavAppDisplayState.DISPLAY_UNKNOWN,
                     false,
-                    "independent dashboard failed: " + safe(e.getMessage())));
+                    "independent dashboard failed: "
+                            + failureDetail(packageName, "independent-dashboard", e)));
         } finally {
             String completionError = completionErrorForState(packageName);
             endMove(packageName);
@@ -1369,8 +1360,7 @@ final class NavAppDisplayController {
         try {
             completion.accept(error == null ? "" : error);
         } catch (RuntimeException callbackError) {
-            log("", "move completion callback failed "
-                    + callbackError.getClass().getSimpleName());
+            log("", FailureDiagnostics.format(callbackError, "display-move", "completion"));
         }
     }
 
@@ -1437,7 +1427,7 @@ final class NavAppDisplayController {
                     + " reason=" + safe(reason) + " detail=" + detail);
             return "layout command failed: " + safe(detail);
         } catch (IOException | SecurityException e) {
-            String detail = safe(e.getMessage());
+            String detail = failureDetail(packageName, "dashboard-layout:" + value, e);
             log(packageName, "dashboard_autocontainer_rejected value=" + value
                     + " reason=" + safe(reason) + " detail=" + detail);
             return "layout command failed: " + detail;
@@ -1895,7 +1885,7 @@ final class NavAppDisplayController {
                     -1,
                     NavAppDisplayState.DISPLAY_UNKNOWN,
                     false,
-                    label + " failed: " + safe(e.getMessage())));
+                    label + " failed: " + failureDetail(normalized, label, e)));
         } finally {
             log(normalized, "transfer_operation elapsedMs="
                     + (SystemClock.elapsedRealtime() - startedMs)
@@ -2041,7 +2031,7 @@ final class NavAppDisplayController {
         } catch (IOException | SecurityException error) {
             return new NavAppDisplayState(normalized, taskId,
                     NavAppDisplayState.DISPLAY_UNKNOWN, false,
-                    label + " failed: " + safe(error.getMessage()));
+                    label + " failed: " + failureDetail(normalized, label, error));
         } finally {
             if (surfacePrepared) WazeSurfaceActivity.refreshSurfaceAfterMove(taskId);
             log(normalized, "transfer_target_move elapsedMs="
@@ -2588,6 +2578,11 @@ final class NavAppDisplayController {
         if (callback != null) {
             callback.onNavAppDisplayChanged(moving);
         }
+    }
+
+    private String failureDetail(String packageName, String operation, Throwable error) {
+        log(packageName, FailureDiagnostics.format(error, operation, "display-control"));
+        return error.getClass().getSimpleName() + ": " + safe(error.getMessage());
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

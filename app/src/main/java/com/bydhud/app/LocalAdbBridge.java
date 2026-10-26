@@ -163,6 +163,21 @@ final class LocalAdbBridge {
         }
     }
 
+    static final class AuthorizationSnapshot {
+        final String fingerprint;
+        final boolean keyAvailable;
+        final boolean authorized;
+        final boolean verifiedThisProcess;
+
+        private AuthorizationSnapshot(String fingerprint, boolean keyAvailable,
+                boolean authorized, boolean verifiedThisProcess) {
+            this.fingerprint = fingerprint;
+            this.keyAvailable = keyAvailable;
+            this.authorized = authorized;
+            this.verifiedThisProcess = verifiedThisProcess;
+        }
+    }
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldSendPublicKeyForMode(AuthorizationPromptMode mode) {
         return mode != AuthorizationPromptMode.NEVER;
@@ -190,6 +205,27 @@ final class LocalAdbBridge {
         return !"unavailable".equals(fingerprint)
                 && fingerprint.equals(verifiedFingerprintThisProcess)
                 && isCurrentKeyKnownAuthorized(context);
+    }
+
+    //Reads or creates the app key once so UI caches can publish a coherent local status snapshot.
+    static AuthorizationSnapshot authorizationSnapshot(Context context) {
+        try {
+            Context appContext = context.getApplicationContext();
+            KeyPair keyPair = loadOrCreateKeyPair(appContext);
+            String fingerprint = cachedKeyFingerprint;
+            if (fingerprint.isEmpty()) {
+                fingerprint = fingerprint(keyPair);
+                cachedKeyFingerprint = fingerprint;
+            }
+            boolean authorized = fingerprint.equals(
+                    prefs(appContext).getString(KEY_AUTHORIZED_FINGERPRINT, ""));
+            boolean verified = authorized && fingerprint.equals(verifiedFingerprintThisProcess);
+            return new AuthorizationSnapshot(fingerprint, true, authorized, verified);
+        } catch (Exception error) {
+            AppEventLogger.event(context, FailureDiagnostics.format(
+                    error, "adb_authorization", "read_or_create_key"));
+            return new AuthorizationSnapshot("unavailable", false, false, false);
+        }
     }
 
     static boolean isPermissionGrantInProgress() {
@@ -279,11 +315,6 @@ final class LocalAdbBridge {
         @Override public void close() {
             if (closed.compareAndSet(false, true)) closeExportSocket(socket);
         }
-    }
-
-    static LogcatStreamSession logcatStreamForTest(Socket socket) throws IOException {
-        return new LogcatStreamSession(socket, new Connection(socket, null, false),
-                "09-08 15:45:20.226");
     }
 
     enum DiagnosticSnapshotCommand {
@@ -524,10 +555,6 @@ final class LocalAdbBridge {
         }
     }
 
-    static KeyPair diagnosticSnapshotKeyForTest(File directory) throws IOException {
-        return requireDiagnosticSnapshotKey(directory);
-    }
-
     private static long remainingMillis(long deadlineNanos) {
         long remaining = deadlineNanos - System.nanoTime();
         return remaining <= 0 ? 0 : Math.max(1L, (remaining + 999_999L) / 1_000_000L);
@@ -620,35 +647,6 @@ final class LocalAdbBridge {
                 if (tail[i] < '0' || tail[i] > '9') return false;
             }
             return true;
-        }
-    }
-
-    static DiagnosticSnapshotSession diagnosticSnapshotForTest(Socket socket) throws IOException {
-        DiagnosticSnapshotSession session = new DiagnosticSnapshotSession(null, socket,
-                "TEST_NONCE");
-        session.openState.set(SNAPSHOT_OPEN);
-        session.connection = new Connection(socket, null, false);
-        return session;
-    }
-
-    static DiagnosticSnapshotSession diagnosticSnapshotOpenForTest(Socket socket, KeyPair pair)
-            throws IOException {
-        DiagnosticSnapshotSession session = new DiagnosticSnapshotSession(null, socket,
-                "TEST_NONCE");
-        session.openState.set(SNAPSHOT_OPENING);
-        try {
-            if (pair == null) throw new IOException("existing complete ADB key unavailable");
-            socket.setSoTimeout(CONNECT_TIMEOUT_MS);
-            session.authenticate(pair);
-            if (!session.openState.compareAndSet(SNAPSHOT_OPENING, SNAPSHOT_OPEN)) {
-                throw session.openFailure();
-            }
-            socket.setSoTimeout(READ_TIMEOUT_MS);
-            return session;
-        } catch (IOException error) {
-            session.openState.compareAndSet(SNAPSHOT_OPENING, SNAPSHOT_OPEN_FAILED);
-            session.close();
-            throw error;
         }
     }
 
@@ -1303,16 +1301,6 @@ final class LocalAdbBridge {
         return new AuthorizationCancellation(generation, socket != null);
     }
 
-    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-    static List<String> adbEndpointLabelsForTest() {
-        return Arrays.asList(endpointLabel(PORT));
-    }
-
-    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-    static String adbEndpointSummaryForTest() {
-        return endpointSummary();
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String adbKeyFingerprint(Context context) {
         try {
@@ -1397,6 +1385,7 @@ final class LocalAdbBridge {
                 + (authorizationPromptMode == AuthorizationPromptMode.FORCE));
 
         Connection connection = null;
+        String stage = "connect";
         try {
             OpenResult openResult = Connection.open(
                     appContext, authorizationPromptMode, authorizationGeneration);
@@ -1423,19 +1412,24 @@ final class LocalAdbBridge {
                 return Result.alreadyGranted(runtimeBefore.summary() + endpointSuffix);
             }
 
+            stage = "read_notification_listeners";
             ShellResult notification = connection.shellWithExit(
                     "settings get secure " + NavPermissionGrantPlan.NOTIFICATION_LISTENERS);
             if (!notification.success()) {
-                return Result.failed("settings get notification listeners failed: "
-                        + notification.shortDetail());
+                return permissionGrantFailure(appContext, stage,
+                        "settings get notification listeners failed: "
+                                + notification.shortDetail());
             }
+            stage = "read_accessibility_services";
             ShellResult accessibility = connection.shellWithExit(
                     "settings get secure " + NavPermissionGrantPlan.ACCESSIBILITY_SERVICES);
             if (!accessibility.success()) {
-                return Result.failed("settings get accessibility services failed: "
-                        + accessibility.shortDetail());
+                return permissionGrantFailure(appContext, stage,
+                        "settings get accessibility services failed: "
+                                + accessibility.shortDetail());
             }
 
+            stage = "build_grant_plan";
             NavPermissionGrantPlan plan = NavPermissionGrantPlan.fromCurrentSettings(
                     appContext,
                     normalizedPackage,
@@ -1445,16 +1439,20 @@ final class LocalAdbBridge {
                     grantAccessibilityService,
                     grantAccessibilityMaster);
             if (!plan.isValid()) {
-                return Result.failed("ADB grant plan rejected: " + plan.error);
+                return permissionGrantFailure(appContext, stage,
+                        "ADB grant plan rejected: " + plan.error);
             }
             for (String command : plan.shellCommands) {
+                stage = "grant_command";
                 AppEventLogger.event(appContext, "adb_bridge targeted_command " + command);
                 ShellResult result = connection.shellWithExit(command);
                 if (!result.success()) {
-                    return Result.failed("ADB grant command failed: " + command
-                            + " -> " + result.shortDetail());
+                    return permissionGrantFailure(appContext, stage,
+                            "ADB grant command failed: " + command
+                                    + " -> " + result.shortDetail());
                 }
             }
+            stage = "grant_storage_permissions";
             grantStoragePermissionsBestEffort(
                     connection,
                     appContext,
@@ -1463,10 +1461,12 @@ final class LocalAdbBridge {
                     grantStorageWrite,
                     authorizationPromptMode == AuthorizationPromptMode.FORCE);
             if (grantNotificationListener) {
+                stage = "allow_notification_listener";
                 String notificationCommand = notificationAllowListenerCommand(
                         appContext, normalizedPackage);
                 if (notificationCommand.isEmpty()) {
-                    return Result.failed("Notification listener command plan rejected");
+                    return permissionGrantFailure(appContext, stage,
+                            "Notification listener command plan rejected");
                 }
                 ShellResult notificationAllow = connection.shellWithExit(
                         notificationCommand);
@@ -1481,34 +1481,62 @@ final class LocalAdbBridge {
             }
 
             if (grantNotificationListener || !runtimeBefore.notificationListenerConnected) {
+                stage = "rebind_notification_listener";
                 NavNotificationListenerService.requestRuntimeRebind(appContext, "adb-grant");
             }
+            stage = "rebind_accessibility_service";
             Result accessibilityRebindResult = rebindAccessibilityRuntimeIfNeeded(
                     connection, appContext, normalizedPackage, accessibility.output);
             if (accessibilityRebindResult != null) {
                 return accessibilityRebindResult;
             }
 
+            stage = "readback_permissions";
             NavPermissionStatus after = waitForSettingsGranted(appContext);
             if (!after.captureGranted()) {
                 return Result.postGrantVerification(after, "endpoint=" + endpointSuffix);
             }
+            stage = "readback_runtime_readiness";
             return waitForRuntimeReady(appContext, endpointSuffix);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            AppEventLogger.event(appContext, FailureDiagnostics.format(
+                    e, "adb_permission_grant", stage));
             return Result.partial("ADB grant interrupted while waiting for runtime services");
         } catch (IOException e) {
-            Log.w(TAG, "ADB bridge unavailable", e);
-            return Result.adbUnavailable("ADB bridge unavailable. Tried " + endpointSummary()
-                    + ". Enable ADB debugging.");
+            Log.w(TAG, "ADB permission grant failed at " + stage, e);
+            AppEventLogger.event(appContext, FailureDiagnostics.format(
+                    e, "adb_permission_grant", stage));
+            String detail = FailureDiagnostics.formatBounded(
+                    e, "adb_permission_grant", stage, 2048);
+            if (e instanceof AdbConnectException) {
+                return Result.adbUnavailable(
+                        "ADB bridge could not be reached. Check that debugging is enabled. "
+                                + detail);
+            }
+            if (connection != null) {
+                return Result.failed("ADB is connected, but " + stage
+                        + " failed. " + detail);
+            }
+            return Result.failed("ADB setup failed during " + stage + ". " + detail);
         } catch (Exception e) {
             Log.e(TAG, "ADB grant failed", e);
-            return Result.failed(e.getClass().getSimpleName() + ": " + e.getMessage());
+            AppEventLogger.event(appContext, FailureDiagnostics.format(
+                    e, "adb_permission_grant", stage));
+            return Result.failed(FailureDiagnostics.formatBounded(
+                    e, "adb_permission_grant", stage, 2048));
         } finally {
             if (connection != null) {
                 connection.close();
             }
         }
+    }
+
+    private static Result permissionGrantFailure(Context context, String stage, String detail) {
+        AppEventLogger.event(context, "adb_permission_grant stage=" + stage
+                + " code=FAILED detail=" + (detail == null ? "unknown" : detail));
+        return Result.failed("ADB is connected, but " + stage + " failed. "
+                + (detail == null || detail.isEmpty() ? "Cause unknown." : detail));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1610,11 +1638,6 @@ final class LocalAdbBridge {
         }
     }
 
-    //uses the proven service-call shape without accepting arbitrary shell text.
-    static String autoContainerCommandForTest(String service, int value) {
-        return autoContainerCommand(service, value);
-    }
-
     private static String autoContainerCommand(String service, int value) {
         if (!("auto_container".equals(service) || "AutoContainer".equals(service))
                 || (value != 16 && value != 17 && value != 18)) {
@@ -1659,18 +1682,6 @@ final class LocalAdbBridge {
         }
         return runTrustedRuntimeShellCommand(
                 context, safeCommand, MAX_DIAGNOSTIC_OUTPUT_BYTES);
-    }
-
-    static boolean isAllowedDiagnosticShellCommandForTest(String command) {
-        return isAllowedDiagnosticShellCommand(command == null ? "" : command.trim());
-    }
-
-    static ShellResult boundedDiagnosticOutputForTest(String raw, int maxBytes)
-            throws IOException {
-        OutputAccumulator output = new OutputAccumulator(maxBytes);
-        output.append((raw == null ? "" : raw).getBytes(StandardCharsets.UTF_8));
-        ShellCapture capture = output.capture();
-        return ShellResult.parse(capture.raw, capture.truncated, capture.droppedBytes);
     }
 
     static ShellResult launchInstrumentProxy(
@@ -1847,14 +1858,34 @@ final class LocalAdbBridge {
                     context, "cat /proc/" + value + "/cmdline");
             InstrumentProcessIdentity identity = InstrumentProcessIdentity.parse(
                     status.output, cmdline.output, "");
-            if (!status.success() || !cmdline.success()
-                    || !identity.matchesLegacy(processName)) {
+            if (status.success() && cmdline.success()
+                    && !identity.uidSummary.isEmpty() && !identity.cmdline.isEmpty()) {
+                if (identity.matchesLegacy(processName)) {
+                    command.append(' ').append(value);
+                    continue;
+                }
                 throw new IOException("Refusing unexpected legacy Instrument proxy identity pid="
                         + value + " name=" + identity.name
                         + " uid=" + identity.uidSummary
-                        + " cmdline=" + identity.sanitizedCmdline());
+                        + " cmdline=" + identity.sanitizedCmdline()
+                        + " status=" + status.shortDetail()
+                        + " cmdlineRead=" + cmdline.shortDetail());
             }
-            command.append(' ').append(value);
+            ShellResult recheck = runTrustedRuntimeShellCommand(
+                    context, "pidof " + processName);
+            if (confirmsPidAbsent(recheck, value)) {
+                AppEventLogger.event(context, "instrument_proxy legacy_cleanup_pid_gone pid="
+                        + value + " status=" + status.shortDetail()
+                        + " cmdline=" + cmdline.shortDetail());
+                continue;
+            }
+            throw new IOException("Unable to verify legacy Instrument proxy identity pid="
+                    + value + " name=" + identity.name
+                    + " uid=" + identity.uidSummary
+                    + " cmdline=" + identity.sanitizedCmdline()
+                    + " status=" + status.shortDetail()
+                    + " cmdlineRead=" + cmdline.shortDetail()
+                    + " pidofRecheck=" + recheck.shortDetail());
         }
         return "kill -9".contentEquals(command)
                 ? new ShellResult("", 0, lookup.raw)
@@ -1869,36 +1900,10 @@ final class LocalAdbBridge {
         return false;
     }
 
-    static boolean hasExpectedInstrumentProxyIdentityForTest(
-            String status, String processName) {
-        return hasExpectedInstrumentProxyIdentity(status, processName);
-    }
-
-    private static boolean hasExpectedInstrumentProxyIdentity(
-            String status, String processName) {
-        String safeStatus = status == null ? "" : status;
-        String safeName = processName == null ? "" : processName.trim();
-        if (!safeName.matches("bydh[0-9]{5,10}")) return false;
-        boolean nameMatches = Pattern.compile(
-                "(?m)^Name:\\s*" + Pattern.quote(safeName) + "\\s*$")
-                .matcher(safeStatus).find();
-        boolean uidMatches = Pattern.compile(
-                "(?m)^Uid:\\s*2000(?:\\s+2000){3}\\s*$")
-                .matcher(safeStatus).find();
-        return nameMatches && uidMatches;
-    }
-
-    static boolean hasExpectedInstrumentProxyIdentityForTest(
-            String status, String cmdline, String stat,
-            InstrumentProxyStore.Identity expected, int actualPid) {
-        return InstrumentProcessIdentity.parse(status, cmdline, stat)
-                .matches(expected, actualPid);
-    }
-
-    static boolean hasExpectedLegacyInstrumentProxyIdentityForTest(
-            String status, String cmdline, String processName) {
-        return InstrumentProcessIdentity.parse(status, cmdline, "")
-                .matchesLegacy(processName);
+    private static boolean confirmsPidAbsent(ShellResult lookup, String expectedPid) {
+        if (lookup == null || containsPid(lookup.output, expectedPid)) return false;
+        String output = lookup.output.trim();
+        return lookup.success() || (lookup.exitCode == 1 && output.isEmpty());
     }
 
     private static final class InstrumentProcessIdentity {
@@ -1959,17 +1964,6 @@ final class LocalAdbBridge {
             java.util.regex.Matcher matcher = Pattern.compile(pattern).matcher(value);
             return matcher.find() ? matcher.group(1).trim() : "";
         }
-    }
-
-    static String instrumentProxyLaunchCommandForTest(
-            String apkPath, long generation, String nonce, int appUid,
-            String launchToken, int appVersionCode) {
-        return instrumentProxyLaunchCommand(
-                apkPath, generation, nonce, appUid, launchToken, appVersionCode);
-    }
-
-    static String sanitizeInstrumentProxyStartupDiagnosticForTest(String raw) {
-        return sanitizeInstrumentProxyStartupDiagnostic(raw);
     }
 
     private static String instrumentProxyLaunchCommand(
@@ -2141,16 +2135,6 @@ final class LocalAdbBridge {
             Thread.sleep(ACCESSIBILITY_REBIND_STEP_DELAY_MS);
         }
         return null;
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean isAllowedRuntimeShellCommandForTest(String command) {
-        return isAllowedRuntimeShellCommand(command == null ? "" : command.trim());
-    }
-
-    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-    static String notificationAllowListenerCommandForTest(String packageName) {
-        return notificationAllowListenerCommand(packageName);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -2337,17 +2321,6 @@ final class LocalAdbBridge {
             return new Result(Code.FAILED, message);
         }
 
-        //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-        static Result postGrantVerificationForTest(NavPermissionStatus after, String detail) {
-            return postGrantVerification(after, detail);
-        }
-
-        //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-        static Result runtimeReconnectingAfterGrantForTest(
-                NavRuntimePermissionStatus status, String endpointSuffix) {
-            return runtimeReconnectingAfterGrant(status, endpointSuffix);
-        }
-
         //keeps this step explicit so callers can rely on one documented behavior boundary.
         private static Result postGrantVerification(NavPermissionStatus after, String detail) {
             String safeDetail = detail == null ? "" : detail.trim();
@@ -2450,6 +2423,12 @@ final class LocalAdbBridge {
         }
     }
 
+    private static final class AdbConnectException extends IOException {
+        AdbConnectException(String endpoint, IOException cause) {
+            super("Unable to connect to ADB bridge at " + endpoint, cause);
+        }
+    }
+
     //defines the Connection module boundary so related behavior stays readable inside one unit.
     private static final class Connection {
         private final Socket socket;
@@ -2494,9 +2473,11 @@ final class LocalAdbBridge {
             AppEventLogger.event(context, "adb_bridge open key=" + keyFingerprint);
             String endpoint = endpointLabel(PORT);
             Socket socket = new Socket();
+            boolean socketConnected = false;
             try {
                 AppEventLogger.event(context, "adb_bridge connect_attempt endpoint=" + endpoint);
                 socket.connect(new InetSocketAddress(HOST, PORT), CONNECT_TIMEOUT_MS);
+                socketConnected = true;
                 socket.setSoTimeout(READ_TIMEOUT_MS);
                 AppEventLogger.event(context, "adb_bridge connected endpoint=" + endpoint);
                 return openConnectedSocket(
@@ -2509,9 +2490,14 @@ final class LocalAdbBridge {
                         cancellationGeneration);
             } catch (IOException e) {
                 closeQuietly(socket);
-                AppEventLogger.event(context, "adb_bridge connect_failed endpoint="
-                        + endpoint + " error=" + e.getClass().getSimpleName());
-                throw new IOException("Unable to connect to ADB bridge; tried " + endpoint, e);
+                if (!socketConnected) {
+                    AppEventLogger.event(context, FailureDiagnostics.format(
+                            e, "adb_permission_grant", "connect_socket"));
+                    throw new AdbConnectException(endpoint, e);
+                }
+                AppEventLogger.event(context, FailureDiagnostics.format(
+                        e, "adb_permission_grant", "adb_handshake"));
+                throw new IOException("ADB handshake failed on " + endpoint, e);
             }
         }
 

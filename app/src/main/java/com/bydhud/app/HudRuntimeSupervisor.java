@@ -206,10 +206,6 @@ final class HudRuntimeSupervisor {
         }
     }
 
-    static boolean packageReplaceResetInFlightForTest() {
-        return PACKAGE_REPLACE_RESET_IN_FLIGHT.get();
-    }
-
     //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.trim();

@@ -116,15 +116,28 @@ object VehicleConfigurationExport {
         )
         persist()
         logEvent("started")
+        var cancellationConfirmed = false
+        var resumeAfterCancelRace = false
+        var outcomeUnknown = false
+        var restoringCancellation = false
         try {
             worker.execute {
                 control.worker = Thread.currentThread()
-                if (restored?.optString("phase") == ConfigurationExportPhase.CANCELLING.name) {
-                    runCatching { ShellWorkClient.cancel(app,
-                            ShellWorkClient.job(app, "configuration", operationId)) }
-                    control.cancel()
-                }
                 try {
+                    if (restored?.optString("phase") == ConfigurationExportPhase.CANCELLING.name) {
+                        restoringCancellation = true
+                        val cancellation = confirmShellCancellation(app, operationId)
+                        restoringCancellation = false
+                        when (cancellation.optString("state")) {
+                            "CANCELLED" -> {
+                                cancellationConfirmed = true
+                                control.cancel()
+                                control.check()
+                            }
+                            "SUCCEEDED" -> Unit // Reattach to this completed operation below.
+                            else -> throw shellTerminalFailure(cancellation)
+                        }
+                    }
                     ConfigurationExportArtifacts.checkBeforeExport(app)
                     control.check()
                     val result = ShellWorkExports.configuration(app, operationId, control) {
@@ -152,8 +165,15 @@ object VehicleConfigurationExport {
                         }
                     }
                     synchronized(this) {
-                        if (active !== control || control.isCancelled) {
+                        if (active !== control) {
                             result.volumes.forEach(LogShareZip::deleteArtifact)
+                            return@synchronized
+                        }
+                        if (control.isCancelled) {
+                            // Preserve the same-ID shell result; cancellation raced with completion.
+                            resumeAfterCancelRace = true
+                            state.value = state.value?.copy(phase = ConfigurationExportPhase.CANCELLING,
+                                detail = "Shell work completed before cancellation was confirmed")
                             return@synchronized
                         }
                         archives = if (result.ok) result.volumes else emptyList()
@@ -172,13 +192,77 @@ object VehicleConfigurationExport {
                         )
                         logProgress(state.value!!)
                     }
-                } catch (error: Exception) {
+                } catch (unknown: InstrumentProxyManager.ShellWorkOutcomeUnknownException) {
+                    outcomeUnknown = true
                     synchronized(this) {
-                        if (active === control && !control.isCancelled) {
-                            state.value = state.value?.copy(phase = ConfigurationExportPhase.FAILED,
+                        if (active === control) {
+                            state.value = state.value?.copy(detail = failureDetail(unknown))
+                            AppEventLogger.event(app, "configuration_export_outcome_unknown " +
+                                diagnostic(unknown, "shell-operation"))
+                        }
+                    }
+                } catch (error: Exception) {
+                    if (restoringCancellation) {
+                        outcomeUnknown = true
+                        synchronized(this) {
+                            if (active === control) state.value = state.value?.copy(
+                                phase = ConfigurationExportPhase.CANCELLING,
                                 detail = failureDetail(error))
-                            logFailure(error)
-                            state.value?.let { logProgress(it) }
+                        }
+                        AppEventLogger.event(app, "configuration_export_cancel_pending " +
+                            diagnostic(error, "restore-cancellation"))
+                    } else if (control.isCancelled) {
+                        try {
+                            val cancellation = confirmShellCancellation(app, operationId)
+                            when (cancellation.optString("state")) {
+                                "CANCELLED" -> cancellationConfirmed = true
+                                "SUCCEEDED" -> {
+                                    resumeAfterCancelRace = true
+                                    synchronized(this) {
+                                        if (active === control) {
+                                            state.value = state.value?.copy(phase = ConfigurationExportPhase.CANCELLING,
+                                                detail = "Shell work completed before cancellation was confirmed")
+                                        }
+                                    }
+                                }
+                                "FAILED", "INTERRUPTED" -> {
+                                    val shellFailure = shellTerminalFailure(cancellation)
+                                    synchronized(this) {
+                                        if (active === control) {
+                                            state.value = state.value?.copy(phase = ConfigurationExportPhase.FAILED,
+                                                detail = failureDetail(shellFailure))
+                                            logFailure(shellFailure)
+                                            state.value?.let { logProgress(it) }
+                                        }
+                                    }
+                                }
+                                else -> Unit
+                            }
+                        } catch (unknown: InstrumentProxyManager.ShellWorkOutcomeUnknownException) {
+                            outcomeUnknown = true
+                            synchronized(this) {
+                                if (active === control) state.value = state.value?.copy(detail = failureDetail(unknown))
+                            }
+                            AppEventLogger.event(app, "configuration_export_cancel_outcome_unknown " +
+                                diagnostic(unknown, "cancellation"))
+                        } catch (reconcileFailure: Exception) {
+                            outcomeUnknown = true
+                            synchronized(this) {
+                                if (active === control) state.value = state.value?.copy(
+                                    phase = ConfigurationExportPhase.CANCELLING,
+                                    detail = failureDetail(reconcileFailure))
+                            }
+                            AppEventLogger.event(app, "configuration_export_cancel_pending " +
+                                diagnostic(reconcileFailure, "cancellation-reconciliation"))
+                        }
+                    } else {
+                        synchronized(this) {
+                            if (active === control) {
+                                state.value = state.value?.copy(phase = ConfigurationExportPhase.FAILED,
+                                    detail = failureDetail(error))
+                                logFailure(error)
+                                state.value?.let { logProgress(it) }
+                            }
                         }
                     }
                 } finally {
@@ -186,13 +270,14 @@ object VehicleConfigurationExport {
                         var openDestinationId: String? = null
                         if (active === control) {
                             val ended = SystemClock.elapsedRealtime()
-                            if (control.isCancelled && state.value != null) {
+                            if (control.isCancelled && cancellationConfirmed && state.value != null) {
                                 state.value = state.value!!.copy(phase = ConfigurationExportPhase.CANCELLED,
                                     archiveAvailable = false, currentFile = "", detail = "",
                                     endedAtElapsedMs = ended,
                                     elapsedSeconds = configurationExportElapsedSeconds(
                                         state.value!!.copy(endedAtElapsedMs = ended)))
-                            } else if (state.value != null) {
+                            } else if (state.value != null && state.value!!.phase != ConfigurationExportPhase.CANCELLING &&
+                                !outcomeUnknown) {
                                 state.value = state.value!!.copy(
                                     endedAtElapsedMs = ended,
                                     elapsedSeconds = configurationExportElapsedSeconds(
@@ -200,7 +285,11 @@ object VehicleConfigurationExport {
                             }
                             state.value?.let {
                                 logProgress(it)
-                                logEvent("finished phase=${it.phase} duration_s=${it.elapsedSeconds}")
+                                if (outcomeUnknown || it.phase == ConfigurationExportPhase.CANCELLING) {
+                                    logEvent("outcome_pending phase=${it.phase} detail=${safe(it.detail)}")
+                                } else {
+                                    logEvent("finished phase=${it.phase} duration_s=${it.elapsedSeconds}")
+                                }
                                 if (!control.isCancelled && it.phase == ConfigurationExportPhase.READY &&
                                     it.autoOpenDestination) openDestinationId = it.operationId
                             }
@@ -211,6 +300,7 @@ object VehicleConfigurationExport {
                     }
                     control.close()
                     Thread.interrupted()
+                    if (resumeAfterCancelRace) worker.execute { start(app, operationId) }
                 }
             }
         } catch (error: RuntimeException) {
@@ -629,6 +719,35 @@ object VehicleConfigurationExport {
 
     private fun failureDetail(error: Exception): String =
         "${error.javaClass.simpleName}: ${error.message.orEmpty()}".take(1024)
+
+    private fun confirmShellCancellation(context: Context, operationId: String): org.json.JSONObject {
+        val wasInterrupted = Thread.interrupted()
+        try {
+            if (!ShellWorkClient.hasRequest(context, "configuration", operationId))
+                return org.json.JSONObject().put("state", "CANCELLED")
+            return ShellWorkExports.cancelAndConfirm(context,
+                ShellWorkClient.job(context, "configuration", operationId))
+        } finally {
+            if (wasInterrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun shellTerminalFailure(state: org.json.JSONObject): java.io.IOException {
+        val status = state.optString("state", "unknown")
+        val result = state.optJSONObject("result")
+        val detail = result?.optString("error")?.takeIf { it.isNotEmpty() } ?: "Shell work $status"
+        val error = java.io.IOException(detail)
+        result?.optString("diagnostic")?.takeIf { it.isNotEmpty() }?.let {
+            error.addSuppressed(java.io.IOException(it))
+        }
+        return error
+    }
+
+    private fun diagnostic(error: Throwable, stage: String): String =
+        FailureDiagnostics.format(error, "configuration-export", stage)
+            .replace('\n', ' ').replace('\r', ' ')
+
+    private fun safe(value: String): String = value.replace('\n', ' ').replace('\r', ' ').take(1024)
 
     private fun logFailure(error: Exception) {
         val detail = android.util.Log.getStackTraceString(error).take(2048)

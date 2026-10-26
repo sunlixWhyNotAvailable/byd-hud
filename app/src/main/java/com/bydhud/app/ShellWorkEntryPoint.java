@@ -35,8 +35,9 @@ public final class ShellWorkEntryPoint {
                 currentControl = control;
                 JSONObject manifest = ShellWorkFiles.readManifest(new File(control, "request.json"));
                 validateManifest(app, args[0], manifest);
-                if (InstrumentNavigationProxyService.isTerminalWorkState(
-                        ShellWorkFiles.read(new File(control, "state.json")).optString("state"))) return;
+                String savedState = ShellWorkFiles.read(new File(control, "state.json")).optString("state");
+                if (InstrumentNavigationProxyService.isTerminalWorkState(savedState)
+                        || "UNCERTAIN".equals(savedState)) return;
                 currentJob = ShellWorkFiles.inside(ShellWorkFiles.root(app), manifest.getString("artifact"));
                 if (!currentJob.getParentFile().equals(ShellWorkFiles.root(app).getCanonicalFile()))
                     throw new IOException("Invalid shell artifact workspace");
@@ -65,37 +66,54 @@ public final class ShellWorkEntryPoint {
                             .put("ok", true);
                     state = "SUCCEEDED";
                 } catch (Throwable error) {
-                    android.util.Log.e("BYDHUD_SHELL_WORK", "job failed " + safeId(args[0]), error);
-                    boolean cancelled = Thread.currentThread().isInterrupted()
-                            || new File(control, "cancel").exists();
+                    boolean unknown = error instanceof InstrumentProxyManager.ShellWorkOutcomeUnknownException;
+                    android.util.Log.e("BYDHUD_SHELL_WORK", FailureDiagnostics.format(
+                            error, "shell-work " + safeId(args[0]), lastPhase));
+                    boolean cancelled = !unknown && (Thread.currentThread().isInterrupted()
+                            || new File(control, "cancel").exists());
                     result = new JSONObject().put("ok", false).put("error", safeFailure(error))
-                            .put("cancelled", cancelled);
-                    state = cancelled ? "CANCELLED" : "FAILED";
+                            .put("cancelled", cancelled)
+                            .put("diagnostic", FailureDiagnostics.formatBounded(
+                                    error, "shell-work " + safeId(args[0]), lastPhase, 24 * 1024));
+                    state = unknown ? "UNCERTAIN" : cancelled ? "CANCELLED" : "FAILED";
                 }
-                Thread.interrupted();
+                if (!"UNCERTAIN".equals(state)) Thread.interrupted();
                 writeState(control, state, result, new JSONObject().put("phase", state));
                 cancellation.interrupt();
-                try {
-                    ExportArtifactFiles.Removed removed = new ExportArtifactFiles.Removed();
-                    ShellExportCleanup.cleanCopies(manifest.optString("type"), control, currentJob, removed);
-                    if (removed.files > 0) android.util.Log.i("BYDHUD_SHELL_WORK",
-                            "export_copies_retired id=" + args[0] + " files=" + removed.files + " bytes=" + removed.bytes);
-                } catch (IOException cleanupError) {
-                    // The terminal result stays available; a later sweep retries deletion.
-                    android.util.Log.w("BYDHUD_SHELL_WORK", "export_copies_retained id=" + args[0]
-                            + " reason=" + ShellExportCleanup.failure(cleanupError));
+                if (!"UNCERTAIN".equals(state)) {
+                    try {
+                        ExportArtifactFiles.Removed removed = new ExportArtifactFiles.Removed();
+                        ShellExportCleanup.cleanCopies(manifest.optString("type"), control, currentJob, removed);
+                        if (removed.files > 0) android.util.Log.i("BYDHUD_SHELL_WORK",
+                                "export_copies_retired id=" + args[0] + " files=" + removed.files
+                                        + " bytes=" + removed.bytes);
+                    } catch (IOException cleanupError) {
+                        // The terminal result stays available; a later sweep retries deletion.
+                        android.util.Log.w("BYDHUD_SHELL_WORK", "export_copies_retained id=" + args[0]
+                                + " reason=" + ShellExportCleanup.failure(cleanupError));
+                    }
                 }
             }
         } catch (Throwable error) {
-            android.util.Log.e("BYDHUD_SHELL_WORK", "startup failed", error);
+            boolean unknown = error instanceof InstrumentProxyManager.ShellWorkOutcomeUnknownException;
+            android.util.Log.e("BYDHUD_SHELL_WORK",
+                    FailureDiagnostics.format(error, "shell-work", "startup"));
             try {
                 if (currentControl != null) {
-                    writeState(currentControl, error instanceof InterruptedException ? "CANCELLED" : "FAILED",
-                            new JSONObject().put("ok", false).put("cancelled", error instanceof InterruptedException)
-                                    .put("error", safeFailure(error)),
-                            new JSONObject().put("phase", "FAILED"));
+                    writeState(currentControl, unknown ? "UNCERTAIN"
+                                    : error instanceof InterruptedException ? "CANCELLED" : "FAILED",
+                            new JSONObject().put("ok", false)
+                                    .put("cancelled", !unknown && error instanceof InterruptedException)
+                                    .put("error", safeFailure(error))
+                                    .put("diagnostic", FailureDiagnostics.formatBounded(
+                                            error, "shell-work", "startup", 24 * 1024)),
+                            new JSONObject().put("phase", unknown ? "UNCERTAIN" : "FAILED"));
                 }
-            } catch (Exception ignored) { }
+            } catch (Exception recordFailure) {
+                error.addSuppressed(recordFailure);
+                android.util.Log.e("BYDHUD_SHELL_WORK", FailureDiagnostics.format(
+                        error, "shell-work", "persist-startup-failure"));
+            }
         } finally {
             currentControl = null;
             currentJob = null;
@@ -217,10 +235,11 @@ public final class ShellWorkEntryPoint {
     }
 
     private static String safeFailure(Throwable error) {
-        String message = error == null ? "Shell work failed" : error.getMessage();
-        if (message == null || message.trim().isEmpty())
-            return error == null ? "Shell work failed" : error.getClass().getSimpleName();
-        return message.length() > 256 ? message.substring(0, 256) : message;
+        if (error == null) return "Shell work failed";
+        String full = FailureDiagnostics.format(error, "", "");
+        int end = full.indexOf('\n');
+        String summary = end < 0 ? full : full.substring(0, end);
+        return summary.length() > 256 ? summary.substring(0, 256) : summary;
     }
 
     private static String safeId(String value) { return value.matches("[A-Za-z0-9_-]{1,80}") ? value : "unknown"; }

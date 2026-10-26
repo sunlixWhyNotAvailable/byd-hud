@@ -21,14 +21,20 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -42,6 +48,10 @@ final class InstrumentProxyManager {
     private static final long START_TIMEOUT_MS = 5_000L;
     private static final long STARTUP_DEADLINE_MS = 45_000L;
     private static final long CALL_TIMEOUT_MS = 3_000L;
+    private static final long SHELL_READ_TIMEOUT_MS = 3_000L;
+    private static final long SHELL_CONTROL_TIMEOUT_MS = 10_000L;
+    private static final long SHELL_BULK_TIMEOUT_MS = 120_000L;
+    private static final int MAX_RETIRED_SHELL_CALLS = 32;
     private static final long PING_TIMEOUT_MS = 2_000L;
     private static final long RETRY_DELAY_MS = 30_000L;
     private static final long STABLE_CONNECTION_MS = 30_000L;
@@ -71,6 +81,10 @@ final class InstrumentProxyManager {
     private final Object receiverLock = new Object();
     private final ScheduledExecutorService worker;
     private final ExecutorService shanghaiTransitions;
+    private final ExecutorService shellReads = newShellCallExecutor("BydHudShellRead");
+    private final ExecutorService shellControls = newShellCallExecutor("BydHudShellControl");
+    private final ExecutorService shellBulk = newShellCallExecutor("BydHudShellBulk");
+    private final Map<String, Future<?>> pendingShellCalls = new ConcurrentHashMap<>();
     private ExecutorService calls;
     private long callEpoch;
     private long navigationOutputGeneration;
@@ -243,7 +257,8 @@ final class InstrumentProxyManager {
             try {
                 registerHandoffReceiver();
             } catch (RuntimeException error) {
-                failStart(requestGeneration, "receiver " + error.getClass().getSimpleName(), false);
+                failStart(requestGeneration, FailureDiagnostics.format(
+                        error, "shell-runtime-start", "receiver-registration"), false);
                 return;
             }
             log("start requested generation=" + requestGeneration + " reason=" + safe(reason));
@@ -273,7 +288,13 @@ final class InstrumentProxyManager {
             state = State.STARTING;
             startStage = "reattaching";
             startupDeadlineAtMs = SystemClock.elapsedRealtime() + STARTUP_DEADLINE_MS;
-            registerHandoffReceiver();
+            try {
+                registerHandoffReceiver();
+            } catch (RuntimeException error) {
+                failStart(generation, FailureDiagnostics.format(
+                        error, "shell-runtime-start", "reattach-receiver-registration"), false);
+                return;
+            }
             long expected = generation;
             log("reattach requested generation=" + generation + " pid=" + existing.pid);
             worker.schedule(() -> {
@@ -469,7 +490,7 @@ final class InstrumentProxyManager {
             return task.get(CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (TimeoutException error) {
             task.cancel(true);
-            throw new IOException("Instrument helper Shanghai " + operation + " timed out");
+            throw new IOException("Instrument helper Shanghai " + operation + " timed out", error);
         } catch (ExecutionException error) {
             Throwable cause = error.getCause();
             if (cause instanceof RemoteException) {
@@ -491,7 +512,7 @@ final class InstrumentProxyManager {
             barrier.get(START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (TimeoutException error) {
             barrier.cancel(true);
-            throw new IOException("Instrument helper " + operation + " timed out");
+            throw new IOException("Instrument helper " + operation + " timed out", error);
         } catch (ExecutionException error) {
             throw new IOException("Instrument helper " + operation + " failed", error.getCause());
         }
@@ -508,7 +529,7 @@ final class InstrumentProxyManager {
             return cleanup.get(START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (TimeoutException error) {
             cleanup.cancel(true);
-            throw new IOException("Instrument helper cleanup timed out");
+            throw new IOException("Instrument helper cleanup timed out", error);
         } catch (ExecutionException error) {
             throw new IOException("Instrument helper cleanup failed", error.getCause());
         }
@@ -577,7 +598,8 @@ final class InstrumentProxyManager {
             try {
                 listener.run();
             } catch (RuntimeException error) {
-                log("ready listener failed type=" + error.getClass().getSimpleName());
+                log("ready listener failed " + FailureDiagnostics.format(
+                        error, "shell-runtime", "ready-listener"));
             }
         }
     }
@@ -1009,8 +1031,7 @@ final class InstrumentProxyManager {
                 // deferred behind the first clear instead of replaying it after
                 // the joined terminal callbacks complete.
                 // Keep the first clear's profile: it describes the output being retired.
-                if (shouldDropDeferredGuidanceForDuplicateTerminalForTest(
-                        true, deferredGuidance != null)) {
+                if (deferredGuidance != null) {
                     deferredSuperseded = deferredGuidance;
                     deferredGuidance = null;
                 }
@@ -1069,11 +1090,6 @@ final class InstrumentProxyManager {
             finishTerminalGuidanceClear(requestToken,
                     Result.unavailable("proxy call worker unavailable"));
         }
-    }
-
-    static boolean shouldDropDeferredGuidanceForDuplicateTerminalForTest(
-            boolean barrierActive, boolean deferredPresent) {
-        return barrierActive && deferredPresent;
     }
 
     private void executeTerminalGuidanceClear(long requestToken, long requestEpoch,
@@ -1649,7 +1665,8 @@ final class InstrumentProxyManager {
                 // connect result can establish readiness; preserve the pending identity.
                 if (observeStartStage(requestGeneration, "launch-transport-uncertain")) {
                     log("launch transport uncertain generation=" + requestGeneration
-                            + " error=" + error.getClass().getSimpleName()
+                            + " error=" + FailureDiagnostics.format(
+                                    error, "shell-runtime-start", "launch-transport")
                             + " replay=false awaiting=authenticated-handoff timeoutMs="
                             + START_TIMEOUT_MS);
                 }
@@ -1669,7 +1686,8 @@ final class InstrumentProxyManager {
                         + " exit=" + result.exitCode);
             }
         } catch (IOException | RuntimeException error) {
-            failStart(requestGeneration, error.getClass().getSimpleName(), true);
+            failStart(requestGeneration, FailureDiagnostics.format(
+                    error, "shell-runtime-start", "launch"), true);
         }
     }
 
@@ -1717,7 +1735,8 @@ final class InstrumentProxyManager {
             binder.linkToDeath(() -> worker.execute(
                     () -> handleBinderDeath(requestGeneration, binder)), 0);
         } catch (RemoteException | RuntimeException error) {
-            failStart(requestGeneration, "handoff " + describe(error), true);
+            failStart(requestGeneration, FailureDiagnostics.format(
+                    error, "shell-runtime-start", "link-to-death"), true);
             return;
         }
         synchronized (lock) {
@@ -1733,7 +1752,8 @@ final class InstrumentProxyManager {
             if (!observeStartStage(requestGeneration, "connect-requested")) return;
             candidate.connect(requestGeneration, requestNonce, client);
         } catch (RemoteException | RuntimeException error) {
-            failStart(requestGeneration, "handoff " + describe(error), true);
+            failStart(requestGeneration, FailureDiagnostics.format(
+                    error, "shell-runtime-start", "connect"), true);
         }
     }
 
@@ -1899,21 +1919,35 @@ final class InstrumentProxyManager {
                 cleanupOnly ? "owned-gps-cleanup" : "independent-work");
         long currentGeneration;
         synchronized (lock) { currentGeneration = generation; }
-        try {
-            current.setRecoveryEnabled(currentGeneration, ShellRuntimeSession.mayRestore(context));
-            return current.registerWork(currentGeneration, id, type, artifact.getCanonicalPath(),
-                    boot, requestFile, offset, snapshots, complete);
-        } catch (RemoteException error) {
-            throw new IOException("Cannot register trusted shell operation", error);
+        android.os.ParcelFileDescriptor requestCopy = duplicate(requestFile);
+        android.os.ParcelFileDescriptor[] snapshotCopies;
+        try { snapshotCopies = duplicate(snapshots); }
+        catch (IOException error) {
+            closeDescriptor(requestCopy);
+            throw error;
         }
+        Runnable closeCopies = () -> {
+            closeDescriptor(requestCopy);
+            closeDescriptors(snapshotCopies);
+        };
+        return shellCall("register:" + operationId(id), shellBulk, SHELL_BULK_TIMEOUT_MS,
+                "register-work", id, () -> {
+                    try {
+                        current.setRecoveryEnabled(currentGeneration,
+                                ShellRuntimeSession.mayRestore(context));
+                        return current.registerWork(currentGeneration, id, type,
+                                artifact.getCanonicalPath(), boot, requestCopy, offset,
+                                snapshotCopies, complete);
+                    } finally { closeCopies.run(); }
+                }, closeCopies);
     }
 
     Bundle workState(String id) throws IOException {
         IInstrumentNavigationProxy current = awaitShellProxy("independent-work-state");
         long currentGeneration;
         synchronized (lock) { currentGeneration = generation; }
-        try { return current.workState(currentGeneration, id); }
-        catch (RemoteException error) { throw new IOException("Cannot read trusted shell state", error); }
+        return shellCall("state:" + operationId(id), shellReads, SHELL_READ_TIMEOUT_MS,
+                "work-state", id, () -> current.workState(currentGeneration, id), null);
     }
 
     Bundle retireExportArtifacts(String request, boolean acquire) throws IOException {
@@ -1926,23 +1960,23 @@ final class InstrumentProxyManager {
         long currentGeneration;
         synchronized (lock) { currentGeneration = generation; }
         if (current == null) throw new IOException("cleanup_transport_unavailable");
-        try {
-            Bundle reply = current.retireExportArtifacts(currentGeneration, request);
-            if (reply == null || reply.getInt("schema", 0) != 1)
-                throw new IOException("cleanup_protocol_unavailable");
-            return reply;
-        } catch (RemoteException | RuntimeException error) {
-            // An older same-version retained helper may not implement the appended AIDL call.
-            throw new IOException("cleanup_transport_or_protocol_unavailable", error);
-        }
+        Bundle reply = shellCall("retire:" + requestKey(request), shellBulk,
+                SHELL_BULK_TIMEOUT_MS, "retire-export-artifacts", "", () ->
+                        current.retireExportArtifacts(currentGeneration, request), null);
+        if (reply == null || reply.getInt("schema", 0) != 1)
+            throw new IOException("cleanup_protocol_unavailable");
+        return reply;
     }
 
     void completeWorkSign(String id, String requestId, boolean ok, String detail) throws IOException {
         IInstrumentNavigationProxy current = awaitShellProxy("independent-work-sign");
         long currentGeneration;
         synchronized (lock) { currentGeneration = generation; }
-        try { current.completeWorkSign(currentGeneration, id, requestId, ok, detail); }
-        catch (RemoteException error) { throw new IOException("Cannot complete trusted signing request", error); }
+        shellCall("sign:" + operationId(id) + ":" + operationId(requestId), shellControls,
+                SHELL_CONTROL_TIMEOUT_MS, "complete-work-sign", id, () -> {
+                    current.completeWorkSign(currentGeneration, id, requestId, ok, detail);
+                    return null;
+                }, null);
     }
 
     void launchWork(String id) throws IOException { launchWork(id, false); }
@@ -1954,10 +1988,13 @@ final class InstrumentProxyManager {
                 cleanupOnly ? "owned-gps-cleanup" : "independent-work");
         long currentGeneration;
         synchronized (lock) { currentGeneration = generation; }
-        try {
-            current.setRecoveryEnabled(currentGeneration, ShellRuntimeSession.mayRestore(context));
-            current.launchWork(currentGeneration, id);
-        } catch (RemoteException error) { throw new IOException("Cannot launch trusted shell operation", error); }
+        shellCall("launch:" + operationId(id), shellControls, SHELL_CONTROL_TIMEOUT_MS,
+                "launch-work", id, () -> {
+                    current.setRecoveryEnabled(currentGeneration,
+                            ShellRuntimeSession.mayRestore(context));
+                    current.launchWork(currentGeneration, id);
+                    return null;
+                }, null);
     }
 
     private IInstrumentNavigationProxy awaitShellProxy(String reason) throws IOException {
@@ -1978,17 +2015,20 @@ final class InstrumentProxyManager {
         }
     }
 
-    boolean cancelWork(String id) {
+    boolean cancelWork(String id) throws IOException {
         return cancelWork(id, false);
     }
 
-    boolean cancelWork(String id, boolean resetAnyMockGps) {
-        IInstrumentNavigationProxy current;
+    boolean cancelWork(String id, boolean resetAnyMockGps) throws IOException {
+        IInstrumentNavigationProxy current = awaitShellProxy("independent-work-cancel");
         long currentGeneration;
-        synchronized (lock) { current = proxy; currentGeneration = generation; }
-        try { return current != null && current.cancelWork(
-                currentGeneration, id, resetAnyMockGps); }
-        catch (RemoteException | RuntimeException error) { return false; }
+        synchronized (lock) { currentGeneration = generation; }
+        boolean cancelled = shellCall("cancel:" + operationId(id) + ":reset=" + resetAnyMockGps, shellControls,
+                SHELL_CONTROL_TIMEOUT_MS, "cancel-work", id, () -> current.cancelWork(
+                        currentGeneration, id, resetAnyMockGps), null);
+        if (!cancelled) throw new IOException("Trusted shell worker did not confirm cancellation for operation "
+                + operationId(id));
+        return true;
     }
 
     Bundle startSystemCapture(String id, String cursor, android.os.ParcelFileDescriptor file)
@@ -1996,8 +2036,13 @@ final class InstrumentProxyManager {
         IInstrumentNavigationProxy current = awaitShellProxy("logcat-capture");
         long currentGeneration;
         synchronized (lock) { currentGeneration = generation; }
-        try { return current.startSystemCapture(currentGeneration, id, cursor, file); }
-        catch (RemoteException error) { throw new IOException(error); }
+        android.os.ParcelFileDescriptor copy = duplicate(file);
+        Runnable closeCopy = () -> closeDescriptor(copy);
+        return shellCall("capture-start:" + operationId(id), shellControls,
+                SHELL_CONTROL_TIMEOUT_MS, "start-system-capture", id, () -> {
+                    try { return current.startSystemCapture(currentGeneration, id, cursor, copy); }
+                    finally { closeCopy.run(); }
+                }, closeCopy);
     }
 
     static final class RuntimeUnavailableException extends IOException {
@@ -2008,9 +2053,156 @@ final class InstrumentProxyManager {
         IInstrumentNavigationProxy current;
         long currentGeneration;
         synchronized (lock) { current = proxy; currentGeneration = generation; }
-        if (current == null) throw new IOException("shell runtime unavailable");
-        try { return current.systemCaptureState(currentGeneration, id, stop); }
-        catch (RemoteException error) { throw new IOException(error); }
+        if (current == null) throw new IOException("shell runtime unavailable before capture-state dispatch");
+        return shellCall((stop ? "capture-stop:" : "capture-state:") + operationId(id),
+                stop ? shellControls : shellReads,
+                stop ? SHELL_CONTROL_TIMEOUT_MS : SHELL_READ_TIMEOUT_MS,
+                stop ? "stop-system-capture" : "system-capture-state", id,
+                () -> current.systemCaptureState(currentGeneration, id, stop), null);
+    }
+
+    static final class ShellWorkOutcomeUnknownException extends IOException {
+        final String operation;
+        final String operationId;
+        final boolean retainedCall;
+
+        ShellWorkOutcomeUnknownException(String operation, String id, String reason,
+                boolean retainedCall, Throwable cause) {
+            super("Shell " + operation + " result is unknown for operation " + operationId(id)
+                    + ": " + reason
+                    + "; automatic replay was not sent", cause);
+            this.operation = operation;
+            this.operationId = operationId(id);
+            this.retainedCall = retainedCall;
+        }
+    }
+
+    static final class ShellWorkNotDispatchedException extends IOException {
+        ShellWorkNotDispatchedException(String operation, String id, Throwable cause) {
+            super("Shell " + operation + " was not dispatched for operation " + operationId(id), cause);
+        }
+    }
+
+    private <T> T shellCall(String key, ExecutorService executor, long timeoutMs,
+            String operation, String id, Callable<T> call, Runnable notSubmitted) throws IOException {
+        Future<T> future;
+        boolean reused;
+        synchronized (pendingShellCalls) {
+            future = (Future<T>) pendingShellCalls.get(key);
+            reused = future != null;
+            if (future == null) {
+                pruneCompletedShellCalls(key);
+                FutureTask<T> candidate = new FutureTask<>(call);
+                try {
+                    executor.execute(candidate);
+                    future = candidate;
+                    pendingShellCalls.put(key, candidate);
+                } catch (RejectedExecutionException error) {
+                    if (notSubmitted != null) notSubmitted.run();
+                    throw new ShellWorkNotDispatchedException(operation, id, error);
+                }
+            }
+        }
+        if (reused && notSubmitted != null) notSubmitted.run();
+        try {
+            T result = future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            pendingShellCalls.remove(key, future);
+            return result;
+        } catch (TimeoutException error) {
+            log("shell call timeout " + FailureDiagnostics.format(error, operation, "binder-wait")
+                    + " id=" + operationId(id) + " outcome=unknown replay=false");
+            // Keep the Future so a same-ID retry joins this exact Binder call instead of resending it.
+            throw new ShellWorkOutcomeUnknownException(operation, id,
+                    "response wait exceeded " + timeoutMs + " ms; the Binder call was not cancelled",
+                    true, error);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            log("shell call interrupted " + FailureDiagnostics.format(error, operation, "binder-wait")
+                    + " id=" + operationId(id) + " outcome=unknown replay=false");
+            throw new ShellWorkOutcomeUnknownException(operation, id,
+                    "waiter was interrupted; the Binder call was not cancelled", true, error);
+        } catch (ExecutionException error) {
+            pendingShellCalls.remove(key, future);
+            Throwable cause = error.getCause() == null ? error : error.getCause();
+            log("shell call failed " + FailureDiagnostics.format(cause, operation, "binder-call")
+                    + " id=" + operationId(id));
+            if (cause instanceof RemoteException)
+                throw new ShellWorkOutcomeUnknownException(operation, id,
+                        "Binder transport failed after submission; execution may have occurred", false, cause);
+            if ("cancel-work".equals(operation) && cause instanceof RuntimeException)
+                throw new ShellWorkOutcomeUnknownException(operation, id,
+                        "the helper rejected or interrupted cancellation after dispatch; execution may have occurred",
+                        false, cause);
+            if (cause instanceof IOException) throw (IOException) cause;
+            if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+            throw new IOException("Shell " + operation + " failed: "
+                    + FailureDiagnostics.format(cause, operation, "binder-call"), cause);
+        }
+    }
+
+    private void pruneCompletedShellCalls(String keepKey) {
+        if (pendingShellCalls.size() < MAX_RETIRED_SHELL_CALLS) return;
+        for (Map.Entry<String, Future<?>> entry : pendingShellCalls.entrySet()) {
+            if (pendingShellCalls.size() < MAX_RETIRED_SHELL_CALLS / 2) return;
+            if (!entry.getKey().equals(keepKey) && entry.getValue().isDone())
+                pendingShellCalls.remove(entry.getKey(), entry.getValue());
+        }
+    }
+
+    private static ExecutorService newShellCallExecutor(String name) {
+        return new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(1), runnable -> {
+                    Thread thread = new Thread(runnable, name);
+                    thread.setDaemon(true);
+                    return thread;
+                }, new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    private static android.os.ParcelFileDescriptor duplicate(
+            android.os.ParcelFileDescriptor descriptor) throws IOException {
+        return descriptor == null ? null
+                : android.os.ParcelFileDescriptor.dup(descriptor.getFileDescriptor());
+    }
+
+    private static android.os.ParcelFileDescriptor[] duplicate(
+            android.os.ParcelFileDescriptor[] descriptors) throws IOException {
+        if (descriptors == null) return null;
+        android.os.ParcelFileDescriptor[] copies = new android.os.ParcelFileDescriptor[descriptors.length];
+        try {
+            for (int i = 0; i < descriptors.length; i++) copies[i] = duplicate(descriptors[i]);
+            return copies;
+        } catch (IOException error) {
+            closeDescriptors(copies);
+            throw error;
+        }
+    }
+
+    private static void closeDescriptor(android.os.ParcelFileDescriptor descriptor) {
+        if (descriptor != null) try { descriptor.close(); } catch (IOException ignored) { }
+    }
+
+    private static void closeDescriptors(android.os.ParcelFileDescriptor[] descriptors) {
+        if (descriptors == null) return;
+        for (android.os.ParcelFileDescriptor descriptor : descriptors) closeDescriptor(descriptor);
+    }
+
+    private static String operationId(String id) {
+        return id != null && id.matches("[A-Za-z0-9_-]{1,120}") ? id : "unknown";
+    }
+
+    private static String requestKey(String request) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(request.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder key = new StringBuilder("retire-");
+            for (byte value : digest) {
+                int item = value & 0xff;
+                key.append(HEX[item >>> 4]).append(HEX[item & 0x0f]);
+            }
+            return key.toString();
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new AssertionError(impossible);
+        }
     }
 
     private void shutdownCandidate(
@@ -2063,7 +2255,8 @@ final class InstrumentProxyManager {
 
     private void handleCallFailure(
             long requestGeneration, IBinder requestBinder, Throwable error) {
-        log("call failed generation=" + requestGeneration + " error=" + describe(error));
+        log("call failed generation=" + requestGeneration + " error="
+                + FailureDiagnostics.format(error, "instrument-proxy-call", "binder"));
         worker.execute(() -> handleBinderDeath(requestGeneration, requestBinder));
     }
 
@@ -2110,8 +2303,8 @@ final class InstrumentProxyManager {
             try {
                 listener.onUnavailable(safe(reason));
             } catch (RuntimeException error) {
-                log("unavailable listener failed type="
-                        + error.getClass().getSimpleName());
+                log("unavailable listener failed " + FailureDiagnostics.format(
+                        error, "instrument-proxy", "unavailable-listener"));
             }
         }
     }
@@ -2132,7 +2325,8 @@ final class InstrumentProxyManager {
                 clearStartupDiagnostic(expected);
             } catch (IOException error) {
                 log("startup diagnostic unavailable generation=" + expected.generation
-                        + " error=" + error.getClass().getSimpleName());
+                        + " error=" + FailureDiagnostics.format(
+                                error, "shell-runtime-cleanup", "startup-diagnostic"));
             }
         } else {
             clearStartupDiagnostic(expected);
@@ -2157,7 +2351,7 @@ final class InstrumentProxyManager {
         } catch (IOException error) {
             log("cleanup failed reason=" + safe(reason)
                     + " generation=" + expected.generation
-                    + " error=" + error.getClass().getSimpleName());
+                    + " error=" + FailureDiagnostics.format(error, "shell-runtime-cleanup", "stop"));
             return false;
         }
     }
@@ -2284,7 +2478,8 @@ final class InstrumentProxyManager {
             LocalAdbBridge.clearInstrumentProxyStartupDiagnostic(context, expected);
         } catch (IOException error) {
             log("startup diagnostic cleanup failed generation=" + expected.generation
-                    + " error=" + error.getClass().getSimpleName());
+                    + " error=" + FailureDiagnostics.format(
+                            error, "shell-runtime-cleanup", "clear-startup-diagnostic"));
         }
     }
 

@@ -269,58 +269,6 @@ public final class WazeDirectChannel {
         }
     }
 
-    /** Creates the real Binder hosts with a current process permit for Robolectric tests. */
-    IngressTestHosts ingressHostsForTest(Mode requestedMode) {
-        long now = SystemClock.elapsedRealtime();
-        WazeStartAdmission admission = WazeStartAdmission.PROCESS;
-        admission.updateRuntime(true, System.currentTimeMillis(), false);
-        admission.acceptedRoute(true, true, false, now);
-        WazeStartAdmission.Permit permit = admission.acquire(now);
-        if (permit == null) throw new IllegalStateException("test admission unavailable");
-        active = true;
-        suspended = false;
-        shutdown = false;
-        generation++;
-        connectionPermit = permit;
-        sessionGeneration++;
-        terminalRouteLatched = false;
-        acceptedRouteFrame = false;
-        navigationFrame = DirectTbtFrame.empty();
-        guidanceUnavailable = true;
-        navigationActive = false;
-        mode = requestedMode == null ? Mode.CLUSTER : requestedMode;
-        CarHost host = new CarHost(generation);
-        carHost = host;
-        return new IngressTestHosts(
-                ICarHost.Stub.asInterface(host.asBinder()),
-                INavigationHost.Stub.asInterface(host.navigationHost.asBinder()));
-    }
-
-    IOnDoneCallback templateCallbackForTest() {
-        return templateCallbackForTest(null);
-    }
-
-    IOnDoneCallback templateCallbackForTest(Runnable completion) {
-        int expectedGeneration = generation;
-        long surfaceRevision = carHost == null || !carHost.appHost.surfaceDelivered
-                ? -1 : carHost.appHost.surfaceDeliveryRevision;
-        return new DoneCallback(expectedGeneration, "getTemplate", null, completion,
-                (response, ingress) -> {
-                    onTemplate(expectedGeneration, response, ingress, surfaceRevision, 0);
-                    recordTemplateResponse("getTemplate");
-                });
-    }
-
-    void clearIngressForTest() {
-        resetTripState();
-        if (carHost != null) carHost.appHost.clearSurfaceSession("test-reset");
-        carHost = null;
-        active = false;
-        suspended = false;
-        generation++;
-        WazeStartAdmission.PROCESS.invalidate();
-    }
-
     public void onWazeAlertsPreferenceChanged(boolean enabled) {
         wazeAlertsEnabled = enabled;
         runOnChannel(() -> {
@@ -2653,10 +2601,6 @@ public final class WazeDirectChannel {
                 type, angle);
     }
 
-    static int mapWazeToAmapBroadcastForTest(int type) {
-        return mapWazeToAmapBroadcast(type, mapWazeToAmap(type));
-    }
-
     private void ingestTrip(int expectedGeneration,
             WazeStartAdmission.Permit expectedPermit, Bundleable bundle) {
         IngressStamp ingress = beginTripIngress(expectedGeneration, expectedPermit);
@@ -2865,16 +2809,6 @@ public final class WazeDirectChannel {
 
     private interface ResultHandler {
         void run(Bundleable result) throws Exception;
-    }
-
-    static final class IngressTestHosts {
-        final ICarHost carHost;
-        final INavigationHost navigationHost;
-
-        IngressTestHosts(ICarHost carHost, INavigationHost navigationHost) {
-            this.carHost = carHost;
-            this.navigationHost = navigationHost;
-        }
     }
 
     private interface IngressResultHandler {

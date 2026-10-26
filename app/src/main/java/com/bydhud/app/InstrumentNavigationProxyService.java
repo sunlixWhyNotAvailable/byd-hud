@@ -1080,15 +1080,14 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 sources.add(new ShellWorkSnapshots.Source(new ParcelFileDescriptor.AutoCloseInputStream(snapshot), stat.st_size));
             }
             org.json.JSONObject cursor = ShellWorkSnapshots.append(control, manifest, offset, sources, complete);
-            synchronized (this) {
-                String stage = new File(control, "cancel").exists() ? "CANCELLED" : cursor.getString("state");
-                writeWorkState(control, new org.json.JSONObject().put("state", stage)
-                        .put("progress", new org.json.JSONObject().put("phase", complete ? "REGISTERED" : "COPYING")
-                                .put("files", cursor.getInt("nextSnapshot"))));
-                return registrationState(control, manifest, readWorkState(control));
-            }
+            String stage = new File(control, "cancel").exists() ? "CANCELLED" : cursor.getString("state");
+            writeWorkState(control, new org.json.JSONObject().put("state", stage)
+                    .put("progress", new org.json.JSONObject().put("phase", complete ? "REGISTERED" : "COPYING")
+                            .put("files", cursor.getInt("nextSnapshot"))));
+            return registrationState(control, manifest, readWorkState(control));
         } catch (Exception error) {
-            throw new IllegalStateException("Cannot register trusted shell operation: " + error.getMessage(), error);
+            throw shellWorkFailure(error, "register-work",
+                    "offset=" + offset + ", complete=" + complete);
         } finally {
             for (ShellWorkSnapshots.Source source : sources) try { source.input.close(); } catch (IOException ignored) { }
             if (request != null) try { request.close(); } catch (IOException ignored) { }
@@ -1123,7 +1122,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             }
             return stateBundle(control, state);
         } catch (Exception error) {
-            throw new IllegalStateException("Cannot read trusted shell operation state: " + error.getMessage(), error);
+            throw shellWorkFailure(error, "work-state", "read");
         } finally { Binder.restoreCallingIdentity(identity); }
     }
 
@@ -1146,11 +1145,11 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             ShellWorkFiles.write(response, new org.json.JSONObject().put("id", requestId)
                     .put("ok", ok).put("detail", detail == null ? "" : detail));
         } catch (Exception error) {
-            throw new IllegalStateException("Cannot complete trusted signing request", error);
+            throw shellWorkFailure(error, "complete-work-sign", "persist-response");
         } finally { Binder.restoreCallingIdentity(identity); }
     }
 
-    @Override public synchronized void launchWork(long requestGeneration, String id) {
+    @Override public void launchWork(long requestGeneration, String id) {
         enforceSession(requestGeneration);
         long identity = Binder.clearCallingIdentity();
         try (ShellWorkFiles.OperationLock admission = ShellWorkFiles.lockOperation(id)) {
@@ -1166,6 +1165,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             if (existing != null && existing.isAlive()) return;
             org.json.JSONObject state = readWorkState(control);
             String phase = state.optString("state");
+            if ("UNCERTAIN".equals(phase))
+                throw new IOException("Shell operation state is UNCERTAIN; worker launch was not replayed");
             if (isTerminalWorkState(phase)) return;
             if (!"REGISTERED".equals(request.optString("state")))
                 throw new IOException("Shell input registration is incomplete");
@@ -1189,25 +1190,31 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             catch (IOException error) {
                 writeWorkState(control, new org.json.JSONObject().put("id", id).put("state", "FAILED")
                         .put("result", new org.json.JSONObject().put("ok", false)
-                                .put("error", "Cannot start shell worker: " + error.getClass().getSimpleName())));
+                                .put("error", "Cannot start shell worker")
+                                .put("diagnostic", FailureDiagnostics.formatBounded(
+                                        error, "launch-work", "app_process-start", 24 * 1024))));
                 throw error;
             }
         } catch (Exception error) {
-            throw new IllegalStateException("Cannot launch trusted shell work: " + error.getMessage(), error);
+            throw shellWorkFailure(error, "launch-work", "start");
         } finally { Binder.restoreCallingIdentity(identity); }
     }
 
-    @Override public synchronized boolean cancelWork(long requestGeneration, String id,
+    @Override public boolean cancelWork(long requestGeneration, String id,
             boolean resetAnyMockGps) {
         enforceSession(requestGeneration);
         long identity = Binder.clearCallingIdentity();
-        try {
+        try (ShellWorkFiles.OperationLock admission = ShellWorkFiles.lockOperation(id)) {
             File control = ShellWorkFiles.controlJob(id);
             org.json.JSONObject request = ShellWorkFiles.readManifest(new File(control, "request.json"));
             if (!id.equals(request.optString("id")) || request.optInt("uid", -1) != allowedUid)
                 throw new SecurityException("Shell operation owner changed");
             org.json.JSONObject workState = readWorkState(control);
-            if (isTerminalWorkState(workState.optString("state"))) return true;
+            String phase = workState.optString("state");
+            if (isTerminalWorkState(phase)) return true;
+            if ("UNCERTAIN".equals(phase))
+                throw new IOException("Cancellation cannot replace an uncertain worker result: "
+                        + workState.optJSONObject("result"));
             if (resetAnyMockGps) {
                 org.json.JSONObject input = request.optJSONObject("input");
                 if (!"RUNNING".equals(workState.optString("state"))
@@ -1222,23 +1229,51 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             if (!cancel.exists()) ShellWorkFiles.write(cancel, new org.json.JSONObject().put("id", id));
             java.lang.Process process = workProcesses.get(id);
             if (process == null || !process.isAlive()) {
-                if (!"RUNNING".equals(readWorkState(control).optString("state"))) {
+                org.json.JSONObject observedState = readWorkState(control);
+                String observed = observedState.optString("state");
+                if (isTerminalWorkState(observed)) return true;
+                if ("UNCERTAIN".equals(observed))
+                    throw new IOException("Cancellation cannot replace an uncertain worker result: "
+                            + observedState.optJSONObject("result"));
+                if (!"RUNNING".equals(observed)) {
                     writeWorkState(control, new org.json.JSONObject().put("id", id).put("state", "CANCELLED")
                             .put("result", new org.json.JSONObject().put("ok", false).put("cancelled", true)
                                     .put("error", "Cancelled before worker launch")));
                     return true;
                 }
-                return false;
+                throw new IOException("Cancellation was requested, but the worker process is not attached; state="
+                        + observed);
             }
             if ("shanghai".equals(request.optString("type"))) return true;
             process.destroyForcibly();
-            if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) return false;
+            if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                throw new IOException("Cancellation was requested, but the shell worker did not exit within 5 seconds");
+            }
+            // A completed worker may still be retiring copies when cancellation arrives.
+            org.json.JSONObject completedState = readWorkState(control);
+            String completed = completedState.optString("state");
+            if (isTerminalWorkState(completed)) return true;
+            if ("UNCERTAIN".equals(completed))
+                throw new IOException("Cancellation cannot replace an uncertain worker result: "
+                        + completedState.optJSONObject("result"));
             writeWorkState(control, new org.json.JSONObject().put("id", id).put("state", "CANCELLED")
                     .put("result", new org.json.JSONObject().put("ok", false).put("cancelled", true)
                             .put("error", "Cancelled by operation owner")));
             return true;
-        } catch (Exception error) { return false; }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw shellWorkFailure(error, "cancel-work", "process-wait");
+        } catch (Exception error) {
+            throw shellWorkFailure(error, "cancel-work", "control");
+        }
         finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    private static IllegalStateException shellWorkFailure(Throwable failure,
+            String operation, String stage) {
+        Log.e(TAG, FailureDiagnostics.format(failure, operation, stage));
+        return new IllegalStateException(FailureDiagnostics.formatBounded(
+                failure, operation, stage, 24 * 1024), failure);
     }
 
     @Override public Bundle retireExportArtifacts(long requestGeneration, String requestJson) {
@@ -1254,7 +1289,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             reply.putString("results", results.toString());
             return reply;
         } catch (Exception error) {
-            throw new IllegalStateException("Cannot retire export artifacts: " + error.getMessage(), error);
+            throw shellWorkFailure(error, "retire-export-artifacts", "cleanup");
         } finally { Binder.restoreCallingIdentity(identity); }
     }
 

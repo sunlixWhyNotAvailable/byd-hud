@@ -8,6 +8,8 @@ import android.util.Log;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
@@ -275,32 +277,40 @@ final class NavCaptureStore {
         if (file == null || !file.exists() || file.getParentFile() == null) {
             return false;
         }
-        int highestSuffix = highestRotatedSuffix(file);
-        if (highestSuffix == Integer.MAX_VALUE) {
+        final long highestSuffix;
+        try {
+            highestSuffix = highestRotatedSuffix(file);
+        } catch (IOException | RuntimeException error) {
+            WazeCaptureDebugWriter.recordWriteFailure("rotate suffix scan failed: " + error);
+            Log.e(TAG, "rotate suffix scan failed: " + file.getAbsolutePath(), error);
+            return false;
+        }
+        if (highestSuffix == Long.MAX_VALUE) {
             WazeCaptureDebugWriter.recordWriteFailure("rotate suffix exhausted");
             Log.w(TAG, "rotate suffix exhausted: " + file.getAbsolutePath());
             return false;
         }
-        for (int suffix = highestSuffix; suffix >= 1; suffix--) {
-            File source = rotatedFile(file, suffix);
-            if (!source.isFile()) {
-                continue;
-            }
-            File target = rotatedFile(file, suffix + 1);
-            if (target.exists() || !source.renameTo(target)) {
-                WazeCaptureDebugWriter.recordWriteFailure("rotate shard failed: " + source.getName());
-                Log.w(TAG, "rotate shard failed: " + source.getAbsolutePath()
-                        + " -> " + target.getAbsolutePath());
+        long suffix = highestSuffix + 1L;
+        File rotated;
+        while (true) {
+            rotated = rotatedFile(file, suffix);
+            try {
+                Files.move(file.toPath(), rotated.toPath());
+                break;
+            } catch (FileAlreadyExistsException collision) {
+                if (suffix == Long.MAX_VALUE) {
+                    WazeCaptureDebugWriter.recordWriteFailure("rotate suffix exhausted");
+                    Log.e(TAG, "rotate suffix exhausted: " + file.getAbsolutePath(), collision);
+                    return false;
+                }
+                suffix++;
+            } catch (IOException | RuntimeException error) {
+                WazeCaptureDebugWriter.recordWriteFailure(
+                        "rotate shard failed: " + rotated.getName() + ": " + error);
+                Log.e(TAG, "rotate shard failed " + file.getAbsolutePath()
+                        + " -> " + rotated.getAbsolutePath(), error);
                 return false;
             }
-        }
-
-        File rotated = rotatedFile(file, 1);
-        if (!file.renameTo(rotated)) {
-            WazeCaptureDebugWriter.recordWriteFailure("rotate active failed: " + file.getName());
-            Log.w(TAG, "rotate active failed: " + file.getAbsolutePath()
-                    + " -> " + rotated.getAbsolutePath());
-            return false;
         }
         try {
             if (!file.createNewFile() && !file.exists()) {
@@ -314,13 +324,14 @@ final class NavCaptureStore {
         return true;
     }
 
-    private static int highestRotatedSuffix(File file) {
-        String prefix = file.getName() + ".";
+    private static long highestRotatedSuffix(File file) throws IOException {
+        String prefix = file.getName() + ".part-";
         File[] siblings = file.getParentFile().listFiles();
-        int highest = 0;
         if (siblings == null) {
-            return highest;
+            throw new IOException("cannot enumerate rotation directory: "
+                    + file.getParentFile().getAbsolutePath());
         }
+        long highest = 0L;
         for (File sibling : siblings) {
             if (sibling == null || !sibling.isFile()) {
                 continue;
@@ -331,7 +342,7 @@ final class NavCaptureStore {
             }
             String suffix = name.substring(prefix.length());
             try {
-                int value = Integer.parseInt(suffix);
+                long value = Long.parseLong(suffix);
                 if (value > highest) {
                     highest = value;
                 }
@@ -342,8 +353,8 @@ final class NavCaptureStore {
         return highest;
     }
 
-    private static File rotatedFile(File file, int suffix) {
-        return new File(file.getParentFile(), file.getName() + "." + suffix);
+    private static File rotatedFile(File file, long suffix) {
+        return new File(file.getParentFile(), file.getName() + ".part-" + suffix);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

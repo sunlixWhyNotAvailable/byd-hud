@@ -2532,23 +2532,25 @@ final class HudOutputCoordinator {
         }
     }
 
-    private static void runCompletion(Runnable completion) {
+    private void runCompletion(Runnable completion) {
         if (completion == null) return;
         try {
             completion.run();
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException error) {
+            log(FailureDiagnostics.format(error, "hud-output", "completion"));
         }
     }
 
-    private static void runCompletion(Consumer<Boolean> completion, boolean result) {
+    private void runCompletion(Consumer<Boolean> completion, boolean result) {
         if (completion == null) return;
         try {
             completion.accept(result);
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException error) {
+            log(FailureDiagnostics.format(error, "hud-output", "completion result=" + result));
         }
     }
 
-    private static Runnable chainCompletions(Runnable first, Runnable second) {
+    private Runnable chainCompletions(Runnable first, Runnable second) {
         if (first == null) return second;
         if (second == null) return first;
         return () -> {
@@ -2656,7 +2658,7 @@ final class HudOutputCoordinator {
             }
             return result == 0 ? completedAtMs : -1L;
         } catch (RemoteException | RuntimeException e) {
-            logAsync("clear failed reason=" + reason + " error=" + safe(e.getMessage()));
+            logAsync(FailureDiagnostics.format(e, "hud-clear", reason));
             return -1L;
         }
     }
@@ -2685,7 +2687,7 @@ final class HudOutputCoordinator {
                         lastTransportChannel, reason, null,
                         e.getClass().getSimpleName() + ":" + safe(e.getMessage()),
                         SystemClock.elapsedRealtime() - startedAtMs);
-                log("stop failed reason=" + reason + " error=" + safe(e.getMessage()));
+                log(FailureDiagnostics.format(e, "hud-stop", reason));
             }
         }
         serviceStarted = false;
@@ -2784,13 +2786,7 @@ final class HudOutputCoordinator {
         worker.removeCallbacks(transportRecovery);
         worker.removeCallbacks(protocolRetry);
         client.unbind();
-        log("transport failure reason=" + reason
-                + (error == null ? "" : " error=" + error.getClass().getSimpleName()
-                + ":" + safe(error.getMessage())));
-        if (error != null && manualState != null && manualState.hudCheck != null) {
-            log("hud_check transport failure reason=" + reason + " stack="
-                    + Log.getStackTraceString(error));
-        }
+        log(FailureDiagnostics.format(error, "hud-transport", reason));
         if (manualMapLiveSession != 0L) {
             log("map_live transport_failure session=" + manualMapLiveSession
                     + " reason=" + safe(reason)
@@ -2814,10 +2810,7 @@ final class HudOutputCoordinator {
 
     private void handleProtocolException(String reason, RuntimeException error) {
         sendFailures++;
-        if (manualState != null && manualState.hudCheck != null) {
-            log("hud_check protocol failure reason=" + reason + " stack="
-                    + Log.getStackTraceString(error));
-        }
+        log(FailureDiagnostics.format(error, "hud-protocol", reason));
         handleProtocolFailure(reason + " error=" + error.getClass().getSimpleName()
                 + ":" + safe(error.getMessage()));
     }
@@ -3101,7 +3094,7 @@ final class HudOutputCoordinator {
             directLossClearSent = true;
             return true;
         } catch (RemoteException | RuntimeException error) {
-            logAsync("direct loss clear failed error=" + safe(error.getMessage()));
+            logAsync(FailureDiagnostics.format(error, "hud-clear", "direct-loss"));
             return false;
         }
     }

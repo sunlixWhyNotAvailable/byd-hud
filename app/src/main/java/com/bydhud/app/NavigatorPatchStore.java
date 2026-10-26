@@ -10,6 +10,9 @@ import android.provider.Settings;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 
 @android.annotation.SuppressLint("ApplySharedPref")
@@ -88,6 +91,7 @@ final class NavigatorPatchStore {
     private static final String KEY_RECOVERY_ACK_TOKEN = "recovery_ack_token";
     private static final String KEY_INSTALL_OWNER = "install_owner";
     private static final String KEY_INSTALL_OWNER_TOKEN = "install_owner_token";
+    private static volatile List<OperationSnapshot> uiOperationCache = Collections.emptyList();
 
     enum Profile {
         WAZE("waze", "com.waze", "Waze", "Lanes", "Stable session", "Waze alerts"),
@@ -189,18 +193,27 @@ final class NavigatorPatchStore {
         final boolean cancelRequested;
         final boolean destructive;
         final boolean acknowledged;
+        final boolean awaitingDestructiveApproval;
 
         OperationSnapshot(Profile profile, String kind, String phase,
                 String detail, String operationToken, long startedAt, int progress, String error,
                 long readyAt, boolean cancelRequested, boolean destructive) {
             this(profile, kind, phase, detail, operationToken, startedAt, progress, error,
-                    readyAt, cancelRequested, destructive, false);
+                    readyAt, cancelRequested, destructive, false, false);
         }
 
         OperationSnapshot(Profile profile, String kind, String phase,
                 String detail, String operationToken, long startedAt, int progress, String error,
                 long readyAt, boolean cancelRequested, boolean destructive,
                 boolean acknowledged) {
+            this(profile, kind, phase, detail, operationToken, startedAt, progress, error,
+                    readyAt, cancelRequested, destructive, acknowledged, false);
+        }
+
+        OperationSnapshot(Profile profile, String kind, String phase,
+                String detail, String operationToken, long startedAt, int progress, String error,
+                long readyAt, boolean cancelRequested, boolean destructive,
+                boolean acknowledged, boolean awaitingDestructiveApproval) {
             this.profile = profile;
             this.kind = kind;
             this.phase = phase;
@@ -213,6 +226,7 @@ final class NavigatorPatchStore {
             this.cancelRequested = cancelRequested;
             this.destructive = destructive;
             this.acknowledged = acknowledged;
+            this.awaitingDestructiveApproval = awaitingDestructiveApproval;
         }
 
         OperationSnapshot(Profile profile, String kind, String phase,
@@ -230,6 +244,12 @@ final class NavigatorPatchStore {
             return IDLE.equals(phase) || VERIFIED.equals(phase)
                     || FAILED.equals(phase) || CANCELLED.equals(phase)
                     || RECOVERY_REQUIRED.equals(phase);
+        }
+
+        OperationSnapshot withAwaitingDestructiveApproval(boolean awaiting) {
+            return new OperationSnapshot(profile, kind, phase, detail, operationToken,
+                    startedAt, progress, error, readyAt, cancelRequested, destructive,
+                    acknowledged, awaiting);
         }
     }
 
@@ -359,7 +379,7 @@ final class NavigatorPatchStore {
             }
             File previousTransaction = localOperation(context, profile)
                     ? transactionDirectory(context, profile) : null;
-            clearTransactionMetadata(context, profile);
+            clearTransactionMetadataLocked(context, profile);
             deleteTreeQuietly(previousTransaction);
             long startedAt = nextStartedAt(context);
             String operationId = UUID.randomUUID().toString();
@@ -522,10 +542,12 @@ final class NavigatorPatchStore {
                  .remove(KEY_RECOVERY_ACK_TOKEN)
                  .commit();
         if (!committed) throw new IOException("Cannot retain navigator recovery transaction");
+        refreshUiOperationCacheLocked(context);
         AppEventLogger.event(context, "navigator_patch operation=" + OP_RECOVERY
                 + " profile=" + profile.id
                 + " stage=" + RECOVERY_REQUIRED + " code=RECOVERY_REQUIRED"
                 + " detail=" + clean(detail));
+        MainActivity.publishSharedUiStateChange();
     }
 
     static boolean matchesRecoveryTransaction(
@@ -556,6 +578,7 @@ final class NavigatorPatchStore {
                                 ? (detail == null ? "" : detail) : "")
                 .putLong(KEY_STATE_AT, System.currentTimeMillis())
                 .commit();
+        refreshUiOperationCacheLocked(context);
         String operation = prefs(context).getString(KEY_OPERATION_KIND, "");
         AppEventLogger.event(context, "navigator_patch operation=" + operation
                 + " profile=" + (profile == null ? "" : profile.id)
@@ -595,6 +618,7 @@ final class NavigatorPatchStore {
             editor.putBoolean(profileKey(profile, KEY_CANCEL_REQUESTED), false);
         }
         editor.commit();
+        refreshUiOperationCacheLocked(context);
         String operation = operationKind(context, profile);
         AppEventLogger.event(context, "navigator_patch operation=" + operation
                 + " profile=" + profile.id + " stage=" + phase
@@ -695,6 +719,26 @@ final class NavigatorPatchStore {
         return result;
     }
 
+    static List<OperationSnapshot> uiOperations() {
+        return uiOperationCache;
+    }
+
+    static synchronized void refreshUiOperationCache(Context context) {
+        refreshUiOperationCacheLocked(context);
+    }
+
+    private static void refreshUiOperationCacheLocked(Context context) {
+        OperationSnapshot[] current = operations(context);
+        List<OperationSnapshot> snapshots = new ArrayList<>(current.length);
+        for (OperationSnapshot operation : current) {
+            if (operation == null) continue;
+            boolean awaiting = operation.profile != null
+                    && awaitingDestructiveApproval(context, operation.profile);
+            snapshots.add(operation.withAwaitingDestructiveApproval(awaiting));
+        }
+        uiOperationCache = Collections.unmodifiableList(snapshots);
+    }
+
     private static synchronized OperationSnapshot globalOperation(Context context) {
         SharedPreferences preferences = prefs(context);
         String phase = preferences.getString(KEY_OPERATION_PHASE, IDLE);
@@ -793,6 +837,8 @@ final class NavigatorPatchStore {
                 .putString(profileKey(profile, KEY_DESTRUCTIVE_CONSENT_IDENTITY), identity)
                 .commit();
         if (!saved) throw new IOException("Cannot persist destructive replacement confirmation");
+        refreshUiOperationCacheLocked(context);
+        MainActivity.publishSharedUiStateChange();
     }
 
     static synchronized void requireDestructiveInstallApproval(Context context,
@@ -1216,6 +1262,7 @@ final class NavigatorPatchStore {
                 .putString(profileKey(profile, KEY_OPERATION_DETAIL), "Cancellation requested")
                 .putLong(profileKey(profile, KEY_STATE_AT), System.currentTimeMillis())
                 .commit();
+        refreshUiOperationCacheLocked(context);
         AppEventLogger.event(context, "navigator_patch operation=" + current.kind
                 + " profile=" + profile.id + " stage=" + CANCEL_REQUESTED
                 + " code=CANCEL_REQUESTED detail=Cancellation requested");
@@ -1240,7 +1287,10 @@ final class NavigatorPatchStore {
                     : KEY_RECOVERY_ACK_TOKEN;
             boolean committed = prefs(context).edit()
                     .putString(key, current.operationToken).commit();
-            if (committed) MainActivity.publishSharedUiStateChange();
+            if (committed) {
+                refreshUiOperationCacheLocked(context);
+                MainActivity.publishSharedUiStateChange();
+            }
             return committed;
         }
         if (!(FAILED.equals(current.phase) || CANCELLED.equals(current.phase)
@@ -1249,7 +1299,7 @@ final class NavigatorPatchStore {
         if (shouldDismissLegacyGlobal(local, current, profile)) {
             clearLegacyTerminal(context);
         } else {
-            clearTransactionMetadata(context, profile);
+            clearTransactionMetadataLocked(context, profile);
             prefs(context).edit()
                     .putString(profileKey(profile, KEY_OPERATION_PHASE), IDLE)
                     .putString(profileKey(profile, KEY_OPERATION_DETAIL), "")
@@ -1260,6 +1310,7 @@ final class NavigatorPatchStore {
                     .commit();
         }
         releaseInstall(context, profile);
+        refreshUiOperationCacheLocked(context);
         MainActivity.publishSharedUiStateChange();
         deleteTreeQuietly(transaction);
         requestInstallDrain(context);
@@ -1396,6 +1447,39 @@ final class NavigatorPatchStore {
 
     static synchronized void clearTransactionMetadata(Context context) {
         removeGlobalTransactionMetadata(prefs(context).edit()).commit();
+        refreshUiOperationCacheLocked(context);
+    }
+
+    private static void clearTransactionMetadataLocked(Context context, Profile profile) {
+        if (profile == null) {
+            removeGlobalTransactionMetadata(prefs(context).edit()).commit();
+            return;
+        }
+        prefs(context).edit()
+                .remove(profileKey(profile, KEY_TRANSACTION_DIR))
+                .remove(profileKey(profile, KEY_DESTRUCTIVE))
+                .remove(profileKey(profile, KEY_SESSION_ID))
+                .remove(profileKey(profile, KEY_TRANSACTION_TOKEN))
+                .remove(profileKey(profile, KEY_RECOVERY_OWNER))
+                .remove(profileKey(profile, KEY_EXPECTED_SHA))
+                .remove(profileKey(profile, KEY_EXPECTED_VERSION_CODE))
+                .remove(profileKey(profile, KEY_EXPECTED_SIGNER))
+                .remove(profileKey(profile, KEY_EXPECTED_DIRECT))
+                .remove(profileKey(profile, KEY_EXPECTED_GMS_CORE))
+                .remove(profileKey(profile, KEY_EXPECTED_OPTIONAL))
+                .remove(profileKey(profile, KEY_EXPECTED_ALERT))
+                .remove(profileKey(profile, KEY_EXPECTED_MAP_REVISION))
+                .remove(profileKey(profile, KEY_EXPECTED_MAP_REASON))
+                .remove(profileKey(profile, KEY_EXPECTED_MAP))
+                .remove(profileKey(profile, KEY_INITIAL_UPDATE_TIME))
+                .remove(profileKey(profile, KEY_INITIAL_VERSION_CODE))
+                .remove(profileKey(profile, KEY_INITIAL_SIGNER))
+                .remove(profileKey(profile, KEY_INITIAL_FINGERPRINT))
+                .remove(profileKey(profile, KEY_EXPECTED_CALLBACK))
+                .remove(profileKey(profile, KEY_CALLBACK_CONSUMED))
+                .remove(profileKey(profile, KEY_FINAL_VERIFY_RETRY))
+                .remove(profileKey(profile, KEY_RECOVERY_ACK_TOKEN))
+                .commit();
     }
 
     private static SharedPreferences.Editor removeGlobalTransactionMetadata(
@@ -1443,35 +1527,8 @@ final class NavigatorPatchStore {
     }
 
     static synchronized void clearTransactionMetadata(Context context, Profile profile) {
-        if (profile == null) {
-            clearTransactionMetadata(context);
-            return;
-        }
-        prefs(context).edit()
-                .remove(profileKey(profile, KEY_TRANSACTION_DIR))
-                .remove(profileKey(profile, KEY_DESTRUCTIVE))
-                .remove(profileKey(profile, KEY_SESSION_ID))
-                .remove(profileKey(profile, KEY_TRANSACTION_TOKEN))
-                .remove(profileKey(profile, KEY_RECOVERY_OWNER))
-                .remove(profileKey(profile, KEY_EXPECTED_SHA))
-                .remove(profileKey(profile, KEY_EXPECTED_VERSION_CODE))
-                .remove(profileKey(profile, KEY_EXPECTED_SIGNER))
-                .remove(profileKey(profile, KEY_EXPECTED_DIRECT))
-                .remove(profileKey(profile, KEY_EXPECTED_GMS_CORE))
-                .remove(profileKey(profile, KEY_EXPECTED_OPTIONAL))
-                .remove(profileKey(profile, KEY_EXPECTED_ALERT))
-                .remove(profileKey(profile, KEY_EXPECTED_MAP_REVISION))
-                .remove(profileKey(profile, KEY_EXPECTED_MAP_REASON))
-                .remove(profileKey(profile, KEY_EXPECTED_MAP))
-                .remove(profileKey(profile, KEY_INITIAL_UPDATE_TIME))
-                .remove(profileKey(profile, KEY_INITIAL_VERSION_CODE))
-                .remove(profileKey(profile, KEY_INITIAL_SIGNER))
-                .remove(profileKey(profile, KEY_INITIAL_FINGERPRINT))
-                .remove(profileKey(profile, KEY_EXPECTED_CALLBACK))
-                .remove(profileKey(profile, KEY_CALLBACK_CONSUMED))
-                .remove(profileKey(profile, KEY_FINAL_VERIFY_RETRY))
-                .remove(profileKey(profile, KEY_RECOVERY_ACK_TOKEN))
-                .commit();
+        clearTransactionMetadataLocked(context, profile);
+        refreshUiOperationCacheLocked(context);
     }
 
     static synchronized void completeRestoreTransaction(
@@ -1520,6 +1577,7 @@ final class NavigatorPatchStore {
                  .remove(profileKey(profile, KEY_RECOVERY_ACK_TOKEN))
                  .commit();
         if (!committed) throw new IOException("Cannot complete navigator recovery transaction");
+        refreshUiOperationCacheLocked(context);
         AppEventLogger.event(context, "navigator_patch operation=" + OP_RECOVERY
                 + " profile=" + profile.id + " stage=" + IDLE
                 + " code=" + eventCode(OP_RECOVERY, IDLE, detail)

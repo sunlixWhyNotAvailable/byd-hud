@@ -7,7 +7,9 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.database.Cursor;
+import android.util.Log;
 
 import androidx.core.content.FileProvider;
 
@@ -20,9 +22,11 @@ import java.io.InputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -31,6 +35,7 @@ import java.util.zip.ZipFile;
 
 /** Owns the fixed navigator asset catalog, downloads, validation, and install handoff. */
 final class NavigatorAssetManager {
+    private static final String TAG = "BydHudAssets";
     static final String DOWNLOADING = "DOWNLOADING";
     static final String VERIFYING = "VERIFYING";
     static final String NOT_DOWNLOADED = "NOT_DOWNLOADED";
@@ -59,6 +64,10 @@ final class NavigatorAssetManager {
     private static final Set<String> ACTIVE_VALIDATIONS = new HashSet<>();
     private static final Set<String> ACTIVE_INSTALL_VERIFICATIONS = new HashSet<>();
     private static final Set<String> ACTIVE_TRANSACTION_DIRECTORIES = new HashSet<>();
+    private static final Object CATALOG_CLEANUP_LOCK = new Object();
+    private static final Set<String> ACTIVE_CATALOG_CLEANUPS = new HashSet<>();
+    private static final Map<String, Long> CATALOG_CLEANUP_RETRY_AFTER = new HashMap<>();
+    private static final long CATALOG_CLEANUP_RETRY_DELAY_MS = 30_000L;
     private static final AtomicBoolean ORPHAN_SWEEP_RUNNING = new AtomicBoolean(false);
     private static final Object TRANSACTION_LOCK = new Object();
 
@@ -342,11 +351,6 @@ final class NavigatorAssetManager {
             super(detail, cause);
             this.category = category;
         }
-    }
-
-    static String resolvedSnapshotStateForTest(
-            boolean installed, boolean downloadReady, String persistedState) {
-        return resolvedSnapshotState(installed, downloadReady, persistedState);
     }
 
     private static String resolvedSnapshotState(
@@ -1339,31 +1343,136 @@ final class NavigatorAssetManager {
     private static void reconcileCatalogRevision(Context context, Asset asset) {
         synchronized (TRANSACTION_LOCK) {
             String previous = string(context, asset, "catalog_sha", "");
-            if (asset.sha256.equals(previous)) return;
-            if (!previous.isEmpty() && catalogFilesAreIdle(context, asset)) {
-                deleteObsoleteCatalogFile(context, downloadFile(context, asset), previous);
-                deleteObsoleteCatalogFile(context, new File(
-                        new File(context.getFilesDir(), "updates"), asset.fileName), previous);
+            String previousFileName = string(context, asset, "catalog_file_name", "");
+            boolean changed = !asset.sha256.equals(previous)
+                    || (!previousFileName.isEmpty()
+                    && !asset.fileName.equals(previousFileName));
+            String pendingKey = key(asset, "catalog_cleanup_pending");
+            String pending = string(context, asset, "catalog_cleanup_pending", "");
+            if (changed && !previous.isEmpty() && !previousFileName.isEmpty()) {
+                String queued = NavigatorCatalogCleanup.enqueue(
+                        pending, previousFileName, previous);
+                if (!queued.equals(pending)
+                        && !prefs(context).edit().putString(pendingKey, queued).commit()) {
+                    Log.e(TAG, "catalog cleanup identity could not be persisted for " + asset.id);
+                    return;
+                }
             }
-            android.content.SharedPreferences.Editor editor = prefs(context).edit()
-                    .putString(key(asset, "catalog_sha"), asset.sha256)
-                    .remove(key(asset, "installed_identity"))
-                    .remove(key(asset, "installed_matches"))
-                    .putBoolean(key(asset, "download_ready"), false);
-            if (PHASE_NONE.equals(string(context, asset, "phase", PHASE_NONE))) {
-                editor.putString(key(asset, "state"), NOT_DOWNLOADED)
-                        .putString(key(asset, "progress"), "0%")
-                        .putString(key(asset, "error"), "");
+            if (changed) {
+                android.content.SharedPreferences.Editor editor = prefs(context).edit()
+                        .putString(key(asset, "catalog_sha"), asset.sha256)
+                        .putString(key(asset, "catalog_file_name"), asset.fileName)
+                        .remove(key(asset, "installed_identity"))
+                        .remove(key(asset, "installed_matches"))
+                        .putBoolean(key(asset, "download_ready"), false);
+                if (PHASE_NONE.equals(string(context, asset, "phase", PHASE_NONE))) {
+                    editor.putString(key(asset, "state"), NOT_DOWNLOADED)
+                            .putString(key(asset, "progress"), "0%")
+                            .putString(key(asset, "error"), "");
+                }
+                if (!editor.commit()) {
+                    Log.e(TAG, "catalog revision could not be persisted for " + asset.id);
+                    return;
+                }
             }
-            editor.commit();
+            retryPendingCatalogCleanup(context, asset);
+        }
+    }
+
+    private static void retryPendingCatalogCleanup(Context context, Asset asset) {
+        if (!catalogFilesAreIdle(context, asset)) return;
+        String pending = string(context, asset, "catalog_cleanup_pending", "");
+        if (pending.isEmpty()) return;
+        long now = SystemClock.elapsedRealtime();
+        synchronized (CATALOG_CLEANUP_LOCK) {
+            if (ACTIVE_CATALOG_CLEANUPS.contains(asset.id)
+                    || now < CATALOG_CLEANUP_RETRY_AFTER.getOrDefault(asset.id, 0L)) return;
+            ACTIVE_CATALOG_CLEANUPS.add(asset.id);
+        }
+        Context appContext = context.getApplicationContext();
+        Thread worker = new Thread(() -> {
+            AtomicBoolean failed = new AtomicBoolean();
+            try {
+                synchronized (TRANSACTION_LOCK) {
+                    if (!catalogFilesAreIdle(appContext, asset)) return;
+                    String current = string(
+                            appContext, asset, "catalog_cleanup_pending", "");
+                    List<NavigatorCatalogCleanup.Entry> entries =
+                            NavigatorCatalogCleanup.entries(current);
+                    if (entries.isEmpty()) {
+                        failed.set(true);
+                        Log.e(TAG, "catalog cleanup queue is unreadable for " + asset.id);
+                        return;
+                    }
+                    String remaining = current;
+                    File downloads = downloadFile(appContext, asset).getParentFile();
+                    File updates = new File(appContext.getFilesDir(), "updates");
+                    for (NavigatorCatalogCleanup.Entry entry : entries) {
+                        try {
+                            NavigatorCatalogCleanup.deleteOwnedCopies(
+                                    downloads, updates, entry);
+                            remaining = NavigatorCatalogCleanup.remove(remaining, entry);
+                        } catch (IOException | RuntimeException error) {
+                            failed.set(true);
+                            Log.e(TAG, "catalog cleanup failed file=" + entry.fileName, error);
+                            try {
+                                AppEventLogger.event(appContext,
+                                        "navigator_asset catalog_cleanup_failed file="
+                                                + entry.fileName + " error="
+                                                + error.getClass().getSimpleName() + ":"
+                                                + error.getMessage());
+                            } catch (RuntimeException reportError) {
+                                Log.e(TAG, "catalog cleanup failure report failed file="
+                                        + entry.fileName, reportError);
+                            }
+                        }
+                    }
+                    if (!remaining.equals(current)
+                            && !prefs(appContext).edit()
+                            .putString(key(asset, "catalog_cleanup_pending"), remaining)
+                            .commit()) {
+                        failed.set(true);
+                        Log.e(TAG, "catalog cleanup queue could not be updated for "
+                                + asset.id);
+                    }
+                }
+            } catch (RuntimeException error) {
+                failed.set(true);
+                Log.e(TAG, "catalog cleanup worker failed for " + asset.id, error);
+            } finally {
+                synchronized (CATALOG_CLEANUP_LOCK) {
+                    ACTIVE_CATALOG_CLEANUPS.remove(asset.id);
+                    if (failed.get()) {
+                        CATALOG_CLEANUP_RETRY_AFTER.put(asset.id,
+                                SystemClock.elapsedRealtime() + CATALOG_CLEANUP_RETRY_DELAY_MS);
+                    } else {
+                        CATALOG_CLEANUP_RETRY_AFTER.remove(asset.id);
+                    }
+                }
+            }
+        }, "navigator-asset-catalog-cleanup-" + asset.id);
+        try {
+            worker.setPriority(Thread.MIN_PRIORITY);
+            worker.start();
+        } catch (RuntimeException error) {
+            synchronized (CATALOG_CLEANUP_LOCK) {
+                ACTIVE_CATALOG_CLEANUPS.remove(asset.id);
+                CATALOG_CLEANUP_RETRY_AFTER.put(asset.id,
+                        SystemClock.elapsedRealtime() + CATALOG_CLEANUP_RETRY_DELAY_MS);
+            }
+            Log.e(TAG, "catalog cleanup worker could not start for " + asset.id, error);
         }
     }
 
     private static boolean catalogFilesAreIdle(Context context, Asset asset) {
         String phase = string(context, asset, "phase", PHASE_NONE);
+        String state = string(context, asset, "state", NOT_DOWNLOADED);
         if (!PHASE_NONE.equals(phase)
-                || DOWNLOADING.equals(string(context, asset, "state", NOT_DOWNLOADED))
-                || VERIFYING.equals(string(context, asset, "state", NOT_DOWNLOADED))
+                || DOWNLOADING.equals(state)
+                || VERIFYING.equals(state)
+                || INSTALL_REQUESTED.equals(state)
+                || UNINSTALL_REQUESTED.equals(state)
+                || RECOVERY_REQUIRED.equals(state)
                 || prefs(context).getLong(key(asset, "download_id"), NO_DOWNLOAD) != NO_DOWNLOAD) {
             return false;
         }
@@ -1372,20 +1481,6 @@ final class NavigatorAssetManager {
         }
         synchronized (ACTIVE_INSTALL_VERIFICATIONS) {
             return !ACTIVE_INSTALL_VERIFICATIONS.contains(asset.id);
-        }
-    }
-
-    private static void deleteObsoleteCatalogFile(Context context, File candidate, String previousSha) {
-        if (candidate == null || !candidate.isFile()) return;
-        try {
-            File parent = candidate.getParentFile().getCanonicalFile();
-            File file = candidate.getCanonicalFile();
-            if (!parent.equals(file.getParentFile())
-                    || !previousSha.equalsIgnoreCase(sha256(file))) return;
-            if (!file.delete()) AppEventLogger.event(context,
-                    "navigator_asset stale_file_delete_failed name=" + candidate.getName());
-        } catch (Exception error) {
-            // Keep files that cannot be proven to be the previous catalog APK.
         }
     }
 
@@ -1540,11 +1635,6 @@ final class NavigatorAssetManager {
         } catch (IOException | RuntimeException ignored) {
         }
         return NO_DOWNLOAD;
-    }
-
-    static boolean matchesReservedDestinationForTest(
-            File expected, String localUri, String hint) throws IOException {
-        return matchesReservedDestination(expected, localUri, hint);
     }
 
     private static boolean matchesReservedDestination(

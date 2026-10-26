@@ -4,6 +4,13 @@
 
 BYD HUD does not automatically send crash reports, analytics, navigation data, screenshots, logs, or usage telemetry.
 
+While HUD output is active, BYD HUD can listen for Android location updates to
+align vehicle position, heading and route geometry. This continues when the
+app's interface is in the background and stops when HUD output stops. Full route
+artifacts and detailed position records from this feature are saved only with
+detailed logging enabled. Other navigation logs may also contain coordinates;
+none of these records are uploaded automatically.
+
 Live navigator-map diagnostics save only unique cropped HUD images when detailed
 logging is enabled. Otherwise, no map image files are created. Full map frames
 are used in memory for cropping/calibration and are not saved by the current
@@ -53,6 +60,9 @@ Choosing `Another app` sends the ZIP only to the Android application selected by
 `Export configuration` is a separate user-requested export. It includes available device, package, permission, process, display, audio, network, HUD/dashboard and SOME/IP diagnostics, a BYD feature-ID catalog, and supported read-only vehicle values. It never changes vehicle modes, repairs permissions, or requests ADB authorization solely for this export. Existing authorization enables more readings and file access.
 
 The archive also includes diagnostically relevant stock APKs and their splits, native libraries and dependencies, framework implementations, dashboard executables and selected configuration, including complete CarSettingsPlugins. Unrelated apps, private app data, accounts, navigation routes and recordings are not read. In text diagnostics and configuration, network identifiers are replaced with stable per-archive aliases and sensitive values are redacted. Binary firmware files are copied unchanged for analysis and may contain vendor-embedded data; no binary-level anonymization is promised. Share the archive only with a trusted recipient.
+
+Stock navigation frameworks such as HMS/Petal are collected as read-only system
+binaries for compatibility analysis, not as private user route history.
 
 After reviewing the warning, the user creates the archive and opens Android's share chooser with `Share`. Configuration exports never use Sentry. A large ZIP is split into volumes of up to 1 GB and shared as multiple attachments; a single file uses the ordinary single-attachment action. Nothing is sent automatically and opening a chooser is not treated as delivery confirmation.
 

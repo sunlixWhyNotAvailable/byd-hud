@@ -11,8 +11,6 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
-import android.graphics.Color;
-import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -20,18 +18,7 @@ import android.os.Looper;
 import android.os.Process;
 import android.os.SystemClock;
 import android.provider.Settings;
-import android.text.InputType;
 import android.util.Log;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.CompoundButton;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.Switch;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
@@ -42,7 +29,6 @@ import androidx.core.content.FileProvider;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -54,7 +40,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -66,8 +51,6 @@ import java.util.function.UnaryOperator;
 //anchors MainActivity UI orchestration so controls and diagnostics are wired from one place.
 public final class MainActivity extends ComponentActivity {
     private static final String TAG = "BydHudTest";
-    private static final long SEND_INTERVAL_MS = 1000L;
-    private static final int STATUS_LOG_MAX_LINES = 35;
     private static final long NAV_RUNTIME_RECHECK_DELAY_MS = 1500L;
     private static final long NAV_PERMISSION_SELF_CHECK_DELAY_MS = 600L;
     private static final long STORAGE_SCAN_CACHE_TTL_MS = 30000L;
@@ -80,13 +63,6 @@ public final class MainActivity extends ComponentActivity {
     private static final String GMAPS_OFFICIAL_PACKAGE = "com.google.android.apps.maps";
     private static final String GMAPS_REVANCED_PACKAGE = "app.revanced.android.apps.maps";
     private static final String WAZE_PACKAGE = "com.waze";
-    private static final String PNG_HIDE_CANDIDATE_LINE = "PNG hide: OEM S72 blank";
-    private static final String CLOSE_ACTION_LINE = "CloseAction: Back/Home keeps sender";
-    private static final String BACKGROUND_MODE_LINE = "BackgroundMode: Boot controls runtime service";
-    private static final String KILL_ON_STOP_DISABLED_LINE = "KillOnStop: disabled";
-    private static final String BG_SETTINGS_LINE =
-            "BG settings: Settings-DiLink-Apps-Disable background apps";
-    private static final String THEME_WARNING_TAG = "theme_warning";
     private static final AtomicBoolean STORAGE_DELETE_OPERATION = new AtomicBoolean(false);
     private static final AtomicBoolean SHARE_OPERATION = new AtomicBoolean(false);
     private static final AtomicReference<PendingShare> PENDING_SHARE = new AtomicReference<>();
@@ -131,92 +107,19 @@ public final class MainActivity extends ComponentActivity {
     private static volatile NavRuntimePermissionStatus cachedNavRuntimePermissionStatus;
     private static volatile boolean cachedAdbAuthorizationKnown;
     private static volatile boolean cachedAdbAuthorizationStatusAvailable;
+    private static volatile boolean cachedAdbKeySnapshotAvailable;
+    private static volatile boolean cachedAdbKeyAvailable;
+    private static volatile boolean cachedAdbKeyVerifiedThisProcess;
+    private static volatile String cachedAdbKeyFingerprint = "";
     private static volatile long lastRuntimeUiRefreshAtMs;
     private static volatile long lastRuntimeStatusRefreshAtMs;
     private static volatile long lastPatchUiRefreshAtMs;
     private static volatile long lastAssetUiRefreshAtMs;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final MainActivityDisplayGuard mainDisplayGuard = new MainActivityDisplayGuard();
-    private final HudState state = new HudState();
-    private final ArrayDeque<String> statusLines = new ArrayDeque<>();
     private volatile Runnable composeSnapshotInvalidationListener;
     private HudOutputCoordinator hudOutput;
-
-    private TextView statusView;
-    private TextView currentStateView;
-    private TextView logcatRecorderStatusView;
-    private TextView logPathsView;
-    private LinearLayout rootView;
-    private ScrollView mainTabView;
-    private ScrollView appsTabView;
-    private ScrollView logTabView;
-    private ScrollView manualTabView;
-    private LinearLayout appsCuratedListRoot;
-    private LinearLayout appsRawListRoot;
-    private TextView capturePackagesView;
-    private TextView adbBridgeStatusView;
-    private EditText distanceEdit;
-    private EditText laneCountEdit;
-    private EditText roadNameEdit;
-    private EditText laneEdit;
-    private EditText guidePointEdit;
-    private EditText rawPngIdEdit;
-    private EditText rawNativeIdEdit;
-    private Button connectButton;
-    private Button startButton;
-    private Button stopButton;
-    private Button disconnectButton;
-    private Switch bootSwitch;
-    private Switch smallDistanceClampSwitch;
-    private Switch pngOutputSwitch;
-    private Switch nativeOutputSwitch;
-    private Switch laneOutputSwitch;
-    private Switch distanceOutputSwitch;
-    private Switch streetOutputSwitch;
-    private Switch manualModeSwitch;
-    private int selectedTabIndex = 0;
-    private CompoundButton.OnCheckedChangeListener bootSwitchListener;
-    private CompoundButton.OnCheckedChangeListener smallDistanceClampSwitchListener;
-    private CompoundButton.OnCheckedChangeListener pngOutputSwitchListener;
-    private CompoundButton.OnCheckedChangeListener nativeOutputSwitchListener;
-    private CompoundButton.OnCheckedChangeListener laneOutputSwitchListener;
-    private CompoundButton.OnCheckedChangeListener distanceOutputSwitchListener;
-    private CompoundButton.OnCheckedChangeListener streetOutputSwitchListener;
-    private CompoundButton.OnCheckedChangeListener manualModeSwitchListener;
-    private Button mainTabButton;
-    private Button appsTabButton;
-    private Button logTabButton;
-    private Button manualTabButton;
-    private Button languageUaButton;
-    private Button languageEngButton;
-    private Button themeDarkButton;
-    private Button themeLightButton;
-    private Button appsRefreshButton;
-    private Button adbBridgeGrantButton;
-    private Button bgSettingsButton;
-    private Button logcatStartButton;
-    private Button logcatStopButton;
-    private Button arrowsCuratedButton;
-    private Button arrowsRawButton;
-    private Button curatedPrevButton;
-    private Button curatedNextButton;
-    private Button rawPngPrevButton;
-    private Button rawPngNextButton;
-    private Button rawNativePrevButton;
-    private Button rawNativeNextButton;
-    private Button rawApplyButton;
-    private Button pngShowButton;
-    private Button pngHideButton;
-    private Button nativeShowButton;
-    private Button nativeHideButton;
-    private Button laneShowButton;
-    private Button laneHideButton;
-    private Button laneApplyButton;
-    private Button laneRandomizeButton;
-    private Button distanceApplyButton;
-    private boolean sending;
     private boolean destroyed;
-    private boolean manualModeEnabled;
     private boolean adbGrantInProgress;
     private long adbGrantGeneration;
     private boolean pendingManualAdbRetry;
@@ -267,25 +170,8 @@ public final class MainActivity extends ComponentActivity {
             });
     private final Map<String, ActivityResultLauncher<Intent>> archiveDocumentLaunchers = new HashMap<>();
     private boolean exitRequested;
-    private boolean arrowCuratedMode = true;
-    private boolean pngVisible = true;
-    private boolean nativeVisible = true;
-    private int lastVisiblePngSourceId = 9;
-    private int lastVisibleNativeId = 11;
-    private int sendCount;
-    private int curatedIndex = HudArrowComboCatalog.defaultIndex();
-    private String cachedPayloadKey = "";
-    private byte[] cachedPayload = new byte[0];
-    private int cachedLaneBytes;
-    private int cachedTurnBytes;
-    private String cachedTurnFieldStatus = "";
-    private String cachedTurnFieldMagic = "";
-    private String cachedTurnFieldDescriptor = "";
-    private String cachedTurnResource = "";
-    private int cachedDisplayDistance;
     private Runnable pendingNavPermissionSelfCheckRunnable;
     private Runnable pendingAutoAdbStartRunnable;
-    private final Random random = new Random();
 
     @Override
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
@@ -337,11 +223,7 @@ public final class MainActivity extends ComponentActivity {
         requestActivityLocalStatusRefresh("activity-create");
         requestInitialUiStateRefresh(this, "activity-create");
         BydHudRuntimeCompose.install(this);
-        appendStatus(buildSafetyBanner());
         appendStatus("idle: Boot controls automatic startup; Apps tab controls Start HUD / Start only log");
-        refreshStateView();
-        refreshControls();
-        refreshLogcatControls();
         showBackgroundReminderIfNeeded();
         requestAutomaticAdbAuthorization("activity-create");
     }
@@ -354,7 +236,6 @@ public final class MainActivity extends ComponentActivity {
         BootCleanupGate.runWhenReady(this,
                 () -> HudRuntimeSupervisor.ensureStarted(this, "activity-start"));
         maybeStartPendingAdbAuthorization();
-        refreshControls();
     }
 
     @Override
@@ -372,7 +253,6 @@ public final class MainActivity extends ComponentActivity {
         HudRuntimeService.refreshVehiclePosition(this);
         DashboardWidgetController.refresh(this);
         maybeStartPendingAdbAuthorization();
-        refreshControls();
         invalidateComposeSnapshot();
         requestActivityLocalStatusRefresh("activity-resume");
         requestRuntimeUiStateRefresh(this, true, "activity-resume");
@@ -438,7 +318,7 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("onStop after explicit exit");
             return;
         }
-        appendStatus("onStop background keepalive sending=" + sending);
+        appendStatus("onStop background keepalive");
     }
 
     @Override
@@ -475,102 +355,11 @@ public final class MainActivity extends ComponentActivity {
         moveTaskToBack(true);
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private LinearLayout tabContentRoot() {
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(8, 8, 8, 8);
-        return content;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private LinearLayout.LayoutParams tabLayoutParams() {
-        return new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f);
-    }
-
-    //renders this UI section here so screen structure stays traceable during preview and car testing.
-    private void selectTab(int tabIndex) {
-        selectedTabIndex = tabIndex;
-        boolean showMain = tabIndex == 0;
-        boolean showApps = tabIndex == 1;
-        boolean showLog = tabIndex == 2;
-        boolean showManual = tabIndex == 3;
-        if (mainTabView != null) {
-            mainTabView.setVisibility(showMain ? View.VISIBLE : View.GONE);
-        }
-        if (appsTabView != null) {
-            appsTabView.setVisibility(showApps ? View.VISIBLE : View.GONE);
-        }
-        if (logTabView != null) {
-            logTabView.setVisibility(showLog ? View.VISIBLE : View.GONE);
-        }
-        if (manualTabView != null) {
-            manualTabView.setVisibility(showManual ? View.VISIBLE : View.GONE);
-        }
-        refreshTabButtons();
-        if (showApps) {
-            refreshActiveAppsList();
-        }
-    }
-
-    //starts or schedules work here so lifecycle recovery follows one controlled path.
-    private void startLogcatRecording() {
-        setLogcatRecorderStatus(LogcatRecorder.STATUS_RECORDING);
-        if (logcatStartButton != null) logcatStartButton.setEnabled(false);
-        Thread worker = new Thread(() -> reportLogcatResult(
-                "start", LogcatRecorder.start(this)), "BydHudRecorderStart");
-        worker.setDaemon(true);
-        worker.start();
-    }
-
-    //stops or releases work here so stale capture and HUD output cannot keep running silently.
-    private void stopLogcatRecording() {
-        setLogcatRecorderStatus(LogcatRecorder.STATUS_SAVING);
-        if (logcatStartButton != null) {
-            logcatStartButton.setEnabled(false);
-        }
-        if (logcatStopButton != null) {
-            logcatStopButton.setEnabled(false);
-        }
-        Thread worker = new Thread(() -> reportLogcatResult(
-                "stop", LogcatRecorder.stop(this)), "BydHudRecorderStop");
-        worker.setDaemon(true);
-        worker.start();
-    }
-
     private void reportLogcatResult(String action, LogcatRecorder.Result result) {
         handler.post(() -> {
             appendStatus("system recorder " + action + " " + result.detail
                     + " file=" + filePath(result.file));
-            refreshLogcatControls();
         });
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setLogcatRecorderStatus(String status) {
-        if (logcatRecorderStatusView != null) {
-            logcatRecorderStatusView.setText(status);
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshLogcatControls() {
-        boolean recording = LogcatRecorder.isRecording();
-        if (logcatStartButton != null) {
-            logcatStartButton.setEnabled(!recording);
-        }
-        if (logcatStopButton != null) {
-            logcatStopButton.setEnabled(recording);
-        }
-        if (logcatRecorderStatusView != null) {
-            logcatRecorderStatusView.setText(LogcatRecorder.statusText());
-        }
-        if (logPathsView != null) {
-            logPathsView.setText(logPathsText());
-        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -702,6 +491,7 @@ public final class MainActivity extends ComponentActivity {
             }
         }
         StorageCacheState storage = storageCacheState;
+        AdbUiStatus adbStatus = cachedAdbUiStatus();
         ShareLaunchEvent shareLaunchEvent = SHARE_LAUNCH_EVENT.get();
         Map<HudMapProfile.Source, HudMapProfile> mapProfiles;
         long mapProfilesRevision;
@@ -769,10 +559,11 @@ public final class MainActivity extends ComponentActivity {
                 NavAccessibilityService.capturedKeyCode(),
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 permissionStatus.settingsGranted(),
-                adbAuthorized(),
+                adbStatus.available,
+                adbStatus.authorized,
                 permissionStatus.readyForCapture(),
                 permissionStatus.summary(),
-                LocalAdbBridge.adbKeyFingerprint(this),
+                adbStatus.fingerprint,
                 hudStatus(),
                 hudPackage,
                 formatCapturePackages(logOnlyPackages),
@@ -868,8 +659,8 @@ public final class MainActivity extends ComponentActivity {
                 reloadMapProfileCacheLocked(appContext);
             }
         } catch (RuntimeException error) {
-            AppEventLogger.event(appContext, "map_profile save failed source=" + profile.source
-                    + " reason=" + error.getClass().getSimpleName());
+            AppEventLogger.event(appContext, FailureDiagnostics.format(
+                    error, "map_profile", "save"));
             return false;
         }
         NavigatorMapCapture.refreshProfiles();
@@ -896,8 +687,8 @@ public final class MainActivity extends ComponentActivity {
                 reloadMapProfileCacheLocked(appContext);
             }
         } catch (RuntimeException error) {
-            AppEventLogger.event(appContext, "map_profile delete failed source=" + source
-                    + " reason=" + error.getClass().getSimpleName());
+            AppEventLogger.event(appContext, FailureDiagnostics.format(
+                    error, "map_profile", "delete"));
             return false;
         }
         NavigatorMapCapture.refreshProfiles();
@@ -938,7 +729,6 @@ public final class MainActivity extends ComponentActivity {
     public void composeStartNavigatorAssetDownload(String assetId) throws Exception {
         NavigatorAssetManager.startDownload(this, assetId);
         requestPatchUiStateRefresh(this, true, "asset-download-start");
-        refreshControls();
     }
 
     public boolean composeNavigatorAssetRequiresDestructiveConfirm(String assetId)
@@ -950,13 +740,11 @@ public final class MainActivity extends ComponentActivity {
             throws Exception {
         NavigatorAssetManager.install(this, assetId, destructiveApproved);
         requestPatchUiStateRefresh(this, true, "asset-install");
-        refreshControls();
     }
 
     public void composeRestoreNavigatorAsset(String assetId) throws Exception {
         NavigatorAssetManager.restore(this, assetId);
         requestPatchUiStateRefresh(this, true, "asset-restore");
-        refreshControls();
     }
 
     public String composePatchSourceDisplayName(Uri uri) {
@@ -1190,7 +978,7 @@ public final class MainActivity extends ComponentActivity {
 
     private List<ComposePatchOperation> composePatchOperations() {
         List<ComposePatchOperation> result = new ArrayList<>();
-        for (NavigatorPatchStore.OperationSnapshot value : NavigatorPatchStore.operations(this)) {
+        for (NavigatorPatchStore.OperationSnapshot value : NavigatorPatchStore.uiOperations()) {
             if (value == null || value.profile == null || value.kind.isEmpty()) continue;
             result.add(new ComposePatchOperation(
                     value.profile.id, value.kind, value.phase, value.detail,
@@ -1198,7 +986,7 @@ public final class MainActivity extends ComponentActivity {
                     value.readyAt, value.destructive, value.busy(),
                     NavigatorPatchStore.RECOVERY_REQUIRED.equals(value.phase),
                     NavigatorPatchStore.canCancel(value), value.terminal(), value.acknowledged,
-                    NavigatorPatchStore.awaitingDestructiveApproval(this, value.profile)));
+                    value.awaitingDestructiveApproval));
         }
         result.sort((left, right) -> Long.compare(left.startedAt, right.startedAt));
         return Collections.unmodifiableList(result);
@@ -1233,11 +1021,39 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
-    //returns persisted key evidence without opening a socket or running a shell command.
-    private boolean adbAuthorized() {
-        return cachedAdbAuthorizationStatusAvailable
-                ? cachedAdbAuthorizationKnown
-                : LocalAdbBridge.isCurrentKeyKnownAuthorized(this);
+    private static AdbUiStatus cachedAdbUiStatus() {
+        synchronized (NAV_RUNTIME_PERMISSION_CACHE_LOCK) {
+            boolean available = cachedAdbKeySnapshotAvailable
+                    && cachedAdbKeyAvailable
+                    && cachedAdbAuthorizationStatusAvailable;
+            return new AdbUiStatus(available,
+                    available && cachedAdbAuthorizationKnown,
+                    cachedAdbKeySnapshotAvailable ? cachedAdbKeyFingerprint : "",
+                    available && cachedAdbKeyVerifiedThisProcess);
+        }
+    }
+
+    private static boolean cachedAdbKeyVerifiedForCapture() {
+        return cachedAdbUiStatus().verifiedThisProcess;
+    }
+
+    private static String cachedAdbKeyFingerprintForUi() {
+        return cachedAdbUiStatus().fingerprint;
+    }
+
+    private static final class AdbUiStatus {
+        final boolean available;
+        final boolean authorized;
+        final String fingerprint;
+        final boolean verifiedThisProcess;
+
+        private AdbUiStatus(boolean available, boolean authorized,
+                String fingerprint, boolean verifiedThisProcess) {
+            this.available = available;
+            this.authorized = authorized;
+            this.fingerprint = fingerprint == null ? "" : fingerprint;
+            this.verifiedThisProcess = verifiedThisProcess;
+        }
     }
 
     //keeps alias checks centralized so HUD/log row state cannot drift between Maps variants.
@@ -1310,14 +1126,12 @@ public final class MainActivity extends ComponentActivity {
     public void composeDismissBackgroundReminder() {
         HudPrefs.markBackgroundReminderSeen(this);
         maybeStartPendingAdbAuthorization();
-        refreshControls();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeOpenBackgroundSettingsFromReminder() {
         HudPrefs.markBackgroundReminderSeen(this);
         BgSettingsLauncher.open(this);
-        refreshControls();
     }
 
     public void composeReportMainUiState(String blockingFlow) {
@@ -1421,7 +1235,6 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setDetailedDebugArtifactsEnabled(this, enabled);
         TbtTxLog.onDetailedModeChanged(this, enabled);
         appendStatus("Detailed debug artifacts " + (enabled ? "enabled" : "disabled"));
-        refreshControls();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1469,7 +1282,6 @@ public final class MainActivity extends ComponentActivity {
     public void composeSetWazeAlertField(int field) {
         HudPrefs.setWazeAlertField(this, field);
         AppEventLogger.event(this, "ui waze_alert_field=" + HudPrefs.wazeAlertField(this));
-        refreshControls();
     }
 
     public void composeSetTbtWithoutHudOutputEnabled(boolean enabled) {
@@ -1477,13 +1289,11 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setTbtWithoutHudOutputEnabled(this, enabled);
         NavHudLiveSender.get(this).refreshTbtObservers();
         appendStatus("TBT without HUD output " + (enabled ? "enabled" : "disabled"));
-        refreshControls();
     }
 
     public void composeSetSwitchToTbtOnHudStartEnabled(boolean enabled) {
         HudPrefs.setSwitchToTbtOnHudStartEnabled(this, enabled);
         appendStatus("Switch to TBT on HUD start " + (enabled ? "enabled" : "disabled"));
-        refreshControls();
     }
 
 
@@ -1498,45 +1308,38 @@ public final class MainActivity extends ComponentActivity {
     public void composeSetEtaOutputField(int field) {
         HudPrefs.setEtaOutputField(this, field);
         AppEventLogger.event(this, "ui eta_output_field=" + HudPrefs.etaOutputField(this));
-        refreshControls();
     }
 
     public void composeSetEtaStreetFormat(int format) {
         HudPrefs.setEtaStreetFormat(this, format);
         AppEventLogger.event(this, "ui eta_street_format=" + HudPrefs.getEtaStreetFormat(this));
-        refreshControls();
     }
 
     public void composeSetEtaWaitForFullTextEnabled(boolean enabled) {
         HudPrefs.setEtaWaitForFullTextEnabled(this, enabled);
         AppEventLogger.event(this, "ui eta_wait_for_full_text=" + enabled);
-        refreshControls();
     }
 
     public void composeSetEtaArrivalColor(int color) {
         HudPrefs.setEtaArrivalColor(this, color);
         AppEventLogger.event(this, "ui eta_arrival_color=" + HudPrefs.getEtaArrivalColor(this));
-        refreshControls();
     }
 
     public void composeSetEtaDurationColor(int color) {
         HudPrefs.setEtaDurationColor(this, color);
         AppEventLogger.event(this, "ui eta_duration_color=" + HudPrefs.getEtaDurationColor(this));
-        refreshControls();
     }
 
     public void composeSetEtaRemainingDistanceColor(int color) {
         HudPrefs.setEtaRemainingDistanceColor(this, color);
         AppEventLogger.event(this, "ui eta_remaining_distance_color="
                 + HudPrefs.getEtaRemainingDistanceColor(this));
-        refreshControls();
     }
 
     public void composeSetWazeWarningDistanceColor(int color) {
         HudPrefs.setWazeWarningDistanceColor(this, color);
         AppEventLogger.event(this, "ui waze_warning_distance_color="
                 + HudPrefs.getWazeWarningDistanceColor(this));
-        refreshControls();
     }
 
     public void composeSetEtaOutputEnabled(boolean enabled) {
@@ -1613,14 +1416,12 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setWazeCustomSurfaceEnabled(this, enabled);
         appendStatus("Waze custom surface " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui waze_custom_surface=" + enabled);
-        refreshControls();
     }
 
     public void composeSetDashboardScreenMode(int mode) {
         int persistedMode = HudPrefs.normalizeDashboardScreenMode(mode);
         HudPrefs.setDashboardScreenMode(this, persistedMode);
         appendStatus("Dashboard screen mode " + persistedMode);
-        refreshControls();
     }
 
     public void composeSetDashboardKeepBlackBackgroundEnabled(boolean enabled) {
@@ -1804,7 +1605,6 @@ public final class MainActivity extends ComponentActivity {
         if (!storageCacheState.hasCache()) {
             storageCacheState = storageCacheState.withCalculating(true);
         }
-        refreshControls();
         NavigationLogStorage.forceNavCaptureRetention(
                 this,
                 "storage-limit-changed",
@@ -2027,6 +1827,7 @@ public final class MainActivity extends ComponentActivity {
         long now = SystemClock.elapsedRealtime();
         boolean cacheFresh = cachedNavRuntimePermissionStatus != null
                 && cachedAdbAuthorizationStatusAvailable
+                && cachedAdbKeySnapshotAvailable
                 && lastRuntimeStatusRefreshAtMs > 0L
                 && now - lastRuntimeStatusRefreshAtMs < RUNTIME_STATUS_REFRESH_INTERVAL_MS;
         if (!force && cacheFresh) {
@@ -2042,16 +1843,18 @@ public final class MainActivity extends ComponentActivity {
             try {
                 NavRuntimePermissionStatus refreshed =
                         NavRuntimePermissionStatus.check(appContext);
-                boolean adbAuthorized = LocalAdbBridge.isCurrentKeyKnownAuthorized(appContext);
-                updateRuntimeStatusCache(refreshed, adbAuthorized);
+                LocalAdbBridge.AuthorizationSnapshot adbSnapshot =
+                        LocalAdbBridge.authorizationSnapshot(appContext);
+                updateRuntimeStatusCache(refreshed, adbSnapshot);
                 DashboardWidgetController.onRuntimePermissionsRefreshed(appContext);
                 lastRuntimeStatusRefreshAtMs = SystemClock.elapsedRealtime();
                 AppEventLogger.event(appContext, "ui_runtime_status_refresh reason=" + reason
-                        + " adbAuthorized=" + adbAuthorized
+                        + " adbAuthorized=" + adbSnapshot.authorized
+                        + " adbKeyAvailable=" + adbSnapshot.keyAvailable
                         + " settingsGranted=" + refreshed.settingsGranted());
             } catch (RuntimeException error) {
-                AppEventLogger.event(appContext, "ui_runtime_status_refresh failed "
-                        + error.getClass().getSimpleName());
+                AppEventLogger.event(appContext, FailureDiagnostics.format(
+                        error, "runtime_status", "refresh"));
                 DashboardWidgetController.onRuntimePermissionsRefreshFailed(appContext);
             } finally {
                 RUNTIME_STATUS_REFRESH_IN_PROGRESS.set(false);
@@ -2075,18 +1878,28 @@ public final class MainActivity extends ComponentActivity {
 
     //Publishes the same cache transition that the visible Compose snapshot must observe.
     static void updateRuntimeStatusCache(
-            NavRuntimePermissionStatus refreshed, boolean adbAuthorized) {
+            NavRuntimePermissionStatus refreshed,
+            LocalAdbBridge.AuthorizationSnapshot adbSnapshot) {
         boolean changed;
         synchronized (NAV_RUNTIME_PERMISSION_CACHE_LOCK) {
             changed = !sameRuntimePermissionStatus(cachedNavRuntimePermissionStatus, refreshed)
                     || !cachedAdbAuthorizationStatusAvailable
-                    || cachedAdbAuthorizationKnown != adbAuthorized;
+                    || cachedAdbAuthorizationKnown != adbSnapshot.authorized
+                    || !cachedAdbKeySnapshotAvailable
+                    || cachedAdbKeyAvailable != adbSnapshot.keyAvailable
+                    || cachedAdbKeyVerifiedThisProcess != adbSnapshot.verifiedThisProcess
+                    || !Objects.equals(cachedAdbKeyFingerprint, adbSnapshot.fingerprint);
             cachedNavRuntimePermissionStatus = refreshed;
-            cachedAdbAuthorizationKnown = adbAuthorized;
-            cachedAdbAuthorizationStatusAvailable = true;
+            cachedAdbAuthorizationKnown = adbSnapshot.authorized;
+            cachedAdbAuthorizationStatusAvailable = adbSnapshot.keyAvailable;
+            cachedAdbKeySnapshotAvailable = true;
+            cachedAdbKeyAvailable = adbSnapshot.keyAvailable;
+            cachedAdbKeyVerifiedThisProcess = adbSnapshot.verifiedThisProcess;
+            cachedAdbKeyFingerprint = adbSnapshot.fingerprint;
         }
         if (changed) {
-            ShellRuntimeSession.cacheStatus(refreshed, adbAuthorized);
+            ShellRuntimeSession.cacheStatus(refreshed,
+                    adbSnapshot.keyAvailable && adbSnapshot.authorized);
             publishSharedUiStateChange();
         }
     }
@@ -2254,6 +2067,7 @@ public final class MainActivity extends ComponentActivity {
                         + " error=" + e.getClass().getSimpleName());
             } finally {
                 try {
+                    NavigatorPatchStore.refreshUiOperationCache(appContext);
                     synchronized (PATCH_REFRESH_GATE_LOCK) {
                         PATCH_REFRESH_IN_PROGRESS.set(false);
                     }
@@ -2973,6 +2787,7 @@ public final class MainActivity extends ComponentActivity {
         public final int steeringCapturedKeyCode;
         public final boolean smallDistanceClampEnabled;
         public final boolean settingsPermissionsGranted;
+        public final boolean adbAuthorizationStatusAvailable;
         public final boolean adbAuthorized;
         public final boolean captureReady;
         public final String permissionSummary;
@@ -3054,6 +2869,7 @@ public final class MainActivity extends ComponentActivity {
                 int steeringCapturedKeyCode,
                 boolean smallDistanceClampEnabled,
                 boolean settingsPermissionsGranted,
+                boolean adbAuthorizationStatusAvailable,
                 boolean adbAuthorized,
                 boolean captureReady, String permissionSummary, String adbKeyFingerprint,
                 String hudStatus, String hudPackage, String logOnlyPackages,
@@ -3142,6 +2958,7 @@ public final class MainActivity extends ComponentActivity {
             this.steeringCapturedKeyCode = steeringCapturedKeyCode;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
+            this.adbAuthorizationStatusAvailable = adbAuthorizationStatusAvailable;
             this.adbAuthorized = adbAuthorized;
             this.captureReady = captureReady;
             this.permissionSummary = permissionSummary == null ? "" : permissionSummary;
@@ -3265,6 +3082,7 @@ public final class MainActivity extends ComponentActivity {
                     && steeringCapturedKeyCode == other.steeringCapturedKeyCode
                     && smallDistanceClampEnabled == other.smallDistanceClampEnabled
                     && settingsPermissionsGranted == other.settingsPermissionsGranted
+                    && adbAuthorizationStatusAvailable == other.adbAuthorizationStatusAvailable
                     && adbAuthorized == other.adbAuthorized
                     && captureReady == other.captureReady
                     && dashboardMoveInProgress == other.dashboardMoveInProgress
@@ -3335,7 +3153,8 @@ public final class MainActivity extends ComponentActivity {
                     steeringTransferApps, steeringTransferProfiles,
                     steeringTransferRevision, steeringButtonLearning, steeringCapturedKeyCode,
                     smallDistanceClampEnabled,
-                    settingsPermissionsGranted, adbAuthorized, captureReady,
+                    settingsPermissionsGranted, adbAuthorizationStatusAvailable,
+                    adbAuthorized, captureReady,
                     permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,
                     logOnlyPackages, observedPackages, activeDashboardPackage,
                     dashboardMoveInProgress, logcatRecording, logcatStatus, logPaths,
@@ -3776,64 +3595,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshActiveAppsList() {
-        if (appsCuratedListRoot == null || appsRawListRoot == null) {
-            return;
-        }
-        Set<String> capturePackages = NavCapturePrefs.getCapturePackages(this);
-        String hudPackage = NavCapturePrefs.getHudPackage(this);
-        Set<String> logOnlyPackages = NavCapturePrefs.getLogOnlyPackages(this);
-        Set<String> observedPackages = NavCapturePrefs.getObservedPackages(this);
-        if (capturePackagesView != null) {
-            capturePackagesView.setText("Active HUD: "
-                    + (hudPackage.isEmpty() ? "(none)" : hudPackage)
-                    + "\nLog only: " + formatCapturePackages(logOnlyPackages)
-                    + "\nObserved: " + formatCapturePackages(observedPackages));
-        }
-        appsCuratedListRoot.removeAllViews();
-        appsRawListRoot.removeAllViews();
-        List<ActiveAppRow> rawApps =
-                activeRowsFromScan(NavAppTaskScanner.get(this).currentSnapshot().rows);
-        List<ActiveAppRow> curatedApps = loadCuratedApps(rawApps, capturePackages, observedPackages);
-        if (curatedApps.isEmpty()) {
-            appsCuratedListRoot.addView(label("No supported navigation apps visible", 14, false));
-        } else {
-            for (ActiveAppRow app : curatedApps) {
-                appsCuratedListRoot.addView(activeAppView(app,
-                        app.packageName.equals(hudPackage),
-                        logOnlyPackages.contains(app.packageName),
-                        isSupportedHudPackage(app.packageName)));
-            }
-        }
-        List<ActiveAppRow> allApps = new ArrayList<>();
-        for (ActiveAppRow app : rawApps) {
-            if (!NavAppFilter.isCuratedNavigationPackage(app.packageName)) {
-                allApps.add(app);
-            }
-        }
-        if (allApps.isEmpty()) {
-            appsRawListRoot.addView(label("No current non-system background apps visible", 14, false));
-            refreshDynamicAppsUi();
-            return;
-        }
-        for (ActiveAppRow app : allApps) {
-            appsRawListRoot.addView(activeAppView(app,
-                    app.packageName.equals(hudPackage),
-                    logOnlyPackages.contains(app.packageName),
-                    false));
-        }
-        refreshDynamicAppsUi();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshDynamicAppsUi() {
-        applyUiLanguage();
-        applyUiTheme();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String formatCapturePackages(Set<String> packages) {
         if (packages == null || packages.isEmpty()) {
             return "none";
@@ -3957,45 +3718,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private View activeAppView(ActiveAppRow app, boolean hudEnabled, boolean logOnlyEnabled,
-            boolean supportedHud) {
-        LinearLayout container = new LinearLayout(this);
-        container.setOrientation(LinearLayout.VERTICAL);
-        container.setPadding(0, 8, 0, 8);
-        container.addView(label(app.label
-                + "\n" + displayPackageLine(app.packageName)
-                + "\nimportance=" + app.importance
-                + " process=" + app.processName
-                + "\nmode=" + navCaptureModeLabel(hudEnabled, logOnlyEnabled), 13, false));
-        Button stopHud = button("Stop HUD", v -> stopNavCaptureForPackage(app.packageName));
-        Button displayAction = displayActionForApp(app);
-        if (displayAction != null) {
-            container.addView(row(displayAction));
-        }
-        Switch startHud = null;
-        if (supportedHud) {
-            startHud = switchRow(container, "HUD", hudEnabled,
-                    (buttonView, checked) -> setNavHudForPackage(app.packageName, checked));
-        }
-        Switch startOnlyLog = switchRow(container, "Log", logOnlyEnabled,
-                (buttonView, checked) -> setNavLogOnlyForPackage(app.packageName, checked));
-        if (startHud != null) {
-            startHud.setEnabled(true);
-        }
-        stopHud.setEnabled(hudEnabled || logOnlyEnabled);
-        container.addView(row(stopHud));
-        return container;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private String displayPackageLine(String packageName) {
-        String normalized = normalizePackage(packageName);
-        if (isGoogleMapsAlias(normalized)) {
-            return GMAPS_REVANCED_PACKAGE + " / " + GMAPS_OFFICIAL_PACKAGE;
-        }
-        return packageName;
-    }
-
     static List<ComposePackageVersion> composePackageVersions(
             String packageName,
             Map<String, String> versions) {
@@ -4025,31 +3747,6 @@ public final class MainActivity extends ComponentActivity {
         return result;
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private Button displayActionForApp(ActiveAppRow app) {
-        String packageName = app == null ? "" : app.packageName;
-        String normalized = normalizePackage(packageName);
-        if (normalized.isEmpty()) {
-            return null;
-        }
-        NavAppDisplayController controller = NavAppDisplayController.get(this);
-        NavAppDisplayState state = controller.transferStateForUi(new NavAppDisplayState(
-                normalized, app.taskId, app.displayId, app.visible, "task-scan"));
-        DashboardProjectionPolicy.ObservedDisplay observedDisplay =
-                DashboardProjectionPolicy.classifyObservedDisplay(
-                normalized,
-                state,
-                controller.confirmedDashboardPackage(),
-                controller.confirmedDashboardDisplayId());
-        boolean canReturnToMain = SteeringTransferPolicy.canReturnToMain(observedDisplay);
-        String label = canReturnToMain ? "Send to main" : "Send to dashboard";
-        Button button = button(label,
-                v -> toggleIndependentDashboardDisplay(normalized));
-        button.setEnabled(SteeringTransferPolicy.canToggleTask(state, observedDisplay)
-                && !controller.isMoveInProgress());
-        return button;
-    }
-
     //The row is cached; the controller resolves this toggle from its fresh task lookup.
     private void toggleIndependentDashboardDisplay(String packageName) {
         String normalized = normalizePackage(packageName);
@@ -4064,17 +3761,6 @@ public final class MainActivity extends ComponentActivity {
         }
         controller.requestUiToggle(normalized, "ui-independent-dashboard-explicit");
         appendStatus("display transfer requested for " + normalized);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private String navCaptureModeLabel(boolean hudEnabled, boolean logOnlyEnabled) {
-        if (hudEnabled) {
-            return "hud";
-        }
-        if (logOnlyEnabled) {
-            return "log-only";
-        }
-        return "off";
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -4096,8 +3782,6 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("unsupported app: logging only " + normalized);
             NavCaptureStore.rawEvent(this, "unsupported_start_hud", normalized,
                     "Start HUD requested; logging only");
-            refreshActiveAppsList();
-            refreshControls();
             return;
         }
         String previousHudPackage = NavCapturePrefs.getHudPackage(this);
@@ -4123,7 +3807,6 @@ public final class MainActivity extends ComponentActivity {
                     normalized, "ui-stop", true);
             appendStatus("nav live HUD stop requested");
         }
-        refreshActiveAppsList();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -4171,28 +3854,6 @@ public final class MainActivity extends ComponentActivity {
         } else {
             NavHudLiveSender.get(this).refreshTbtObservers();
         }
-        refreshActiveAppsList();
-    }
-
-    //stops or releases work here so stale capture and HUD output cannot keep running silently.
-    private void stopNavCaptureForPackage(String packageName) {
-        String normalized = normalizePackage(packageName);
-        if (normalized.isEmpty()) {
-            appendStatus("nav stop ignored: empty package");
-            return;
-        }
-        NavHudLiveSender.get(this).stop(normalized, "ui-stop", true);
-        if (NavCapturePrefs.isHudEnabled(this, normalized)) {
-            NavCapturePrefs.setHudEnabled(this, normalized, false);
-            appendStatus("nav live HUD stop requested");
-            AppEventLogger.event(this, "nav_hud stop " + normalized);
-        }
-        if (NavCapturePrefs.isLogOnlyEnabled(this, normalized)) {
-            NavCapturePrefs.setLogOnlyEnabled(this, normalized, false);
-            appendStatus("nav log-only stop " + normalized);
-            AppEventLogger.event(this, "nav_log_only stop " + normalized);
-        }
-        refreshActiveAppsList();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -4239,69 +3900,17 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //opens the external boundary here so connection setup remains observable and retryable.
-    private void connectSomeIp() {
-        if (hudOutput.isBound()) {
-            appendStatus("connect skipped: already connected");
-            refreshControls();
-            return;
-        }
-        appendStatus("connect requested");
-        hudOutput.ensureBound("manual-connect");
-        refreshControls();
-    }
-
-    //starts or schedules work here so lifecycle recovery follows one controlled path.
-    private void startSending() {
-        if (sending) {
-            appendStatus("start skipped: already sending");
-            refreshControls();
-            return;
-        }
-        if (!applyNavigationFields()) {
-            appendStatus("start waiting: numeric fields are incomplete");
-            refreshControls();
-            return;
-        }
-        HudDeliveryStatus.reset();
-        arrowCuratedMode = true;
-        curatedIndex = HudArrowComboCatalog.defaultIndex();
-        applyCuratedCombo(false);
-        sending = true;
-        exitRequested = false;
-        sendCount = 0;
-        cancelPendingHudCallbacks();
-        NavHudLiveSender.get(this).startManual(state, "manual-start");
-        appendStatus("sending=true intervalMs=" + SEND_INTERVAL_MS
-                + " backgroundMode=" + BACKGROUND_MODE
-                + " output=HUD+TBT");
-        refreshControls();
-    }
-
-    //stops or releases work here so stale capture and HUD output cannot keep running silently.
-    private void stopSending(boolean clearHud) {
-        sending = false;
-        HudDeliveryStatus.reset();
-        cancelPendingHudCallbacks();
-        NavHudLiveSender.get(this).stopManual(
-                clearHud ? "manual-stop-clear" : "manual-stop");
-        appendStatus("sending=false reason=stop");
-        refreshControls();
-    }
-
-    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopImmediately(String reason, boolean clearHud, boolean unbindClient) {
         stopImmediately(reason, clearHud, unbindClient, null);
     }
 
     private void stopImmediately(String reason, boolean clearHud, boolean unbindClient,
             Runnable completion) {
-        sending = false;
         if ("send-error".equals(reason)) {
             HudDeliveryStatus.recordFailure();
         } else {
             HudDeliveryStatus.reset();
         }
-        cancelPendingHudCallbacks();
         NavHudLiveSender sender = NavHudLiveSender.get(this);
         String stopReason = reason + (clearHud ? "-clear" : "");
         if (unbindClient) {
@@ -4313,12 +3922,6 @@ public final class MainActivity extends ComponentActivity {
             sender.stopManual(stopReason, false,
                     () -> { if (completion != null) handler.post(completion); });
         }
-        appendStatus("sending=false reason=" + reason);
-        refreshControls();
-    }
-
-    //stops or releases work here so stale capture and HUD output cannot keep running silently.
-    private void cancelPendingHudCallbacks() {
     }
 
     private void stopRecorderAsync(String action, Runnable continuation) {
@@ -4340,20 +3943,6 @@ public final class MainActivity extends ComponentActivity {
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void exitAndFinish() {
-        if (exitRequested) {
-            return;
-        }
-        appendStatus("exit requested");
-        exitRequested = true;
-        RuntimeUiSession.PROCESS.clear();
-        cancelActiveAdbAuthorization("exit", false);
-        stopRecorderAsync("exit", () -> {
-            stopImmediately("exit", true, true, this::finishAfterStop);
-        });
-    }
-
-    //stops runtime-owned work without deleting stored HUD/log selections.
     private void shutdownAndExit(String reason) {
         if (exitRequested) {
             return;
@@ -4389,7 +3978,6 @@ public final class MainActivity extends ComponentActivity {
         sender.stop(hudPackage, safeReason, true, () -> handler.post(() -> {
             sender.refreshTbtObservers();
             stopRecorderAsync("shutdown", () -> {
-                manualModeEnabled = false;
                 stopImmediately(safeReason, true, true, () -> {
                     HudRuntimeWatchdog.cancel(this);
                     HudRuntimeService.stopPersistent(this, safeReason);
@@ -4407,110 +3995,69 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void disconnectHud() {
-        stopActiveNavHud("disconnect");
-        stopImmediately("disconnect", true, true);
-        refreshControls();
-    }
-
-    //stops or releases work here so stale capture and HUD output cannot keep running silently.
-    private void stopActiveNavHud(String reason) {
-        String hudPackage = NavCapturePrefs.getHudPackage(this);
-        if (hudPackage.isEmpty()) {
-            if (NavHudLiveSender.get(this).isRunning()) {
-                NavHudLiveSender.get(this).stop("", reason, true);
-                appendStatus("nav live HUD stop requested");
-            }
-            return;
-        }
-        NavCapturePrefs.setHudEnabled(this, hudPackage, false);
-        NavHudLiveSender.get(this).stop(hudPackage, reason, true);
-        appendStatus("nav HUD stop " + hudPackage);
-        AppEventLogger.event(this, "nav_hud stop " + hudPackage + " reason=" + reason);
-        refreshActiveAppsList();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setBootMode(boolean enabled) {
         HudPrefs.setBootEnabled(this, enabled);
         appendStatus("Boot " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui boot=" + enabled);
         BootCleanupGate.runWhenReady(this,
                 () -> HudRuntimeSupervisor.ensureStarted(this, enabled ? "boot-on" : "boot-off"));
-        refreshControls();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setSmallDistanceClamp(boolean enabled) {
         HudPrefs.setSmallDistanceClampEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("Small distance clamp " + (enabled
                 ? "ON: HUD displays 11m for active 0..10m"
                 : "OFF: HUD sends raw 0..10m"));
         AppEventLogger.event(this, "ui small_distance_clamp=" + enabled);
-        refreshControls();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setPngOutputEnabled(boolean enabled) {
         HudPrefs.setPngOutputEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("PNG output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_png=" + enabled);
-        refreshControls();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setNativeOutputEnabled(boolean enabled) {
         HudPrefs.setNativeOutputEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("Native output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_native=" + enabled);
-        refreshControls();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setLaneOutputEnabled(boolean enabled) {
         HudPrefs.setLaneOutputEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("Lane output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_lanes=" + enabled);
-        refreshControls();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setDistanceOutputEnabled(boolean enabled) {
         HudPrefs.setDistanceOutputEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("Distance output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_distance=" + enabled);
-        refreshControls();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setStreetOutputEnabled(boolean enabled) {
         HudPrefs.setStreetOutputEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("Street output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_street=" + enabled);
-        refreshControls();
     }
 
     private void setTransliterationMode(int mode) {
         HudPrefs.setTransliterationMode(this, mode);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.transliterationMode(this);
         appendStatus("Text transliteration mode " + persisted);
         AppEventLogger.event(this, "ui text_transliteration=" + persisted);
-        refreshControls();
     }
 
     private void setTextDirectionOutputEnabled(boolean enabled) {
         HudPrefs.setTextDirectionOutputEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("Text direction output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_text_direction=" + enabled);
-        refreshControls();
     }
 
     private void setWazeAlertsEnabled(boolean enabled) {
@@ -4518,121 +4065,94 @@ public final class MainActivity extends ComponentActivity {
         NavHudLiveSender.get(this).onWazeAlertsPreferenceChanged(enabled);
         appendStatus("Waze alerts " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui waze_alerts=" + enabled);
-        refreshControls();
     }
 
     private void setRouteMetricsMode(int mode) {
         HudPrefs.setRouteMetricsMode(this, mode);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.routeMetricsMode(this);
         appendStatus("Route metrics mode " + persisted);
         AppEventLogger.event(this, "ui route_metrics_mode=" + persisted);
-        refreshControls();
     }
 
     private void setEtaOutputMode(int mode) {
         HudPrefs.setEtaOutputMode(this, mode);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.etaOutputMode(this);
         appendStatus("ETA output mode " + persisted);
         AppEventLogger.event(this, "ui eta_output_mode=" + persisted);
-        refreshControls();
     }
 
     private void setEtaOutputEnabled(boolean enabled) {
         HudPrefs.setEtaOutputEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("ETA output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_eta=" + enabled);
-        refreshControls();
     }
 
     private void setRemainingTimeOutputEnabled(boolean enabled) {
         HudPrefs.setRemainingTimeOutputEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("Remaining time output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_remaining_time=" + enabled);
-        refreshControls();
     }
 
     private void setRemainingDistanceOutputEnabled(boolean enabled) {
         HudPrefs.setRemainingDistanceOutputEnabled(this, enabled);
-        cachedPayloadKey = "";
         appendStatus("Remaining distance output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_remaining_distance=" + enabled);
-        refreshControls();
     }
 
     private void setSpeedLimitMode(int mode) {
         HudPrefs.setSpeedLimitMode(this, mode);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.speedLimitMode(this);
         appendStatus("Speed limit mode " + persisted);
         AppEventLogger.event(this, "ui speed_limit_mode=" + persisted);
-        refreshControls();
     }
 
     private void setNativeSpeedLimitDelayEnabled(boolean enabled) {
         HudPrefs.setNativeSpeedLimitDelayEnabled(this, enabled);
-        cachedPayloadKey = "";
         boolean persisted = HudPrefs.isNativeSpeedLimitDelayEnabled(this);
         appendStatus("Native speed limit delay " + (persisted ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui speed_limit_native_delay_enabled=" + persisted);
-        refreshControls();
     }
 
     private void setNativeSpeedLimitFallbackMode(int mode) {
         HudPrefs.setNativeSpeedLimitFallbackMode(this, mode);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.getNativeSpeedLimitFallbackMode(this);
         appendStatus("Native speed limit fallback mode " + persisted);
         AppEventLogger.event(this, "ui speed_limit_native_fallback_mode=" + persisted);
-        refreshControls();
     }
 
     private void setSpeedLimitFreeFallback(int mode) {
         HudPrefs.setSpeedLimitFreeFallback(this, mode);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.speedLimitFreeFallback(this);
         appendStatus("Speed limit free fallback " + persisted);
         AppEventLogger.event(this, "ui speed_limit_free_fallback=" + persisted);
-        refreshControls();
     }
 
     private void setSpeedLimitOverlaySeconds(int seconds) {
         HudPrefs.setSpeedLimitOverlaySeconds(this, seconds);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.speedLimitOverlaySeconds(this);
         appendStatus("Speed limit overlay seconds " + persisted);
         AppEventLogger.event(this, "ui speed_limit_overlay_seconds=" + persisted);
-        refreshControls();
     }
 
     private void setSpeedLimitCompositePlacement(int placement) {
         HudPrefs.setSpeedLimitCompositePlacement(this, placement);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.speedLimitCompositePlacement(this);
         appendStatus("Speed limit composite placement " + persisted);
         AppEventLogger.event(this, "ui speed_limit_composite_placement=" + persisted);
-        refreshControls();
     }
 
     private void setSpeedLimitManeuverOverlaySize(int size) {
         HudPrefs.setSpeedLimitManeuverOverlaySize(this, size);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.speedLimitManeuverOverlaySize(this);
         appendStatus("Speed limit maneuver overlay size " + persisted);
         AppEventLogger.event(this, "ui speed_limit_maneuver_overlay_size=" + persisted);
-        refreshControls();
     }
 
     private void setSpeedLimitLaneOverlaySize(int size) {
         HudPrefs.setSpeedLimitLaneOverlaySize(this, size);
-        cachedPayloadKey = "";
         int persisted = HudPrefs.speedLimitLaneOverlaySize(this);
         appendStatus("Speed limit lane overlay size " + persisted);
         AppEventLogger.event(this, "ui speed_limit_lane_overlay_size=" + persisted);
-        refreshControls();
     }
 
     private void saveMapSettings(HudMapSettings settings, String reason) {
@@ -4645,489 +4165,13 @@ public final class MainActivity extends ComponentActivity {
             NavHudLiveSender.stopMapLiveIfRunning(reason);
         }
         AppEventLogger.event(this, "ui " + settings.diagnostics());
-        refreshControls();
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setManualMode(boolean enabled) {
-        manualModeEnabled = enabled;
-        appendStatus("Manual mode " + (enabled ? "ON" : "OFF"));
-        AppEventLogger.event(this, "ui manual_mode=" + enabled);
-        refreshControls();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setUiTheme(boolean dark) {
         HudPrefs.setDarkTheme(this, dark);
         appendStatus("UI theme " + (dark ? "dark" : "light"));
-        applyUiTheme();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyUiTheme() {
-        if (rootView != null) {
-            applyUiTheme(rootView);
-        }
-        refreshUiModeButtons();
-        refreshTabButtons();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyUiTheme(View view) {
-        if (view instanceof LinearLayout || view instanceof ScrollView) {
-            view.setBackgroundColor(uiBackgroundColor());
-        }
-        if (view instanceof EditText) {
-            EditText editText = (EditText) view;
-            editText.setTextColor(uiTextColor());
-            editText.setHintTextColor(uiMutedTextColor());
-            editText.setBackgroundColor(uiFieldBackgroundColor());
-        } else if (view instanceof Button) {
-            styleButton((Button) view, view.isEnabled());
-        } else if (view instanceof TextView) {
-            TextView textView = (TextView) view;
-            if (THEME_WARNING_TAG.equals(textView.getTag())) {
-                textView.setTextColor(Color.RED);
-            } else {
-                textView.setTextColor(uiTextColor());
-            }
-        }
-        if (view instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) view;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                applyUiTheme(group.getChildAt(i));
-            }
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyUiLanguage() {
-        if (rootView != null) {
-            applyUiLanguage(rootView);
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyUiLanguage(View view) {
-        if (view instanceof TextView) {
-            TextView textView = (TextView) view;
-            CharSequence current = textView.getText();
-            if (current != null) {
-                String before = current.toString();
-                String after = localizeUiText(before);
-                if (!after.equals(before)) {
-                    textView.setText(after);
-                }
-            }
-        }
-        if (view instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) view;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                applyUiLanguage(group.getChildAt(i));
-            }
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private String localizeUiText(String value) {
-        return HudPrefs.isUaLanguage(this) ? toUkrainianUiText(value) : toEnglishUiText(value);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private String toUkrainianUiText(String value) {
-        switch (value) {
-            case "Main":
-                return "Головна";
-            case "Apps":
-                return "Застосунки";
-            case "Logs":
-                return "Логи";
-            case "Manual":
-                return "Ручний";
-            case "Light":
-                return "Світла";
-            case "Permissions and Runtime":
-                return "Дозволи та Runtime";
-            case "Navigation Output":
-                return "Вивід навігації";
-            case "Navigation Preferences":
-                return "Налаштування навігації";
-            case "Boot auto-start":
-                return "Автостарт";
-            case "Small distance clamp":
-                return "Обрізка малої дистанції";
-            case "Roundabout left-hand traffic":
-                return "Лівосторонній рух на колі";
-            case "PNG output":
-                return "PNG вивід";
-            case "Native output":
-                return "Native вивід";
-            case "Lanes output":
-                return "Вивід смуг";
-            case "Distance output":
-                return "Вивід дистанції";
-            case "Street output":
-                return "Вивід вулиці";
-            case "Grant ADB":
-                return "Надати ADB";
-            case "Grant ADB running":
-                return "Надання ADB...";
-            case "Open \"Disable background apps\" menu":
-                return "Відкрити Disable background apps";
-            case "Navigation Logs":
-                return "Навігаційні логи";
-            case "Status Log":
-                return "Журнал стану";
-            case "Start Logcat":
-                return "Почати Logcat";
-            case "Stop Logcat":
-                return "Зупинити Logcat";
-            case "Clear Logcat":
-                return "Очистити Logcat";
-            case "Manual HUD Output":
-                return "Ручний HUD вивід";
-            case "Manual mode":
-                return "Ручний режим";
-            case "Connection":
-                return "З'єднання";
-            case "Connect":
-                return "Підключити";
-            case "Start":
-                return "Старт";
-            case "Stop":
-                return "Стоп";
-            case "Disconnect":
-                return "Відключити";
-            case "Background":
-                return "У фон";
-            case "Stop Exit":
-                return "Стоп і вихід";
-            case "Distance":
-                return "Дистанція";
-            case "Apply Distance":
-                return "Застосувати дистанцію";
-            case "Lanes":
-                return "Смуги";
-            case "Lanes Show":
-                return "Показати смуги";
-            case "Lanes Hide":
-                return "Сховати смуги";
-            case "Apply Lanes":
-                return "Застосувати смуги";
-            case "Next Lanes":
-                return "Наступні смуги";
-            case "Arrow Visibility":
-                return "Видимість стрілок";
-            case "PNG Show":
-                return "Показати PNG";
-            case "PNG Hide":
-                return "Сховати PNG";
-            case "Native Show":
-                return "Показати native";
-            case "Native Hide":
-                return "Сховати native";
-            case "Supported Arrows":
-                return "Підтримувані стрілки";
-            case "Raw Arrows":
-                return "Raw стрілки";
-            case "Supported":
-                return "Підтримувані";
-            case "Prev":
-                return "Назад";
-            case "Next":
-                return "Далі";
-            case "PNG Prev":
-                return "PNG назад";
-            case "PNG Next":
-                return "PNG далі";
-            case "Native Prev":
-                return "Native назад";
-            case "Native Next":
-                return "Native далі";
-            case "Apply Raw":
-                return "Застосувати raw";
-            case "Quick Hide":
-                return "Швидко сховати";
-            case "Hide PNG + Native":
-                return "Сховати PNG + Native";
-            case "Guide Point":
-                return "Точка маршруту";
-            case "Apply Guide":
-                return "Застосувати точку";
-            case "Supported apps":
-                return "Підтримувані";
-            case "All apps":
-                return "Всі";
-            case "SUPPORTED APPS: Google Maps, Waze":
-                return "ПІДТРИМУВАНІ: Google Maps, Waze";
-            case "Unsupported apps are logging only":
-                return "Непідтримувані застосунки тільки логуються";
-            case "No supported navigation apps visible":
-                return "Підтримувані навігатори не знайдені";
-            case "No current non-system background apps visible":
-                return "Активні застосунки не знайдені";
-            case "Refresh apps":
-            case "Оновити застосунки":
-                return "Оновити застосунки";
-            case "Log":
-                return "Лог";
-            case "Stop HUD":
-                return "Стоп HUD";
-            case "Send to dashboard":
-                return "На приборку";
-            case "Send to main":
-                return "На main";
-            case "Start app first":
-                return "Спочатку запустіть";
-            default:
-                return value;
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private String toEnglishUiText(String value) {
-        switch (value) {
-            case "Головна":
-                return "Main";
-            case "Застосунки":
-                return "Apps";
-            case "Логи":
-                return "Logs";
-            case "Ручний":
-                return "Manual";
-            case "Світла":
-                return "Light";
-            case "Дозволи та Runtime":
-                return "Permissions and Runtime";
-            case "Вивід навігації":
-                return "Navigation Output";
-            case "Налаштування навігації":
-                return "Navigation Preferences";
-            case "Автостарт":
-                return "Boot auto-start";
-            case "Обрізка малої дистанції":
-                return "Small distance clamp";
-            case "Лівосторонній рух на колі":
-                return "Roundabout left-hand traffic";
-            case "PNG вивід":
-                return "PNG output";
-            case "Native вивід":
-                return "Native output";
-            case "Вивід смуг":
-                return "Lanes output";
-            case "Вивід дистанції":
-                return "Distance output";
-            case "Вивід вулиці":
-                return "Street output";
-            case "Надати ADB":
-                return "Grant ADB";
-            case "Надання ADB...":
-                return "Grant ADB running";
-            case "Відкрити Disable background apps":
-                return "Open \"Disable background apps\" menu";
-            case "Навігаційні логи":
-                return "Navigation Logs";
-            case "Журнал стану":
-                return "Status Log";
-            case "Почати Logcat":
-                return "Start Logcat";
-            case "Зупинити Logcat":
-                return "Stop Logcat";
-            case "Очистити Logcat":
-                return "Clear Logcat";
-            case "Ручний HUD вивід":
-                return "Manual HUD Output";
-            case "Ручний режим":
-                return "Manual mode";
-            case "З'єднання":
-                return "Connection";
-            case "Підключити":
-                return "Connect";
-            case "Старт":
-                return "Start";
-            case "Стоп":
-                return "Stop";
-            case "Відключити":
-                return "Disconnect";
-            case "У фон":
-                return "Background";
-            case "Стоп і вихід":
-                return "Stop Exit";
-            case "Дистанція":
-                return "Distance";
-            case "Застосувати дистанцію":
-                return "Apply Distance";
-            case "Смуги":
-                return "Lanes";
-            case "Показати смуги":
-                return "Lanes Show";
-            case "Сховати смуги":
-                return "Lanes Hide";
-            case "Застосувати смуги":
-                return "Apply Lanes";
-            case "Наступні смуги":
-                return "Next Lanes";
-            case "Видимість стрілок":
-                return "Arrow Visibility";
-            case "Показати PNG":
-                return "PNG Show";
-            case "Сховати PNG":
-                return "PNG Hide";
-            case "Показати native":
-                return "Native Show";
-            case "Сховати native":
-                return "Native Hide";
-            case "Підтримувані стрілки":
-                return "Supported Arrows";
-            case "Raw стрілки":
-                return "Raw Arrows";
-            case "Підтримувані":
-                return "Supported";
-            case "Назад":
-                return "Prev";
-            case "Далі":
-                return "Next";
-            case "PNG назад":
-                return "PNG Prev";
-            case "PNG далі":
-                return "PNG Next";
-            case "Native назад":
-                return "Native Prev";
-            case "Native далі":
-                return "Native Next";
-            case "Застосувати raw":
-                return "Apply Raw";
-            case "Швидко сховати":
-                return "Quick Hide";
-            case "Сховати PNG + Native":
-                return "Hide PNG + Native";
-            case "Точка маршруту":
-                return "Guide Point";
-            case "Застосувати точку":
-                return "Apply Guide";
-            case "Всі":
-                return "All apps";
-            case "ПІДТРИМУВАНІ: Google Maps, Waze":
-                return "SUPPORTED APPS: Google Maps, Waze";
-            case "Непідтримувані застосунки тільки логуються":
-                return "Unsupported apps are logging only";
-            case "Підтримувані навігатори не знайдені":
-                return "No supported navigation apps visible";
-            case "Активні застосунки не знайдені":
-                return "No current non-system background apps visible";
-            case "Оновити застосунки":
-                return "Refresh apps";
-            case "Лог":
-                return "Log";
-            case "Стоп HUD":
-                return "Stop HUD";
-            case "На приборку":
-                return "Send to dashboard";
-            case "На main":
-                return "Send to main";
-            case "Спочатку запустіть":
-                return "Start app first";
-            default:
-                return value;
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshUiModeButtons() {
-        boolean ua = HudPrefs.isUaLanguage(this);
-        boolean dark = HudPrefs.isDarkTheme(this);
-        setModeButton(languageUaButton, ua);
-        setModeButton(languageEngButton, !ua);
-        setModeButton(themeDarkButton, dark);
-        setModeButton(themeLightButton, !dark);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setModeButton(Button button, boolean active) {
-        if (button == null) {
-            return;
-        }
-        button.setEnabled(!active);
-        if (active) {
-            button.setTextColor(uiActiveTextColor());
-            button.setBackgroundColor(uiActiveBackgroundColor());
-        } else {
-            styleButton(button, true);
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshTabButtons() {
-        styleTabButton(mainTabButton, selectedTabIndex == 0);
-        styleTabButton(appsTabButton, selectedTabIndex == 1);
-        styleTabButton(logTabButton, selectedTabIndex == 2);
-        styleTabButton(manualTabButton, selectedTabIndex == 3);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void styleTabButton(Button button, boolean active) {
-        if (button == null) {
-            return;
-        }
-        button.setEnabled(true);
-        if (active) {
-            button.setTextColor(uiActiveTextColor());
-            button.setBackgroundColor(uiActiveBackgroundColor());
-        } else {
-            styleButton(button, true);
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void styleButton(Button button, boolean enabled) {
-        button.setTextColor(enabled ? uiButtonTextColor() : uiMutedTextColor());
-        button.setBackgroundColor(enabled ? uiButtonBackgroundColor() : uiDisabledBackgroundColor());
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int uiBackgroundColor() {
-        return HudPrefs.isDarkTheme(this) ? 0xFF07111D : 0xFFF4F7FB;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int uiFieldBackgroundColor() {
-        return HudPrefs.isDarkTheme(this) ? 0xFF111C2A : 0xFFFFFFFF;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int uiButtonBackgroundColor() {
-        return HudPrefs.isDarkTheme(this) ? 0xFF142338 : 0xFFE8EEF7;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int uiDisabledBackgroundColor() {
-        return HudPrefs.isDarkTheme(this) ? 0xFF0D1724 : 0xFFD8E1EE;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int uiActiveBackgroundColor() {
-        return HudPrefs.isDarkTheme(this) ? 0xFF245FAD : 0xFF1D6FE8;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int uiTextColor() {
-        return HudPrefs.isDarkTheme(this) ? 0xFFEAF2FF : 0xFF111827;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int uiMutedTextColor() {
-        return HudPrefs.isDarkTheme(this) ? 0xFF9CAFC5 : 0xFF5B677A;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int uiButtonTextColor() {
-        return HudPrefs.isDarkTheme(this) ? 0xFFEAF2FF : 0xFF162235;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int uiActiveTextColor() {
-        return 0xFFFFFFFF;
+        invalidateComposeSnapshot();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -5291,33 +4335,24 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void runNavPermissionSelfCheck(boolean autoGrant) {
         NavRuntimePermissionStatus status = navRuntimePermissionStatus();
-        String adbKey = LocalAdbBridge.adbKeyFingerprint(this);
-        boolean keyKnown = LocalAdbBridge.isCurrentKeyKnownAuthorized(this);
-        boolean autoAttemptFinished = autoAdbAuthorizationState
-                == AdbAuthorizationUiPolicy.AutoState.AUTHORIZED
-                || autoAdbAuthorizationState == AdbAuthorizationUiPolicy.AutoState.FAILED;
-        String uiSummary = status.uiSummary(autoAttemptFinished, adbKey);
+        String adbKey = cachedAdbKeyFingerprintForUi();
+        boolean keyKnown = cachedAdbUiStatus().authorized;
         if (status.readyForCapture()
-                && LocalAdbBridge.canShortCircuitReadyForCapture(
-                this, LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE)) {
+                && cachedAdbKeyVerifiedForCapture()) {
             autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.AUTHORIZED;
-            updateAdbBridgeStatus(uiSummary);
             appendStatus("nav permission self-check: " + status.summary());
             AppEventLogger.event(this, "nav_permission_self_check "
                     + status.summary() + " keyKnown=true");
-            refreshControls();
             maybeRequestOverlayPermission();
             return;
         }
 
-        updateAdbBridgeStatus(uiSummary);
         appendStatus("nav permission self-check: " + status.summary() + " adbKey=" + adbKey);
         AppEventLogger.event(this, "nav_permission_self_check "
                 + status.summary() + " adbKey=" + adbKey
                 + " keyKnown=" + keyKnown
                 + " autoGrant=" + autoGrant
                 + " state=" + autoAdbAuthorizationState);
-        refreshControls();
         if (autoGrant
                 && autoAdbAuthorizationState == AdbAuthorizationUiPolicy.AutoState.PENDING_UI) {
             requestAdbPermissionGrant(
@@ -5331,8 +4366,7 @@ public final class MainActivity extends ComponentActivity {
     private boolean ensureNavCaptureRuntimeReadyForStart(String mode, String packageName) {
         NavRuntimePermissionStatus status = navRuntimePermissionStatus();
         if (status.readyForCapture()) {
-            if (!LocalAdbBridge.canShortCircuitReadyForCapture(
-                    this, LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE)) {
+            if (!cachedAdbKeyVerifiedForCapture()) {
                 requestAdbPermissionGrant(
                         "start-key-check-" + (mode == null ? "capture" : mode),
                         LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
@@ -5340,9 +4374,6 @@ public final class MainActivity extends ComponentActivity {
             return true;
         }
         String safeMode = mode == null ? "capture" : mode;
-        updateAdbBridgeStatus(status.uiSummary(
-                !status.settingsGranted(),
-                LocalAdbBridge.adbKeyFingerprint(this)));
         appendStatus("nav " + safeMode + " blocked: capture services not ready: "
                 + status.summary());
         AppEventLogger.event(this, "nav_capture_start_blocked mode=" + safeMode
@@ -5350,8 +4381,6 @@ public final class MainActivity extends ComponentActivity {
         requestAdbPermissionGrant(
                 "start-" + safeMode + "-" + packageName,
                 LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
-        refreshActiveAppsList();
-        refreshControls();
         return false;
     }
 
@@ -5412,18 +4441,10 @@ public final class MainActivity extends ComponentActivity {
         }
         //Grant decisions must not consume the cache transition before it is published.
         NavRuntimePermissionStatus runningStatus = NavRuntimePermissionStatus.check(this);
-        if (runningStatus.needsAdbGrant()) {
-            updateAdbBridgeStatus(
-                    runningStatus.uiSummary(false, LocalAdbBridge.adbKeyFingerprint(this))
-                            .replace("auto-grant pending", "auto-grant running"));
-        } else {
-            updateAdbBridgeStatus("Permissions: checking\nADB: grant running");
-        }
         appendStatus("adb bridge grant start: " + reason);
         AppEventLogger.event(this, "adb_bridge_start reason=" + reason
                 + " mode=" + authorizationPromptMode
                 + " autoState=" + autoAdbAuthorizationState);
-        refreshControls();
         Context appContext = getApplicationContext();
         Handler mainHandler = handler;
         Thread thread = new Thread(() -> {
@@ -5436,14 +4457,32 @@ public final class MainActivity extends ComponentActivity {
                         authorizationPromptMode,
                         authorizationGeneration);
             } catch (RuntimeException e) {
-                result = LocalAdbBridge.Result.failed(
-                        e.getClass().getSimpleName() + ": " + e.getMessage());
+                AppEventLogger.event(appContext, FailureDiagnostics.format(
+                        e, "adb_permission_grant", "repair"));
+                result = LocalAdbBridge.Result.failed(FailureDiagnostics.formatBounded(
+                        e, "adb_permission_grant", "repair", 2048));
             }
+            NavRuntimePermissionStatus refreshedStatus = runningStatus;
+            try {
+                refreshedStatus = NavRuntimePermissionStatus.check(appContext);
+            } catch (RuntimeException error) {
+                AppEventLogger.event(appContext, FailureDiagnostics.format(
+                        error, "adb_permission_grant", "refresh_runtime_status"));
+            }
+            LocalAdbBridge.AuthorizationSnapshot authorizationSnapshot =
+                    LocalAdbBridge.authorizationSnapshot(appContext);
+            updateRuntimeStatusCache(refreshedStatus, authorizationSnapshot);
+            DashboardWidgetController.onRuntimePermissionsRefreshed(appContext);
+            lastRuntimeStatusRefreshAtMs = SystemClock.elapsedRealtime();
             LocalAdbBridge.Result finalResult = result;
+            NavRuntimePermissionStatus finalStatus = refreshedStatus;
+            LocalAdbBridge.AuthorizationSnapshot finalAuthorizationSnapshot = authorizationSnapshot;
             mainHandler.post(() -> handleAdbGrantResult(
                     finalResult,
                     grantGeneration,
-                    automatic));
+                    automatic,
+                    finalStatus,
+                    finalAuthorizationSnapshot));
         }, "BydHudAdbGrant");
         thread.start();
     }
@@ -5452,7 +4491,9 @@ public final class MainActivity extends ComponentActivity {
     private void handleAdbGrantResult(
             LocalAdbBridge.Result result,
             long grantGeneration,
-            boolean automatic) {
+            boolean automatic,
+            NavRuntimePermissionStatus status,
+            LocalAdbBridge.AuthorizationSnapshot authorizationSnapshot) {
         boolean stale = grantGeneration != adbGrantGeneration;
         if (stale || destroyed || exitRequested) {
             adbGrantInProgress = false;
@@ -5476,8 +4517,7 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         adbGrantInProgress = false;
-        NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
-        boolean keyVerified = LocalAdbBridge.isCurrentKeyVerifiedThisProcess(this);
+        boolean keyVerified = authorizationSnapshot.verifiedThisProcess;
         if (keyVerified) {
             InstrumentProxyManager.get(this).onAuthorizationVerified();
         }
@@ -5515,47 +4555,7 @@ public final class MainActivity extends ComponentActivity {
                 + " keyVerified=" + keyVerified
                 + " repairCollision=" + repairCollision
                 + " autoState=" + autoAdbAuthorizationState);
-        if (status.readyForCapture()) {
-        }
-        String prefix;
-        switch (result.code) {
-            case GRANTED:
-            case ALREADY_GRANTED:
-                prefix = "ADB grant ready";
-                break;
-            case PARTIAL:
-                prefix = status.settingsGranted()
-                        ? "Permissions granted; capture services reconnecting"
-                        : "ADB grant incomplete";
-                break;
-            case AUTHORIZATION_REQUIRED:
-                prefix = "ADB authorization required";
-                break;
-            case ADB_UNAVAILABLE:
-                prefix = "ADB unavailable";
-                break;
-            default:
-                prefix = "ADB grant failed";
-                break;
-        }
-        boolean adbNotGranted = !status.settingsGranted()
-                && (result.code == LocalAdbBridge.Result.Code.AUTHORIZATION_REQUIRED
-                || result.code == LocalAdbBridge.Result.Code.ADB_UNAVAILABLE
-                || result.code == LocalAdbBridge.Result.Code.FAILED
-                || result.code == LocalAdbBridge.Result.Code.PARTIAL);
-        String permissionSummary =
-                status.uiSummary(adbNotGranted, LocalAdbBridge.adbKeyFingerprint(this));
-        if (status.settingsGranted()
-                && (result.code == LocalAdbBridge.Result.Code.GRANTED
-                || result.code == LocalAdbBridge.Result.Code.ALREADY_GRANTED
-                || result.code == LocalAdbBridge.Result.Code.PARTIAL)) {
-            updateAdbBridgeStatus(permissionSummary);
-        } else {
-            updateAdbBridgeStatus(prefix + ": " + result.message
-                    + "\n" + permissionSummary);
-        }
         requestRuntimeStatusRefresh(this, true, "adb-grant-result");
-        refreshControls();
         if (!status.readyForCapture() && status.settingsGranted()
                 && result.shouldRecheckPermissions()) {
             NavNotificationListenerService.requestRuntimeRebind(this, "adb-result-recheck");
@@ -5564,821 +4564,10 @@ public final class MainActivity extends ComponentActivity {
         maybeStartPendingAdbAuthorization();
     }
 
-    //updates shared state here so freshness and lifecycle checks use the same evidence.
-    private void updateAdbBridgeStatus(String text) {
-        if (adbBridgeStatusView != null) {
-            adbBridgeStatusView.setText(text);
-        }
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     //sends encoded data here so transport side effects stay behind a single boundary.
-    private void sendCurrentState(String reason) {
-        if (!"loop".equals(reason) && !reason.endsWith("-compose")) {
-            if (!applyNavigationFields()) {
-                appendStatus("manual send waiting: numeric fields are incomplete");
-                refreshControls();
-                return;
-            }
-        }
-        refreshStateView();
-        PayloadSnapshot payload = getPayloadSnapshot();
-        NavHudLiveSender.get(this).publishManual(state, reason);
-        sendCount++;
-        appendStatus("manual payload=" + payload.bytes.length
-                + " reason=" + reason
-                + " field7=" + payload.laneBytes
-                + " field8=" + payload.turnBytes
-                + " field8Tag=" + payload.turnFieldStatus
-                + " field8Magic=" + payload.turnFieldMagic
-                + " field8Desc=" + payload.turnFieldDescriptor
-                + " turnRes=" + payload.turnResource
-                + " displayDist=" + payload.displayDistance
-                + " " + state.summary());
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private PayloadSnapshot getPayloadSnapshot() {
-        String key = buildPayloadKey();
-        if (key.equals(cachedPayloadKey) && cachedPayload.length > 0) {
-            return new PayloadSnapshot(cachedPayload, cachedLaneBytes, cachedTurnBytes,
-                    cachedTurnFieldStatus, cachedTurnFieldMagic, cachedTurnFieldDescriptor,
-                    cachedTurnResource, cachedDisplayDistance);
-        }
-
-        boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(this);
-        HudState payloadState = HudDisplayPolicy.apply(state, clampSmallDistance);
-        HudOutputPreferences.apply(this, payloadState);
-        cachedPayloadKey = key;
-        cachedPayload = HudRoadPayload.build(payloadState);
-        cachedLaneBytes = HudGraphicPayload.lanePngLength(payloadState);
-        cachedTurnBytes = HudGraphicPayload.turnPngLength(payloadState);
-        cachedTurnFieldStatus = HudGraphicPayload.turnFieldStatus(payloadState);
-        cachedTurnFieldMagic = HudGraphicPayload.turnFieldMagic(payloadState);
-        cachedTurnFieldDescriptor = HudGraphicPayload.turnFieldDescriptor(payloadState);
-        cachedTurnResource = HudGraphicPayload.turnResourceName(payloadState);
-        cachedDisplayDistance = payloadState.distanceToIntersection;
-        return new PayloadSnapshot(cachedPayload, cachedLaneBytes, cachedTurnBytes,
-                cachedTurnFieldStatus, cachedTurnFieldMagic, cachedTurnFieldDescriptor,
-                cachedTurnResource, cachedDisplayDistance);
-    }
-
-    //builds this artifact here so callers do not duplicate protocol or UI construction details.
-    private String buildPayloadKey() {
-        return state.distanceToIntersection
-                + "|" + state.maneuverId
-                + "|" + state.turnBitmapId
-                + "|" + state.turnBitmapMode
-                + "|" + state.navigationStatus
-                + "|" + state.crossStatus
-                + "|" + state.carToDestination
-                + "|" + state.timeToDestination
-                + "|" + state.currentMaxSpeedLimit
-                + "|" + state.currentSpeed
-                + "|" + state.numOfLanes
-                + "|" + state.laneStrokePx
-                + "|" + state.laneIconScalePercent
-                + "|" + state.laneCanvasScalePercent
-                + "|" + state.laneGapPx
-                + "|" + state.includeNativeArrow
-                + "|" + state.includeLaneBitmap
-                + "|" + state.roadName
-                + "|" + state.directionText
-                + "|" + state.laneString
-                + "|" + state.guidePoint
-                + "|" + state.navigationRatio
-                + "|" + HudPrefs.isSmallDistanceClampEnabled(this)
-                + "|" + HudPrefs.isPngOutputEnabled(this)
-                + "|" + HudPrefs.isNativeOutputEnabled(this)
-                + "|" + HudPrefs.isLaneOutputEnabled(this)
-                + "|" + HudPrefs.isDistanceOutputEnabled(this)
-                + "|" + HudPrefs.isStreetOutputEnabled(this)
-                + "|" + HudPrefs.isTextDirectionOutputEnabled(this);
-    }
-
-    //models PayloadSnapshot data here so transport and parser layers share a stable contract.
-    private static final class PayloadSnapshot {
-        final byte[] bytes;
-        final int laneBytes;
-        final int turnBytes;
-        final String turnFieldStatus;
-        final String turnFieldMagic;
-        final String turnFieldDescriptor;
-        final String turnResource;
-        final int displayDistance;
-
-        PayloadSnapshot(byte[] bytes, int laneBytes, int turnBytes, String turnFieldStatus,
-                String turnFieldMagic, String turnFieldDescriptor, String turnResource,
-                int displayDistance) {
-            this.bytes = bytes;
-            this.laneBytes = laneBytes;
-            this.turnBytes = turnBytes;
-            this.turnFieldStatus = turnFieldStatus;
-            this.turnFieldMagic = turnFieldMagic;
-            this.turnFieldDescriptor = turnFieldDescriptor;
-            this.turnResource = turnResource;
-            this.displayDistance = displayDistance;
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void switchArrowMode(boolean curated) {
-        if (!canUseManualHud()) {
-            appendStatus("arrow mode blocked: Connect + Start first");
-            refreshControls();
-            return;
-        }
-        arrowCuratedMode = curated;
-        if (curated) {
-            applyCuratedCombo(true);
-        } else {
-            syncRawEditsFromState();
-            appendStatus("arrow mode=raw");
-            refreshControls();
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void stepCurated(int delta) {
-        if (!canUseManualHud() || !arrowCuratedMode) {
-            appendStatus("curated step blocked");
-            refreshControls();
-            return;
-        }
-        curatedIndex = delta >= 0
-                ? HudArrowComboCatalog.next(curatedIndex)
-                : HudArrowComboCatalog.prev(curatedIndex);
-        applyCuratedCombo(true);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyCuratedCombo(boolean send) {
-        HudArrowComboCatalog.Combo combo = HudArrowComboCatalog.curatedAt(curatedIndex);
-        pngVisible = combo.pngVisible;
-        nativeVisible = combo.nativeVisible;
-        state.turnBitmapId = combo.sourceId;
-        state.maneuverId = combo.nativeId;
-        if (combo.pngVisible) {
-            lastVisiblePngSourceId = combo.sourceId;
-        }
-        if (combo.nativeVisible) {
-            lastVisibleNativeId = combo.nativeId;
-        }
-        applyArrowVisibility();
-        state.roadName = combo.roadLabel();
-        if (roadNameEdit != null) {
-            roadNameEdit.setText(state.roadName);
-        }
-        syncRawEditsFromState();
-        appendStatus("curated " + (curatedIndex + 1) + "/" + HudArrowComboCatalog.size()
-                + " " + combo.roadLabel()
-                + " png=" + combo.pngVisible
-                + " native=" + combo.nativeVisible);
-        refreshControls();
-        if (send) {
-            sendCurrentState("curated");
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void stepRawPng(int delta) {
-        if (!canUseManualHud() || arrowCuratedMode) {
-            appendStatus("raw png step blocked");
-            refreshControls();
-            return;
-        }
-        Integer currentValue = parseIntOrNull(rawPngIdEdit, 0, 99);
-        if (currentValue == null) {
-            appendStatus("raw png step waiting: numeric field is incomplete");
-            refreshControls();
-            return;
-        }
-        int current = currentValue;
-        rawPngIdEdit.setText(String.valueOf(HudArrowComboCatalog.wrapRaw(current + delta)));
-        applyRawArrowsAndSend();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void stepRawNative(int delta) {
-        if (!canUseManualHud() || arrowCuratedMode) {
-            appendStatus("raw native step blocked");
-            refreshControls();
-            return;
-        }
-        Integer currentValue = parseIntOrNull(rawNativeIdEdit, 0, 99);
-        if (currentValue == null) {
-            appendStatus("raw native step waiting: numeric field is incomplete");
-            refreshControls();
-            return;
-        }
-        int current = currentValue;
-        rawNativeIdEdit.setText(String.valueOf(HudArrowComboCatalog.wrapRaw(current + delta)));
-        applyRawArrowsAndSend();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyRawArrowsAndSend() {
-        if (!canUseManualHud() || arrowCuratedMode) {
-            appendStatus("raw apply blocked");
-            refreshControls();
-            return;
-        }
-        Integer sourceValue = parseIntOrNull(rawPngIdEdit, 0, 99);
-        Integer nativeValue = parseIntOrNull(rawNativeIdEdit, 0, 99);
-        if (sourceValue == null || nativeValue == null) {
-            appendStatus("raw apply waiting: numeric fields are incomplete");
-            refreshControls();
-            return;
-        }
-        int sourceId = sourceValue;
-        int nativeId = nativeValue;
-        rawPngIdEdit.setText(String.valueOf(sourceId));
-        rawNativeIdEdit.setText(String.valueOf(nativeId));
-        state.turnBitmapId = sourceId;
-        state.maneuverId = nativeId;
-        if (pngVisible && sourceId != HudState.TURN_BITMAP_BLANK_SOURCE_ID) {
-            lastVisiblePngSourceId = sourceId;
-        }
-        if (nativeVisible && nativeId != HudState.NATIVE_BLANK_ID) {
-            lastVisibleNativeId = nativeId;
-        }
-        applyArrowVisibility();
-        if (roadNameEdit != null) {
-            state.roadName = "RAW N" + HudArrowComboCatalog.two(nativeId)
-                    + " S" + HudArrowComboCatalog.two(sourceId);
-            roadNameEdit.setText(state.roadName);
-        }
-        appendStatus("raw apply png=S" + HudArrowComboCatalog.two(sourceId)
-                + " native=N" + HudArrowComboCatalog.two(nativeId)
-                + " pngVisible=" + pngVisible
-                + " nativeVisible=" + nativeVisible);
-        refreshControls();
-        sendCurrentState("raw");
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setPngVisible(boolean visible) {
-        if (!canUseManualHud()) {
-            appendStatus("png visibility blocked: Connect + Start first");
-            refreshControls();
-            return;
-        }
-        if (!visible && state.turnBitmapId != HudState.TURN_BITMAP_BLANK_SOURCE_ID) {
-            lastVisiblePngSourceId = state.turnBitmapId;
-        }
-        if (visible && state.turnBitmapId == HudState.TURN_BITMAP_BLANK_SOURCE_ID) {
-            state.turnBitmapId = lastVisiblePngSourceId;
-        }
-        pngVisible = visible;
-        applyArrowVisibility();
-        syncRawEditsFromState();
-        appendStatus("png visible=" + visible);
-        refreshControls();
-        sendCurrentState(visible ? "png-show" : "png-hide");
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setNativeVisible(boolean visible) {
-        if (!canUseManualHud()) {
-            appendStatus("native visibility blocked: Connect + Start first");
-            refreshControls();
-            return;
-        }
-        if (!visible && state.maneuverId != HudState.NATIVE_BLANK_ID) {
-            lastVisibleNativeId = state.maneuverId;
-        }
-        if (visible && state.maneuverId == HudState.NATIVE_BLANK_ID) {
-            state.maneuverId = lastVisibleNativeId;
-        }
-        nativeVisible = visible;
-        applyArrowVisibility();
-        syncRawEditsFromState();
-        appendStatus("native visible=" + visible);
-        refreshControls();
-        sendCurrentState(visible ? "native-show" : "native-hide");
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setBothArrowsHidden() {
-        if (!canUseManualHud()) {
-            appendStatus("hide arrows blocked: Connect + Start first");
-            refreshControls();
-            return;
-        }
-        pngVisible = false;
-        nativeVisible = false;
-        if (state.turnBitmapId != HudState.TURN_BITMAP_BLANK_SOURCE_ID) {
-            lastVisiblePngSourceId = state.turnBitmapId;
-        }
-        if (state.maneuverId != HudState.NATIVE_BLANK_ID) {
-            lastVisibleNativeId = state.maneuverId;
-        }
-        state.turnBitmapId = HudState.TURN_BITMAP_BLANK_SOURCE_ID;
-        state.maneuverId = HudState.NATIVE_BLANK_ID;
-        syncRawEditsFromState();
-        applyArrowVisibility();
-        if (roadNameEdit != null) {
-            roadNameEdit.setText("Both hidden N99 S72");
-        }
-        appendStatus("both arrows hidden");
-        refreshControls();
-        sendCurrentState("arrows-hide-all");
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyArrowVisibility() {
-        if (pngVisible) {
-            state.unlockTurnBitmapHidden();
-        } else {
-            state.hideTurnBitmapWithBlankSource();
-        }
-        if (nativeVisible) {
-            state.includeNativeArrow = true;
-        } else {
-            state.hideNativeWithBlankId();
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void syncRawEditsFromState() {
-        if (rawPngIdEdit != null) {
-            rawPngIdEdit.setText(String.valueOf(state.turnBitmapId));
-        }
-        if (rawNativeIdEdit != null) {
-            rawNativeIdEdit.setText(String.valueOf(state.maneuverId));
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyDistanceAndSend() {
-        if (!applyNavigationFields()) {
-            appendStatus("distance waiting: numeric fields are incomplete");
-            refreshControls();
-            return;
-        }
-        refreshStateView();
-        sendCurrentState("distance");
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setLaneBitmap(boolean value) {
-        if (!canUseManualHud()) {
-            appendStatus("lanes visibility blocked: Connect + Start first");
-            refreshControls();
-            return;
-        }
-        state.includeLaneBitmap = value;
-        if (value && laneEdit != null && laneEdit.getText().toString().trim().isEmpty()) {
-            laneEdit.setText(buildStraightLaneString(state.numOfLanes));
-        }
-        refreshControls();
-        sendCurrentState(value ? "lanes-show" : "lanes-hide");
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyLaneCountAndSend() {
-        if (!canUseManualHud()) {
-            appendStatus("apply lanes blocked: Connect + Start first");
-            refreshControls();
-            return;
-        }
-        Integer countValue = parseLaneCountOrNull();
-        if (countValue == null) {
-            appendStatus("lanes waiting: numeric field is incomplete");
-            refreshControls();
-            return;
-        }
-        int count = countValue;
-        state.numOfLanes = count;
-        state.includeLaneBitmap = count > 0;
-        String laneString = buildStraightLaneString(count);
-        laneEdit.setText(laneString);
-        state.laneString = laneString;
-        appendStatus("lanes apply count=" + count + " lane=\"" + laneString + "\"");
-        refreshControls();
-        sendCurrentState("lanes-apply");
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void randomizeLanesAndSend() {
-        if (!canUseManualHud()) {
-            appendStatus("randomize lanes blocked: Connect + Start first");
-            refreshControls();
-            return;
-        }
-        Integer countValue = parseLaneCountOrNull();
-        if (countValue == null) {
-            appendStatus("lanes waiting: numeric field is incomplete");
-            refreshControls();
-            return;
-        }
-        int count = countValue;
-        state.numOfLanes = count;
-        state.includeLaneBitmap = count > 0;
-        String laneString = buildRandomLaneString(count);
-        laneEdit.setText(laneString);
-        state.laneString = laneString;
-        appendStatus("lanes random count=" + count + " lane=\"" + laneString + "\"");
-        refreshControls();
-        sendCurrentState("lanes-random");
-    }
-
-    //parses source data here so downstream HUD code receives normalized navigation fields.
-    private Integer parseLaneCountOrNull() {
-        Integer count = parseIntOrNull(laneCountEdit, 0, 8);
-        if (count == null) {
-            return null;
-        }
-        if (laneCountEdit != null) {
-            laneCountEdit.setText(String.valueOf(count));
-        }
-        return count;
-    }
-
-    //builds this artifact here so callers do not duplicate protocol or UI construction details.
-    private String buildStraightLaneString(int count) {
-        if (count <= 0) {
-            return "";
-        }
-        StringBuilder builder = new StringBuilder();
-        for (int i = 0; i < count; i++) {
-            if (i > 0) {
-                builder.append('|');
-            }
-            builder.append("S");
-        }
-        return builder.toString();
-    }
-
-    //builds this artifact here so callers do not duplicate protocol or UI construction details.
-    private String buildRandomLaneString(int count) {
-        String[] directions = {"L", "SL", "S", "SR", "R"};
-        StringBuilder builder = new StringBuilder();
-        for (int i = 0; i < count; i++) {
-            if (i > 0) {
-                builder.append('|');
-            }
-            builder.append(directions[random.nextInt(directions.length)]);
-            if (random.nextBoolean()) {
-                builder.append('*');
-            }
-        }
-        return builder.toString();
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private boolean canUseManualHud() {
-        return manualModeEnabled
-                && sending;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyNavigationFieldsAndSend() {
-        if (!applyNavigationFields()) {
-            appendStatus("fields waiting: numeric fields are incomplete");
-            refreshControls();
-            return;
-        }
-        refreshStateView();
-        sendCurrentState("fields");
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private boolean applyNavigationFields() {
-        Integer distance = distanceEdit == null
-                ? clamp(state.distanceToIntersection, 0, 99999)
-                : parseIntOrNull(distanceEdit, 0, 99999);
-        Integer laneCount = laneCountEdit == null
-                ? clamp(state.numOfLanes, 0, 8)
-                : parseIntOrNull(laneCountEdit, 0, 8);
-        if (distance == null || laneCount == null) {
-            return false;
-        }
-        state.distanceToIntersection = distance;
-        if (distanceEdit != null) {
-            distanceEdit.setText(String.valueOf(distance));
-        }
-        state.numOfLanes = laneCount;
-        if (laneCountEdit != null) {
-            laneCountEdit.setText(String.valueOf(laneCount));
-        }
-        applyTextFields();
-        return true;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyTextFields() {
-        if (roadNameEdit != null) {
-            state.roadName = roadNameEdit.getText().toString();
-        }
-        if (laneEdit != null) {
-            state.laneString = laneEdit.getText().toString();
-        }
-        if (guidePointEdit != null) {
-            state.guidePoint = guidePointEdit.getText().toString();
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshStateView() {
-        if (currentStateView == null) {
-            return;
-        }
-        currentStateView.setText(
-                "sending=" + sending
-                        + " | connected=" + (hudOutput != null && hudOutput.isBound())
-                        + " | runtimeService=" + HudPrefs.isRuntimeServiceRunning(this)
-                        + " | boot=" + HudPrefs.isBootEnabled(this)
-                        + " | navHud=" + NavCapturePrefs.getHudPackage(this)
-                        + " | navLogOnly=" + formatCapturePackages(NavCapturePrefs.getLogOnlyPackages(this))
-                        + " | navDisplay=" + NavAppDisplayController.get(this)
-                                .lastState(NavCapturePrefs.getHudPackage(this)).displayId
-                        + " | smallDistClamp=" + HudPrefs.isSmallDistanceClampEnabled(this)
-                        + " | arrowMode=" + (arrowCuratedMode ? "curated" : "raw")
-                        + " | curated=" + (curatedIndex + 1) + "/" + HudArrowComboCatalog.size()
-                        + " | nativeId=" + state.maneuverId
-                        + " | sourceId=" + state.turnBitmapId
-                        + " | dist=" + state.distanceToIntersection + "m"
-                        + " | status=" + state.navigationStatus
-                        + " | lanes=" + state.numOfLanes
-                        + " | field28=" + state.includeNativeArrow
-                        + " | pngVisible=" + pngVisible
-                        + " | nativeVisible=" + nativeVisible
-                        + " | lanePng=" + state.includeLaneBitmap
-                        + " | turnPng=" + state.turnBitmapModeName()
-                        + " | pngLock=" + state.turnBitmapHiddenLocked
-                        + " | pngHide=" + HudState.turnBitmapModeName(state.turnBitmapHiddenMode)
-                        + " | field8Tag=" + HudGraphicPayload.turnFieldStatus(state)
-                        + " | field8Magic=" + HudGraphicPayload.turnFieldMagic(state)
-                        + " | field8Desc=" + HudGraphicPayload.turnFieldDescriptor(state)
-                        + " | turnRes=" + HudGraphicPayload.turnResourceName(state)
-                        + " | laneSig=" + HudLaneModel.signature(state)
-                        + " | icon=" + state.laneIconScalePercent
-                        + " | canvas=" + state.laneCanvasScalePercent
-                        + " | gapPx=" + state.laneGapPx
-                        + "\nroad=\"" + state.roadName + "\""
-                        + "\nlane=\"" + state.laneString + "\"");
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshControls() {
-        if (bootSwitch != null) {
-            bootSwitch.setOnCheckedChangeListener(null);
-            bootSwitch.setChecked(HudPrefs.isBootEnabled(this));
-            bootSwitch.setOnCheckedChangeListener(bootSwitchListener);
-        }
-        if (smallDistanceClampSwitch != null) {
-            smallDistanceClampSwitch.setOnCheckedChangeListener(null);
-            smallDistanceClampSwitch.setChecked(HudPrefs.isSmallDistanceClampEnabled(this));
-            smallDistanceClampSwitch.setOnCheckedChangeListener(smallDistanceClampSwitchListener);
-        }
-        if (pngOutputSwitch != null) {
-            pngOutputSwitch.setOnCheckedChangeListener(null);
-            pngOutputSwitch.setChecked(HudPrefs.isPngOutputEnabled(this));
-            pngOutputSwitch.setOnCheckedChangeListener(pngOutputSwitchListener);
-        }
-        if (nativeOutputSwitch != null) {
-            nativeOutputSwitch.setOnCheckedChangeListener(null);
-            nativeOutputSwitch.setChecked(HudPrefs.isNativeOutputEnabled(this));
-            nativeOutputSwitch.setOnCheckedChangeListener(nativeOutputSwitchListener);
-        }
-        if (laneOutputSwitch != null) {
-            laneOutputSwitch.setOnCheckedChangeListener(null);
-            laneOutputSwitch.setChecked(HudPrefs.isLaneOutputEnabled(this));
-            laneOutputSwitch.setOnCheckedChangeListener(laneOutputSwitchListener);
-        }
-        if (distanceOutputSwitch != null) {
-            distanceOutputSwitch.setOnCheckedChangeListener(null);
-            distanceOutputSwitch.setChecked(HudPrefs.isDistanceOutputEnabled(this));
-            distanceOutputSwitch.setOnCheckedChangeListener(distanceOutputSwitchListener);
-        }
-        if (streetOutputSwitch != null) {
-            streetOutputSwitch.setOnCheckedChangeListener(null);
-            streetOutputSwitch.setChecked(HudPrefs.isStreetOutputEnabled(this));
-            streetOutputSwitch.setOnCheckedChangeListener(streetOutputSwitchListener);
-        }
-        if (manualModeSwitch != null) {
-            manualModeSwitch.setOnCheckedChangeListener(null);
-            manualModeSwitch.setChecked(manualModeEnabled);
-            manualModeSwitch.setOnCheckedChangeListener(manualModeSwitchListener);
-        }
-        refreshUiModeButtons();
-        if (adbBridgeGrantButton != null) {
-            adbBridgeGrantButton.setText(adbGrantInProgress ? "Grant ADB running" : "Grant ADB");
-            adbBridgeGrantButton.setEnabled(!adbGrantInProgress);
-        }
-        refreshLogcatControls();
-
-        boolean connected = hudOutput != null && hudOutput.isBound();
-        if (connectButton != null) {
-            connectButton.setEnabled(!connected
-                    && !sending);
-        }
-        if (startButton != null) {
-            startButton.setEnabled(connected
-                    && !sending);
-        }
-        if (stopButton != null) {
-            stopButton.setEnabled(connected && sending);
-        }
-        if (disconnectButton != null) {
-            disconnectButton.setEnabled(connected
-                    || NavHudLiveSender.get(this).isRunning());
-        }
-        boolean manualHud = canUseManualHud();
-        if (arrowsCuratedButton != null) {
-            arrowsCuratedButton.setEnabled(manualHud && !arrowCuratedMode);
-        }
-        if (arrowsRawButton != null) {
-            arrowsRawButton.setEnabled(manualHud && arrowCuratedMode);
-        }
-        if (curatedPrevButton != null) {
-            curatedPrevButton.setEnabled(manualHud && arrowCuratedMode);
-        }
-        if (curatedNextButton != null) {
-            curatedNextButton.setEnabled(manualHud && arrowCuratedMode);
-        }
-        boolean rawEnabled = manualHud && !arrowCuratedMode;
-        if (rawPngIdEdit != null) {
-            rawPngIdEdit.setEnabled(rawEnabled);
-        }
-        if (rawNativeIdEdit != null) {
-            rawNativeIdEdit.setEnabled(rawEnabled);
-        }
-        if (rawApplyButton != null) {
-            rawApplyButton.setEnabled(rawEnabled);
-        }
-        if (rawPngPrevButton != null) {
-            rawPngPrevButton.setEnabled(rawEnabled);
-        }
-        if (rawPngNextButton != null) {
-            rawPngNextButton.setEnabled(rawEnabled);
-        }
-        if (rawNativePrevButton != null) {
-            rawNativePrevButton.setEnabled(rawEnabled);
-        }
-        if (rawNativeNextButton != null) {
-            rawNativeNextButton.setEnabled(rawEnabled);
-        }
-        if (pngShowButton != null) {
-            pngShowButton.setEnabled(manualHud);
-        }
-        if (pngHideButton != null) {
-            pngHideButton.setEnabled(manualHud);
-        }
-        if (nativeShowButton != null) {
-            nativeShowButton.setEnabled(manualHud);
-        }
-        if (nativeHideButton != null) {
-            nativeHideButton.setEnabled(manualHud);
-        }
-        if (laneShowButton != null) {
-            laneShowButton.setEnabled(manualHud);
-        }
-        if (laneHideButton != null) {
-            laneHideButton.setEnabled(manualHud);
-        }
-        if (laneApplyButton != null) {
-            laneApplyButton.setEnabled(manualHud);
-        }
-        if (laneRandomizeButton != null) {
-            laneRandomizeButton.setEnabled(manualHud);
-        }
-        if (distanceApplyButton != null) {
-            distanceApplyButton.setEnabled(manualHud);
-        }
-        refreshStateView();
-        applyUiLanguage();
-    }
-
-    //builds this artifact here so callers do not duplicate protocol or UI construction details.
-    private String buildSafetyBanner() {
-        return "BYD HUD " + BuildConfig.VERSION_NAME
-                + " / code " + BuildConfig.VERSION_CODE
-                + "\n" + PNG_HIDE_CANDIDATE_LINE
-                + "\n" + CLOSE_ACTION_LINE
-                + "\n" + BACKGROUND_MODE_LINE
-                + "\n" + KILL_ON_STOP_DISABLED_LINE
-                + "\n" + BG_SETTINGS_LINE;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void appendStatus(String line) {
         Log.i(TAG, line);
-        if (statusView != null) {
-            statusLines.addLast(line);
-            while (statusLines.size() > STATUS_LOG_MAX_LINES) {
-                statusLines.removeFirst();
-            }
-            StringBuilder builder = new StringBuilder();
-            for (String statusLine : statusLines) {
-                builder.append(statusLine).append('\n');
-            }
-            statusView.setText(builder.toString());
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private TextView section(String text) {
-        TextView view = label(text, 18, true);
-        view.setPadding(0, 18, 0, 8);
-        return view;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private TextView label(String text, int sizeSp, boolean bold) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextSize(sizeSp);
-        if (bold) {
-            view.setTypeface(Typeface.DEFAULT_BOLD);
-        }
-        return view;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private TextView warningLabel(String text) {
-        TextView view = label(text, 14, true);
-        view.setTag(THEME_WARNING_TAG);
-        view.setTextColor(Color.RED);
-        view.setPadding(0, 8, 0, 8);
-        return view;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private EditText editText(String value) {
-        EditText editText = new EditText(this);
-        editText.setSingleLine(true);
-        editText.setText(value);
-        editText.setTextSize(16f);
-        return editText;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private EditText numberEditText(int value, String hint) {
-        EditText editText = editText(String.valueOf(value));
-        editText.setHint(hint);
-        editText.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
-        return editText;
-    }
-
-    //keeps incomplete user input out of the transport path until it is parseable.
-    private Integer parseIntOrNull(EditText editText, int min, int max) {
-        if (editText == null) {
-            return null;
-        }
-        String text = editText.getText().toString().trim();
-        if (text.isEmpty() || "+".equals(text) || "-".equals(text)) {
-            return null;
-        }
-        try {
-            int value = Integer.parseInt(text);
-            return Math.max(min, Math.min(max, value));
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private Button button(String text, View.OnClickListener listener) {
-        Button button = new Button(this);
-        button.setText(text);
-        button.setAllCaps(false);
-        button.setOnClickListener(listener);
-        return button;
-    }
-
-    //renders this UI section here so screen structure stays traceable during preview and car testing.
-    private Switch switchRow(LinearLayout parent, String text, boolean initial,
-            CompoundButton.OnCheckedChangeListener listener) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        TextView label = label(text, 14, false);
-        row.addView(label, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Switch sw = new Switch(this);
-        sw.setChecked(initial);
-        sw.setOnCheckedChangeListener(listener);
-        row.addView(sw);
-        parent.addView(row);
-        return sw;
-    }
-
-    //renders this UI section here so screen structure stays traceable during preview and car testing.
-    private LinearLayout row(View... views) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        for (View view : views) {
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                    0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    1f);
-            params.setMargins(2, 2, 2, 2);
-            row.addView(view, params);
-        }
-        return row;
     }
 
     //defines the ActiveAppRow module boundary so related behavior stays readable inside one unit.

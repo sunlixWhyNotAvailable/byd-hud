@@ -43,14 +43,6 @@ final class LogcatStreamBoundary {
                 !timestamp.isEmpty() && !occurrenceOverflow);
     }
 
-    int bufferedBytesForTest() {
-        return lineBytes;
-    }
-
-    int trackedLinesForTest() {
-        return occurrences.size();
-    }
-
     private void observeLine(byte[] bytes, int length) {
         String lineTimestamp = timestamp(bytes, length);
         if (lineTimestamp.isEmpty()) return;

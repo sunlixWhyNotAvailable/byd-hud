@@ -295,15 +295,13 @@ public final class NavInfoLogger {
             int index = intField(bqmn, "c");
             Object bqmq = elementAt(requiredField(bqmn, "b"), index);
             Object model = requiredField(bqmq, "i");
-            String maneuver = enumName(readField(model, "a"));
+            String maneuver = maneuverName(model);
             if (model == null || maneuver.isEmpty() || "UNKNOWN".equals(maneuver)) return;
             FRAME_MODEL.set(new ModelToken(model, maneuver, snapshot.epoch,
                     NEXT_RENDER_GENERATION.incrementAndGet()));
         } catch (Throwable error) {
             FRAME_MODEL.remove();
-            Log.w(TAG, "MANEUVER_MODEL_FAILED|profile=26.30|type="
-                    + error.getClass().getSimpleName()
-                    + "|message=" + clean(error.getMessage()));
+            reportManeuverCaptureFailure("model-26.30", error);
         }
     }
 
@@ -325,19 +323,40 @@ public final class NavInfoLogger {
     /** Captures each changed maneuver after GMaps has rendered its turn-card ImageView. */
     public static void captureManeuverView(Object viewValue, Object maneuverValue) {
         if (!(viewValue instanceof ImageView) || maneuverValue == null) return;
-        final ImageView view = (ImageView) viewValue;
-        final String maneuver = enumName(readField(maneuverValue, "a"));
-        captureManeuverViewValue(view, maneuver);
+        try {
+            captureManeuverViewValue((ImageView) viewValue, maneuverName(maneuverValue));
+        } catch (Throwable error) {
+            reportManeuverCaptureFailure("view", error);
+        }
     }
 
     /** Captures the 26.30 post-body Optional<Lbqmm> value via Lbqmm.a.name(). */
     public static void captureManeuverViewV26(Object viewValue, Object optionalValue) {
         if (!(viewValue instanceof ImageView) || optionalValue == null) return;
-        Object maneuverValue = readField(optionalValue, "a");
-        if (maneuverValue == null) return;
-        final ImageView view = (ImageView) viewValue;
-        final String maneuver = enumName(readField(maneuverValue, "a"));
-        captureManeuverViewValue(view, maneuver);
+        try {
+            Object maneuverValue = requiredField(optionalValue, "a");
+            captureManeuverViewValue((ImageView) viewValue, maneuverName(maneuverValue));
+        } catch (Throwable error) {
+            reportManeuverCaptureFailure("view-26.30", error);
+        }
+    }
+
+    private static String maneuverName(Object model) throws Exception {
+        Object value = requiredField(model, "a");
+        return value == null ? "" : enumName(value);
+    }
+
+    private static void reportManeuverCaptureFailure(String profile, Throwable error) {
+        String detail = "profile=" + profile + "|" + Log.getStackTraceString(error);
+        Log.w(TAG, "MANEUVER_CAPTURE_FAILED|profile=" + profile, error);
+        Messenger recipient;
+        String channel;
+        synchronized (STATE_LOCK) {
+            recipient = client;
+            channel = clientChannelId;
+        }
+        if (detail.length() > 1024) detail = detail.substring(0, 1010) + "...[truncated]";
+        diagnostic(recipient, channel, "maneuver_capture_failed", detail);
     }
 
     private static void captureManeuverViewValue(final ImageView view, String maneuver) {

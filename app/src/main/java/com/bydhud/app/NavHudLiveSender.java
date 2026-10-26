@@ -613,7 +613,7 @@ final class NavHudLiveSender {
                 checkpointOutput();
                 hudCheckWriterTransitionPending = true;
                 tbtPublisher.setHudCheckTransitionPending(true);
-                ++tbtLifecycleToken;
+                advanceTbtLifecycleToken();
                 long transition = ++hudCheckWriterTransitionGeneration;
                 stopManualOnWorker("hud-check-writer-change:" + safeReason(reason), false,
                         () -> {
@@ -1267,7 +1267,7 @@ final class NavHudLiveSender {
             manualTbtActive = true;
             manualTbtGeneration++;
             long generation = manualTbtGeneration;
-            ++tbtLifecycleToken;
+            advanceTbtLifecycleToken();
             tbtPublisher.beginRoute(
                     MANUAL_TBT_OWNER, generation,
                     !mapLiveState.running || HudPrefs.isSwitchToTbtOnHudStartEnabled(context), true,
@@ -1391,7 +1391,7 @@ final class NavHudLiveSender {
         manualTbtActive = false;
         latestManualSourceState = null;
         latestManualTbtState = null;
-        ++tbtLifecycleToken;
+        advanceTbtLifecycleToken();
         Runnable stopped =
                 () -> handler.post(() -> {
                     if (generation == manualTbtGeneration && !manualTbtActive
@@ -1525,6 +1525,7 @@ final class NavHudLiveSender {
     private String pendingManualPublishReason = "";
     private boolean manualPublishScheduled;
     private long tbtLifecycleToken;
+    private Runnable pendingTbtTeardownRetry;
     private boolean sourceSwitchInProgress;
     private long sourceSwitchToken;
     private String pendingSourceSwitchPackage = "";
@@ -1555,7 +1556,6 @@ final class NavHudLiveSender {
     private final Runnable wazeDirectFrameDispatch = this::dispatchLatestWazeDirectFrame;
     private String activePackage = "";
     private volatile boolean active;
-    private boolean sendLoopScheduled;
     private boolean runtimeReinitInProgress;
     private String pendingReinitStartPackage = "";
     private String pendingReinitStartReason = "";
@@ -1689,18 +1689,6 @@ final class NavHudLiveSender {
         gmapsDirectTimedOut = true;
         log("gmaps direct frame timeout; no legacy capture fallback");
     }
-
-    private final Runnable sendLoop = new Runnable() {
-        @Override
-        //keeps this HUD step isolated so cluster payload behavior stays predictable.
-        public void run() {
-            sendLoopScheduled = false;
-            if (!active) {
-                return;
-            }
-            scheduleSendLoop();
-        }
-    };
 
     private static final class SurfaceHandoffStart {
         final CountDownLatch ready = new CountDownLatch(1);
@@ -2701,7 +2689,7 @@ final class NavHudLiveSender {
         if (newRoute) {
             NavigatorRouteReceiver.sourceConnected(ownerPackage,
                     "waze-route:" + sessionGeneration + ":" + wazeRouteGeneration, reason);
-            ++tbtLifecycleToken;
+            advanceTbtLifecycleToken();
             if (wazeTbtRouteStartedAtMs <= 0L) {
                 wazeTbtRouteStartedAtMs = SystemClock.elapsedRealtime();
             }
@@ -4026,7 +4014,7 @@ final class NavHudLiveSender {
         ensureGMapsDirectSession("navigation-started:" + safeReason(reason));
         eventGMapsDirectSession("navigation_started", reason);
         logRouteStartOutputPreferences("gmaps", sessionGeneration, reason);
-        ++tbtLifecycleToken;
+        advanceTbtLifecycleToken();
         gmapsTbtRouteStartedAtMs = SystemClock.elapsedRealtime();
         if (shouldClearGMapsSpeedLimitOnDirectStart(reason)) {
             clearDirectSpeedLimit(ownerPackage);
@@ -4472,7 +4460,7 @@ final class NavHudLiveSender {
             if (handoff && tbtPublisher.replaceDirectRoute(
                     tbtPublisher.ownerPackage(), tbtPublisher.ownerGeneration(),
                     next, generation, false, hudOwner, restoreReason, outputFrame, null)) {
-                ++tbtLifecycleToken;
+                advanceTbtLifecycleToken();
                 log("tbt owner handed off package=" + next
                         + " reason=" + safeReason(reason));
                 return true;
@@ -4493,7 +4481,7 @@ final class NavHudLiveSender {
             if (handoff && tbtPublisher.replaceDirectRoute(
                     tbtPublisher.ownerPackage(), tbtPublisher.ownerGeneration(),
                     next, generation, false, hudOwner, restoreReason, outputFrame, null)) {
-                ++tbtLifecycleToken;
+                advanceTbtLifecycleToken();
                 log("tbt owner handed off package=" + next
                         + " reason=" + safeReason(reason));
                 return true;
@@ -4502,7 +4490,7 @@ final class NavHudLiveSender {
             if (outputFrame != null) tbtPublisher.publishFrame(
                     next, generation, outputFrame, restoreReason);
         }
-        ++tbtLifecycleToken;
+        advanceTbtLifecycleToken();
         log("tbt owner resumed package=" + next + " reason=" + safeReason(reason));
         return true;
     }
@@ -4611,7 +4599,7 @@ final class NavHudLiveSender {
         boolean hudOwner = isHudOutputOwner(GMapsDirectChannel.OWNER_PACKAGE);
         boolean lifecycleOwnsClear = (sourceSwitchInProgress || stopInProgress)
                 && GMapsDirectChannel.PACKAGE_NAME.equals(activePackage);
-        if (!lifecycleOwnsClear) ++tbtLifecycleToken;
+        if (!lifecycleOwnsClear) advanceTbtLifecycleToken();
         Runnable finishTbt = () -> handler.post(() -> {
             if (!gmapsDirectRouteEnded) return;
             handoffOrEndDirectRoute(
@@ -4638,7 +4626,6 @@ final class NavHudLiveSender {
         gmapsDirectStateSessionGeneration = callbackGeneration;
         gmapsDirectRouteEnded = true;
         gmapsTbtRouteStartedAtMs = 0L;
-        if (hudOwner) resetLatestPayload();
         NavRouteStateStore.get(context).markRouteEnded(
                 GMapsDirectChannel.PACKAGE_NAME,
                 "gmaps-direct-ended:" + safeReason(reason),
@@ -4799,7 +4786,7 @@ final class NavHudLiveSender {
         boolean hudOwner = isHudOutputOwner(ownerPackage);
         boolean lifecycleOwnsClear = (sourceSwitchInProgress || stopInProgress)
                 && ownerPackage.equals(activePackage);
-        if (!lifecycleOwnsClear) ++tbtLifecycleToken;
+        if (!lifecycleOwnsClear) advanceTbtLifecycleToken();
         Runnable finishTbt = () -> handler.post(() -> {
             if (!wazeDirectRouteEnded) return;
             handoffOrEndDirectRoute(
@@ -4829,7 +4816,6 @@ final class NavHudLiveSender {
         wazeTbtRouteStartedAtMs = 0L;
         wazeRouteGeneration++;
         refreshActiveWazeMapSourceMode();
-        if (hudOwner) resetLatestPayload();
         long now = SystemClock.elapsedRealtime();
         NavRouteStateStore.get(context).markRouteEnded(
                 WAZE_PACKAGE, "direct-navigation-ended", now);
@@ -5410,7 +5396,7 @@ final class NavHudLiveSender {
             stopped = true;
         }
         if (!stopped) return;
-        long teardownToken = ++tbtLifecycleToken;
+        long teardownToken = advanceTbtLifecycleToken();
         if (rebind || tbtPublisher.isRouteActive()) return;
         if (explicitTeardown) {
             tbtPublisher.sendTeardownStatus();
@@ -5447,7 +5433,21 @@ final class NavHudLiveSender {
     }
 
     private void confirmTbtTeardown(String packageName, long lifecycleToken) {
+        if (Looper.myLooper() != handler.getLooper()) {
+            if (!handler.post(() -> confirmTbtTeardown(packageName, lifecycleToken))) {
+                log("tbt teardown confirmation could not reach owner thread token="
+                        + lifecycleToken);
+            }
+            return;
+        }
         final String normalized = normalizePackage(packageName);
+        if (lifecycleToken != tbtLifecycleToken || tbtPublisher.isRouteActive()) {
+            log("stale tbt teardown confirmation suppressed package=" + normalized
+                    + " token=" + lifecycleToken + " current=" + tbtLifecycleToken
+                    + " routeActive=" + tbtPublisher.isRouteActive());
+            return;
+        }
+        cancelPendingTbtTeardownRetry();
         Thread worker = new Thread(() -> {
             NavAppTaskScanner.TeardownEvidence first =
                     NavAppTaskScanner.confirmTeardown(context, normalized);
@@ -5461,20 +5461,48 @@ final class NavHudLiveSender {
                 if (shouldApplyTeardownForTest(
                         lifecycleToken, tbtLifecycleToken,
                         tbtPublisher.isRouteActive(), first.positive(), second.positive())) {
+                    cancelPendingTbtTeardownRetry();
                     tbtPublisher.sendTeardownStatus();
                 } else if (shouldRetryTeardownForTest(
                         lifecycleToken, tbtLifecycleToken,
                         tbtPublisher.isRouteActive(),
                         first.adbAvailable, second.adbAvailable,
                         first.positive(), second.positive())) {
-                    handler.postDelayed(
-                            () -> confirmTbtTeardown(normalized, lifecycleToken),
-                            TBT_TEARDOWN_RETRY_MS);
+                    scheduleTbtTeardownRetry(normalized, lifecycleToken);
                 }
             });
         }, "BydHudTbtTeardown");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    private long advanceTbtLifecycleToken() {
+        cancelPendingTbtTeardownRetry();
+        return ++tbtLifecycleToken;
+    }
+
+    private void cancelPendingTbtTeardownRetry() {
+        Runnable retry = pendingTbtTeardownRetry;
+        if (retry == null) return;
+        handler.removeCallbacks(retry);
+        pendingTbtTeardownRetry = null;
+    }
+
+    private void scheduleTbtTeardownRetry(String packageName, long lifecycleToken) {
+        cancelPendingTbtTeardownRetry();
+        Runnable retry = new Runnable() {
+            @Override
+            public void run() {
+                if (pendingTbtTeardownRetry == this) pendingTbtTeardownRetry = null;
+                confirmTbtTeardown(packageName, lifecycleToken);
+            }
+        };
+        pendingTbtTeardownRetry = retry;
+        if (!handler.postDelayed(retry, TBT_TEARDOWN_RETRY_MS)
+                && pendingTbtTeardownRetry == retry) {
+            pendingTbtTeardownRetry = null;
+            log("tbt teardown retry could not be queued token=" + lifecycleToken);
+        }
     }
 
     static boolean shouldApplyTeardownForTest(
@@ -5496,7 +5524,7 @@ final class NavHudLiveSender {
 
     private void advanceTbtLifecycleForFirstFrame() {
         if (shouldAdvanceTbtLifecycleForTest(tbtPublisher.isRouteActive())) {
-            ++tbtLifecycleToken;
+            advanceTbtLifecycleToken();
         }
     }
 
@@ -5655,7 +5683,6 @@ final class NavHudLiveSender {
             return;
         }
         if ("ui-start".equals(reason) || !packageName.equals(previousPackage)) {
-            resetLatestPayload();
             HudDeliveryStatus.reset();
         }
         active = true;
@@ -5675,7 +5702,6 @@ final class NavHudLiveSender {
         } else {
             log("unsupported HUD package remains log-only package=" + packageName);
         }
-        scheduleSendLoop();
     }
 
     private void beginSourceSwitch(String previousPackage, String nextPackage, String reason) {
@@ -5716,7 +5742,7 @@ final class NavHudLiveSender {
         boolean retainRoute = retainRequested && shouldRetainRouteForTbt(previousPackage);
         boolean forceTeardown = pendingForcedDirectTeardown;
         if (!retainRoute || forceTeardown) {
-            ++tbtLifecycleToken;
+            advanceTbtLifecycleToken();
             handoffOrEndDirectRoute(
                     previousPackage, tbtGeneration,
                     "source-switch:" + nextPackage, !forceTeardown);
@@ -5729,7 +5755,6 @@ final class NavHudLiveSender {
         sourceSwitchInProgress = false;
         pendingSourceSwitchPackage = "";
         pendingSourceSwitchReason = "";
-        resetLatestPayload();
         HudDeliveryStatus.reset();
         if (!nextPackage.isEmpty()) {
             startOnMain(nextPackage, nextReason);
@@ -5920,16 +5945,14 @@ final class NavHudLiveSender {
             setWazeSurfaceSourceSelected(false,
                     "waze-stop-retain:" + safeReason(reason));
         }
-        handler.removeCallbacks(sendLoop);
         if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
             cancelGMapsDirectTimeout();
             gmapsDirectTimedOut = false;
         }
-        sendLoopScheduled = false;
         active = false;
         stopInProgress = isDirectNavigator(packageName);
         if (WAZE_PACKAGE.equals(packageName)) {
-            long teardownToken = ++tbtLifecycleToken;
+            long teardownToken = advanceTbtLifecycleToken();
             if (retainTbtRoute) {
                 tbtPublisher.updateOwnerHudPriority(
                         WAZE_PACKAGE, wazeTbtGeneration, false);
@@ -5962,7 +5985,7 @@ final class NavHudLiveSender {
                     }));
         }
         if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
-            long teardownToken = ++tbtLifecycleToken;
+            long teardownToken = advanceTbtLifecycleToken();
             if (retainTbtRoute) {
                 tbtPublisher.updateOwnerHudPriority(
                         GMapsDirectChannel.PACKAGE_NAME, gmapsTbtGeneration, false);
@@ -5997,7 +6020,6 @@ final class NavHudLiveSender {
                         completeNavigationStop();
                     }));
         }
-        resetLatestPayload();
         if (!isDirectNavigator(packageName)) {
             hudOutput.selectNavigationSource(
                     HudOutputCoordinator.Source.NONE,
@@ -6057,18 +6079,12 @@ final class NavHudLiveSender {
         log("HUD demotion observer reconciled package=" + packageName);
     }
 
-    //clears state here so stale navigation output is removed before new evidence arrives.
-    private void resetLatestPayload() {
-    }
-
     //resets stale post-update state before the first new navigation session binds SOME/IP again.
     private void resetRuntimeAfterPackageReplace(String packageName, String reason) {
         WazeStartAdmission.PROCESS.invalidate();
-        handler.removeCallbacks(sendLoop);
         runtimeReinitInProgress = true;
         pendingReinitStartPackage = packageName;
         pendingReinitStartReason = reason;
-        sendLoopScheduled = false;
         String hudOwner = packageReinitOutputOwnerForTest(
                 active, activePackage, tbtPublisher.isRouteActive(),
                 tbtPublisher.ownerPackage());
@@ -6076,7 +6092,7 @@ final class NavHudLiveSender {
         String tbtOwner = tbtPublisher.isRouteActive()
                 ? tbtPublisher.ownerPackage() : "";
         long tbtGeneration = tbtPublisher.ownerGeneration();
-        long teardownToken = ++tbtLifecycleToken;
+        long teardownToken = advanceTbtLifecycleToken();
         active = false;
         if (isDirectNavigator(hudOwner)) {
             hudOutput.endNavigationOutput(
@@ -6120,7 +6136,6 @@ final class NavHudLiveSender {
         endGMapsDirectSession("package-replaced-reinit");
         resetGMapsDirectSessionState();
         gmapsDirectChannel.stop("package-replaced-reinit");
-        resetLatestPayload();
         firstNavAfterPackageReplaceAwaitingSomeIp = true;
         firstNavAfterPackageReplaceConnectStartMs = SystemClock.elapsedRealtime();
         log("firstNavStartAfterPackageReplace package=" + packageName
@@ -6136,15 +6151,6 @@ final class NavHudLiveSender {
                 "package-replaced-reinit");
         hudOutput.resetTransport("package-replaced-reinit");
         finishPackageReinitAndRestart();
-    }
-
-    //starts or schedules work here so lifecycle recovery follows one controlled path.
-    private void scheduleSendLoop() {
-        if (sendLoopScheduled) {
-            return;
-        }
-        sendLoopScheduled = true;
-        handler.postDelayed(sendLoop, SEND_INTERVAL_MS);
     }
 
     //restarts only after the package-replace transport reset has released stale bindings.

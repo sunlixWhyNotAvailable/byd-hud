@@ -78,6 +78,7 @@ internal fun updateStorageLogShareOperation(
 
 internal class StorageLogShareControl(val operationId: String) {
     @Volatile var cancelled = false
+    @Volatile var cancellationConfirmed = false
     @Volatile var worker: Thread? = null
     @Volatile var archive: File? = null
 
@@ -203,6 +204,8 @@ object StorageLogShareWorkflow {
         report: SentryLogReport?,
         control: StorageLogShareControl
     ) {
+        var resumeAfterCancelRace = false
+        var reconcilingRestoredCancellation = false
         try {
             if (control.cancelled) return
             LogShareZip.attachProgressListener { phase ->
@@ -214,13 +217,26 @@ object StorageLogShareWorkflow {
             }
             val restored = find(control.operationId)
             if (restored?.phase == StorageLogSharePhase.CANCELLING) {
-                control.cancelled = true
                 if (ShellWorkClient.hasRequest(app, "log", control.operationId)) {
                     val job = ShellWorkClient.job(app, "log", control.operationId)
-                    ShellWorkClient.cancel(app, job)
-                    ShellWorkClient.await(app, job, null)
+                    reconcilingRestoredCancellation = true
+                    val result = ShellWorkExports.cancelAndConfirm(app, job)
+                    reconcilingRestoredCancellation = false
+                    when (result.optString("state")) {
+                        "CANCELLED" -> {
+                            control.cancellationConfirmed = true
+                            control.cancelled = true
+                            return
+                        }
+                        "SUCCEEDED" -> Unit // Attach to the completed same-ID job below.
+                        else -> throw shellTerminalFailure(result)
+                    }
+                } else {
+                    // No shell request was submitted, so there is no remote work left to stop.
+                    control.cancellationConfirmed = true
+                    control.cancelled = true
+                    return
                 }
-                return
             }
             if (restored?.phase == StorageLogSharePhase.WAITING_FOR_SHARE && restored.currentFile.isNotEmpty()) {
                 val file = File(restored.currentFile)
@@ -239,15 +255,43 @@ object StorageLogShareWorkflow {
                     result.detail, result.eventId)
                 return
             }
-            val archive = LogShareZip.createIndependent(
+            var archive = LogShareZip.createIndependent(
                 app, submittedDays, if (toDeveloper) control.operationId else "", control.operationId)
             update(control.operationId) { it.copy(
                 collectionOutcome = archive.outcome.name,
                 patchReportsIncomplete = archive.patchReportsIncomplete
             ) }
             control.archive = archive.file
-            if (control.cancelled || Thread.currentThread().isInterrupted) {
-                LogShareZip.deleteArtifact(archive.file)
+            if (control.cancelled) {
+                val cancellation = confirmCancellation(app, control)
+                val status = cancellation.optString("state")
+                when (status) {
+                    "CANCELLED" -> return
+                    "SUCCEEDED" -> {
+                        // The worker completed before cancellation took effect. Reattach to
+                        // that same job and make its saved result available to the caller.
+                        control.cancelled = false
+                        Thread.interrupted()
+                        archive = LogShareZip.createIndependent(
+                            app, submittedDays, if (toDeveloper) control.operationId else "", control.operationId)
+                        control.archive = archive.file
+                    }
+                    "FAILED", "INTERRUPTED" -> {
+                        control.cancelled = false
+                        val shellFailure = shellTerminalFailure(cancellation)
+                        AppEventLogger.event(app, "storage_log_share_cancel_failed id=${safe(control.operationId)} " +
+                            diagnostic(shellFailure, "cancellation"))
+                        throw shellFailure
+                    }
+                    else -> throw java.io.IOException("Unexpected shell cancellation state: $status")
+                }
+            } else if (Thread.currentThread().isInterrupted) {
+                if (archive.outcome == LogShareZip.CollectionOutcome.UNKNOWN) return
+                throw InterruptedException("log export worker interrupted")
+            }
+            if (archive.outcome == LogShareZip.CollectionOutcome.UNKNOWN) {
+                update(control.operationId) { it.copy(detail = archive.detail) }
+                log(control.operationId, "shell export outcome unknown detail=${safe(archive.detail)}")
                 return
             }
             if (!archive.ok || archive.file == null) {
@@ -256,9 +300,10 @@ object StorageLogShareWorkflow {
             }
             val detail = "${archive.file.name} ${archive.detail}".trim()
             if (restored?.destination == ArchiveExportDestination.SAVE_AS) {
-                if (!transition(control, StorageLogSharePhase.WAITING_FOR_DESTINATION, detail,
+                if (!transitionAfterCompletedShellWork(control, app,
+                        StorageLogSharePhase.WAITING_FOR_DESTINATION, detail,
                         archive.file.absolutePath, archive.file.length())) {
-                    LogShareZip.deleteArtifact(archive.file)
+                    if (!control.cancellationConfirmed) LogShareZip.deleteArtifact(archive.file)
                     return
                 }
                 if (!MainActivity.queueArchiveDocumentSave(control.operationId, false, archive.file.name)) {
@@ -267,9 +312,10 @@ object StorageLogShareWorkflow {
                 return
             }
             if (!toDeveloper) {
-                if (!transition(control, StorageLogSharePhase.WAITING_FOR_SHARE, detail,
+                if (!transitionAfterCompletedShellWork(control, app,
+                        StorageLogSharePhase.WAITING_FOR_SHARE, detail,
                         archive.file.absolutePath, archive.file.length())) {
-                    LogShareZip.deleteArtifact(archive.file)
+                    if (!control.cancellationConfirmed) LogShareZip.deleteArtifact(archive.file)
                     return
                 }
                 MainActivity.queueStorageShare(archive.file, submittedDays, control.operationId)
@@ -280,9 +326,9 @@ object StorageLogShareWorkflow {
                     archive.file.absolutePath, archive.file.length())
                 return
             }
-            if (!transition(control, StorageLogSharePhase.UPLOADING, detail,
+            if (!transitionAfterCompletedShellWork(control, app, StorageLogSharePhase.UPLOADING, detail,
                     archive.file.absolutePath, archive.file.length())) {
-                LogShareZip.deleteArtifact(archive.file)
+                if (!control.cancellationConfirmed) LogShareZip.deleteArtifact(archive.file)
                 return
             }
             val uploadControl = StorageLogShareControl(control.operationId).apply {
@@ -305,6 +351,10 @@ object StorageLogShareWorkflow {
                             app, archive.file, submittedDays, control.operationId, report!!)
                         publishUploadResultIfOwned(
                             uploadControl, uploadGeneration, upload, app)
+                    } catch (unknown: InstrumentProxyManager.ShellWorkOutcomeUnknownException) {
+                        update(control.operationId) { it.copy(detail = unknown.toString()) }
+                        AppEventLogger.event(app, "storage_log_upload_outcome_unknown " +
+                            diagnostic(unknown, "upload"))
                     } catch (error: Exception) {
                         publishUploadResultIfOwned(uploadControl, uploadGeneration,
                             SentryLogUploader.Result(false, "", error.toString()), app)
@@ -332,20 +382,76 @@ object StorageLogShareWorkflow {
                     }
                 }
             }
+        } catch (unknown: InstrumentProxyManager.ShellWorkOutcomeUnknownException) {
+            update(control.operationId) { it.copy(detail = unknown.toString()) }
+            AppEventLogger.event(app, "storage_log_share_outcome_unknown " + diagnostic(unknown, "export"))
         } catch (error: Exception) {
-            if (!control.cancelled) {
+            if (reconcilingRestoredCancellation) {
+                update(control.operationId) { it.copy(
+                    phase = StorageLogSharePhase.CANCELLING,
+                    detail = error.toString()
+                ) }
+                AppEventLogger.event(app, "storage_log_share_cancel_pending " +
+                    diagnostic(error, "restore-cancellation"))
+            } else if (!control.cancelled) {
                 LogShareZip.deleteArtifact(control.archive)
                 finish(control.operationId, StorageLogSharePhase.FAILED,
                     "${error.javaClass.simpleName}: ${error.message.orEmpty()}")
+            } else {
+                try {
+                    val cancellation = confirmCancellation(app, control)
+                    when (cancellation.optString("state")) {
+                        "CANCELLED" -> Unit
+                        "SUCCEEDED" -> {
+                            control.cancelled = false
+                            resumeAfterCancelRace = true
+                            update(control.operationId) { it.copy(
+                                phase = StorageLogSharePhase.CANCELLING,
+                                detail = "Shell work completed before cancellation was confirmed"
+                            ) }
+                        }
+                        "FAILED", "INTERRUPTED" -> {
+                            control.cancelled = false
+                            LogShareZip.deleteArtifact(control.archive)
+                            val shellFailure = shellTerminalFailure(cancellation)
+                            AppEventLogger.event(app, "storage_log_share_cancel_failed id=${safe(control.operationId)} " +
+                                diagnostic(shellFailure, "cancellation"))
+                            finish(control.operationId, StorageLogSharePhase.FAILED,
+                                "${shellFailure.javaClass.simpleName}: ${shellFailure.message.orEmpty()}")
+                        }
+                        else -> update(control.operationId) { it.copy(detail = error.toString()) }
+                    }
+                } catch (unknown: InstrumentProxyManager.ShellWorkOutcomeUnknownException) {
+                    update(control.operationId) { it.copy(detail = unknown.toString()) }
+                    AppEventLogger.event(app, "storage_log_share_cancel_outcome_unknown " +
+                        diagnostic(unknown, "cancellation"))
+                } catch (reconcileFailure: Exception) {
+                    update(control.operationId) { it.copy(detail = reconcileFailure.toString()) }
+                    AppEventLogger.event(app, "storage_log_share_cancel_pending " +
+                        diagnostic(reconcileFailure, "cancellation-reconciliation"))
+                }
             }
         } finally {
             LogShareZip.clearProgressListener()
             control.worker = null
             Thread.interrupted()
-            if (control.cancelled) {
+            if (control.cancelled && control.cancellationConfirmed) {
                 completeCancellation(control)
             } else if (find(control.operationId)?.phase != StorageLogSharePhase.OVERSIZED) {
                 releasePreparation(control)
+            }
+            if (resumeAfterCancelRace) {
+                restorationWorker.execute {
+                    while (!HudPrefs.isUserShutdownActive(app)) {
+                        if (startWithDestination(app, submittedDays,
+                                if (toDeveloper) ArchiveExportDestination.DEVELOPER else ArchiveExportDestination.SHARE,
+                                find(control.operationId)?.foundFiles ?: 0,
+                                find(control.operationId)?.knownBytes ?: 0L,
+                                report, find(control.operationId)?.selectionRevision ?: 0,
+                                control.operationId)) break
+                        Thread.sleep(100)
+                    }
+                }
             }
         }
     }
@@ -367,6 +473,7 @@ object StorageLogShareWorkflow {
         if (control.operationId != operationId) return false
         if (current.phase == StorageLogSharePhase.OVERSIZED) {
             control.cancelled = true
+            control.cancellationConfirmed = true
             completeCancellation(control)
         } else {
             update(operationId) { it.copy(phase = StorageLogSharePhase.CANCELLING) }
@@ -648,6 +755,37 @@ object StorageLogShareWorkflow {
         return true
     }
 
+    private fun transitionAfterCompletedShellWork(
+        control: StorageLogShareControl,
+        app: Context,
+        phase: StorageLogSharePhase,
+        detail: String,
+        currentFile: String,
+        archiveBytes: Long
+    ): Boolean {
+        if (transition(control, phase, detail, currentFile, archiveBytes)) return true
+        if (!control.cancelled) return false
+        val cancellation = confirmCancellation(app, control)
+        when (cancellation.optString("state")) {
+            "CANCELLED" -> return false
+            "SUCCEEDED" -> {
+                control.cancelled = false
+                Thread.interrupted()
+                return transition(control, phase, detail, currentFile, archiveBytes)
+            }
+            "FAILED", "INTERRUPTED" -> {
+                control.cancelled = false
+                val error = shellTerminalFailure(cancellation)
+                finish(control.operationId, StorageLogSharePhase.FAILED,
+                    "${error.javaClass.simpleName}: ${error.message.orEmpty()}")
+                AppEventLogger.event(app, "storage_log_share_completion_failed id=${safe(control.operationId)} " +
+                    diagnostic(error, "completion"))
+                return false
+            }
+            else -> return false
+        }
+    }
+
     @Synchronized
     private fun finish(
         operationId: String,
@@ -674,6 +812,7 @@ object StorageLogShareWorkflow {
 
     @Synchronized
     private fun completeCancellation(control: StorageLogShareControl) {
+        if (!control.cancellationConfirmed) return
         val current = find(control.operationId)
         if (current != null && current.phase != StorageLogSharePhase.CANCELLED) {
             LogShareZip.deleteArtifact(control.archive)
@@ -682,6 +821,38 @@ object StorageLogShareWorkflow {
         }
         releasePreparation(control)
     }
+
+    private fun confirmCancellation(app: Context, control: StorageLogShareControl): org.json.JSONObject {
+        val wasInterrupted = Thread.interrupted()
+        try {
+            if (!ShellWorkClient.hasRequest(app, "log", control.operationId)) {
+                control.cancellationConfirmed = true
+                return org.json.JSONObject().put("state", "CANCELLED")
+            }
+            val job = ShellWorkClient.job(app, "log", control.operationId)
+            val state = ShellWorkExports.cancelAndConfirm(app, job)
+            if (state.optString("state") == "CANCELLED") control.cancellationConfirmed = true
+            return state
+        } finally {
+            if (wasInterrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun shellTerminalFailure(state: org.json.JSONObject): java.io.IOException {
+        val status = state.optString("state", "unknown")
+        val result = state.optJSONObject("result")
+        val detail = result?.optString("error")?.takeIf { it.isNotEmpty() }
+            ?: "Shell work $status"
+        val error = java.io.IOException(detail)
+        result?.optString("diagnostic")?.takeIf { it.isNotEmpty() }?.let {
+            error.addSuppressed(java.io.IOException(it))
+        }
+        return error
+    }
+
+    private fun diagnostic(error: Throwable, stage: String): String =
+        FailureDiagnostics.format(error, "storage-log-share", stage)
+            .replace('\n', ' ').replace('\r', ' ')
 
     @Synchronized
     private fun addSnapshot(snapshot: StorageLogShareSnapshot) {

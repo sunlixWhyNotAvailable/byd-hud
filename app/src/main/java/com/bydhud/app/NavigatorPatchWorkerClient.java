@@ -90,12 +90,23 @@ final class NavigatorPatchWorkerClient {
                         ? NavigatorPatchStore.OP_PATCH : "INSPECT",
                 startedAt,
                 new org.json.JSONObject());
-        File job = null;
+        File job = ShellWorkClient.job(context, "patch", id);
+        boolean primary = !directory && (transaction != null
+                || output != null && output.getName().contains("-worker-scan-"));
         boolean reportFinished = false;
         try {
-            job = ShellWorkClient.prepare(context, "patch", id, input);
-        boolean primary = !directory && (transaction != null || output != null && output.getName().contains("-worker-scan-"));
-        if (primary) ShellRuntimeSession.prefs(context).edit().putString("patch_" + profile.id, job.getPath()).commit();
+            try {
+                job = ShellWorkClient.prepare(context, "patch", id, input);
+            } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
+                if (Thread.currentThread().isInterrupted()) throw unknown;
+                AppEventLogger.event(context,
+                        FailureDiagnostics.format(unknown, operation, "registration-awaiting-result"));
+                // await reconciles the saved request and registration cursor before launch.
+            }
+        if (primary && !ShellRuntimeSession.prefs(context).edit()
+                .putString("patch_" + profile.id, job.getPath()).commit()) {
+            throw new IOException("Could not persist patch worker recovery identity: " + id);
+        }
         org.json.JSONObject completed = ShellWorkClient.await(context, job, null);
         if (completed.has("report")) NavigatorPatchReportStore.recordStage(context, operation,
                 "SHELL_REPORT", "SUCCESS", "Retained shell worker report", completed.getJSONObject("report"));
@@ -112,16 +123,22 @@ final class NavigatorPatchWorkerClient {
         }
         return request;
         } catch (Exception failure) {
-            if (standaloneInspection && !reportFinished) {
+            if (failure instanceof InstrumentProxyManager.ShellWorkOutcomeUnknownException) {
+                if (primary && !ShellRuntimeSession.prefs(context).edit()
+                        .putString("patch_" + profile.id, job.getPath()).commit()) {
+                    failure.addSuppressed(new IOException(
+                            "Could not persist patch worker recovery identity: " + id));
+                }
+            } else if (standaloneInspection && !reportFinished) {
                 try {
                     NavigatorPatchReportStore.finish(context, operation, "FAILED",
-                            failure.getMessage() == null ? failure.getClass().getSimpleName()
-                                    : failure.getMessage());
+                            FailureDiagnostics.formatBounded(failure, operation, "inspection", 1000));
                 } catch (IOException reportFailure) {
-                    reportFailure.addSuppressed(failure);
-                    throw reportFailure;
+                    failure.addSuppressed(reportFailure);
                 }
             }
+            AppEventLogger.event(context,
+                    FailureDiagnostics.format(failure, operation, "patch-worker"));
             throw failure;
         }
     }
@@ -138,15 +155,29 @@ final class NavigatorPatchWorkerClient {
         String path = ShellRuntimeSession.prefs(context).getString("patch_" + profile.id, "");
         if (path.isEmpty()) return false;
         NavigatorPatchStore.OperationSnapshot state = NavigatorPatchStore.operation(context, profile);
-        if (state.operationToken.isEmpty() || !state.busy()
+        if (!state.busy()
                 || NavigatorPatchStore.READY_TO_INSTALL.equals(state.phase)) return false;
         try {
+            if (state.operationToken.isEmpty())
+                throw new IOException("Busy patch operation token is missing for " + profile.id);
             org.json.JSONObject expected = ShellWorkClient.expected(context, new File(path));
             org.json.JSONObject input = expected.optJSONObject("input");
-            return input != null && state.operationToken.equals(input.optString("operation"))
-                    && !ShellWorkClient.terminal(ShellWorkClient.state(context,
-                    new File(path)).optString("state"));
-        } catch (Exception unavailable) { return false; }
+            if (input == null || input.optString("operation").isEmpty())
+                throw new IOException("Saved patch worker operation identity is missing");
+            if (!state.operationToken.equals(input.optString("operation"))) return false;
+            try {
+                return !ShellWorkClient.terminal(ShellWorkClient.state(context,
+                        new File(path)).optString("state"));
+            } catch (IOException unavailable) {
+                AppEventLogger.event(context,
+                        FailureDiagnostics.format(unavailable, state.operationToken, "patch-pending-state"));
+                return true;
+            }
+        } catch (Exception unavailable) {
+            AppEventLogger.event(context,
+                    FailureDiagnostics.format(unavailable, state.operationToken, "patch-pending-expectation"));
+            return true;
+        }
     }
 
     /** Runs before mayRestore so a device reboot cannot strand navigator UI in a busy phase. */

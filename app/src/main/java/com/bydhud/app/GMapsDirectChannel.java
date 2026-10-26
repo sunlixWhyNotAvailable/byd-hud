@@ -311,6 +311,7 @@ final class GMapsDirectChannel {
                     + " senderUid=" + message.sendingUid
                     + " detail=" + diagnosticText(data.getString("detail"), 1024));
             String stage = diagnosticText(data.getString("stage"), 64);
+            if ("maneuver_capture_failed".equals(stage)) return true;
             registrationOutcome = stage;
             listener.onLog("identity_reply channelId=" + channelId + " "
                     + GMapsIdentityDiagnostics.replySender(context, message.sendingUid));
