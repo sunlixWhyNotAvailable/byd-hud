@@ -1411,6 +1411,10 @@ public final class MainActivity extends ComponentActivity {
         saveMapSettings(HudPrefs.mapSettings(this).withValue(control, value), "map-geometry-change");
     }
 
+    public void composeRestoreMapLayoutDefaults() {
+        saveMapSettings(HudPrefs.mapSettings(this).withDefaultGeometry(), "map-geometry-defaults");
+    }
+
     public void composeStartMapLive() {
         if (!activityResumed || destroyed || exitRequested
                 || ShanghaiTestController.snapshot().isBusy()) return;

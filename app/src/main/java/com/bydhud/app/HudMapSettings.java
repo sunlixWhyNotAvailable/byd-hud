@@ -33,8 +33,9 @@ public final class HudMapSettings {
         this.preset = normalizePreset(preset);
         this.updateRateHz = normalizeUpdateRateHz(updateRateHz);
         // Preserve the removed preset's visible geometry as Custom on upgrade.
-        this.custom = preset == LEGACY_PRESET_SMALLER_CENTER || custom == null
-                ? Geometry.defaults() : custom;
+        this.custom = preset == LEGACY_PRESET_SMALLER_CENTER
+                ? new Geometry(0, -8, 85, 0, 30, 70)
+                : custom == null ? Geometry.defaults() : custom;
     }
 
     public static HudMapSettings defaults() {
@@ -65,6 +66,10 @@ public final class HudMapSettings {
 
     public HudMapSettings withUpdateRateHz(int value) {
         return new HudMapSettings(mode, preset, custom, value);
+    }
+
+    public HudMapSettings withDefaultGeometry() {
+        return new HudMapSettings(mode, PRESET_CUSTOM, Geometry.defaults(), updateRateHz);
     }
 
     static int normalizeUpdateRateHz(int value) {
@@ -116,7 +121,7 @@ public final class HudMapSettings {
         }
 
         static Geometry defaults() {
-            return new Geometry(0, -8, 85, 0, 30, 70);
+            return new Geometry(142, 12, 110, -6, -31, 65);
         }
 
         public float value(int control) {

@@ -894,7 +894,7 @@ public final class NavigatorMapCapture {
             Context app,
             HudMapProfile.Source source) {
         long savedRevision = HudMapProfiles.revision(app);
-        HudMapProfile saved = source == null ? null : HudMapProfiles.profiles(app).get(source);
+        HudMapProfile saved = source == null ? null : HudMapProfiles.resolve(app, source);
         synchronized (LOCK) {
             if (catalogRevision != savedRevision) {
                 catalogRevision = savedRevision;

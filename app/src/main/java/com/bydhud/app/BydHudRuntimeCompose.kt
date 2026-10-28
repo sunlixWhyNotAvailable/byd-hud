@@ -3204,6 +3204,26 @@ private fun OptionsTab(
                     )
                 }
             }
+            row("map-layout-defaults") {
+                SettingRow(
+                    language.choose("Типова композиція", "Default composition", "Типовая композиция"),
+                    language.choose(
+                        "Відновлює розташування й масштаб мапи та смуг",
+                        "Restores map and lane positions and scales",
+                        "Восстанавливает расположение и масштаб карты и полос"),
+                    palette,
+                    enabled = mapEditorEnabled,
+                    rowFill = featureMaturityFill(palette)
+                ) {
+                    HudButton(
+                        language.choose("Відновити типові", "Restore defaults", "Восстановить типовые"),
+                        palette,
+                        width = 220.dp,
+                        enabled = mapEditorEnabled && mapSettings != mapSettings.withDefaultGeometry(),
+                        onClick = { runAction { activity.composeRestoreMapLayoutDefaults() } }
+                    )
+                }
+            }
             row("map-live-display") {
                 Column(Modifier.fillMaxWidth()) {
                     SettingRow(
@@ -9791,6 +9811,27 @@ private fun MapProfileEditorDialog(
                             onClick = onHide
                         )
 
+                    }
+                    SettingRow(
+                        language.choose("Типовий профіль", "Default profile", "Типовой профиль"),
+                        language.choose(
+                            "Відновлює X, Y та масштаб. Натисніть «Зберегти», щоб залишити зміни.",
+                            "Restores X, Y and scale. Press Save to keep the changes.",
+                            "Восстанавливает X, Y и масштаб. Нажмите «Сохранить», чтобы оставить изменения."),
+                        palette,
+                        enabled = !saving,
+                        rowFill = featureMaturityFill(palette)
+                    ) {
+                        HudButton(
+                            language.choose("Відновити типові", "Restore defaults", "Восстановить типовые"),
+                            palette,
+                            width = 220.dp,
+                            enabled = !saving && draft != HudMapProfile.defaults(draft.source),
+                            onClick = {
+                                focusManager.clearFocus()
+                                onDraftChange(HudMapProfile.defaults(draft.source))
+                            }
+                        )
                     }
                     if (shanghaiBusy || error.isNotEmpty() || profileReason.isNotEmpty()) {
                         Text(
