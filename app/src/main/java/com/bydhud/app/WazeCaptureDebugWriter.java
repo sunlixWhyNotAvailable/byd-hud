@@ -163,6 +163,7 @@ final class WazeCaptureDebugWriter {
         final String line;
         final int byteCount;
         final boolean requestRetention;
+        boolean durable;
         WriterTask owner;
 
         TextWrite(TextKind kind, Context context, String day, File directory,
@@ -530,6 +531,7 @@ final class WazeCaptureDebugWriter {
         TextWrite text = new TextWrite(TextKind.APP_EVENT, app, targetDay,
                 null, AppEventLogger.EVENTS_FILE,
                 AppEventLogger.queuedEvent(line, wallClockMs));
+        text.durable = true;
         if (!postText("app_event_sync", text, null, true, completed, result)) return false;
         boolean interrupted = false;
         try {
@@ -911,9 +913,13 @@ final class WazeCaptureDebugWriter {
             case APP_EVENT:
                 // Batch writers split at the first record that crosses the existing file limit.
                 boolean requestRetention = false;
-                for (TextWrite write : writes) requestRetention |= write.requestRetention;
+                boolean durable = false;
+                for (TextWrite write : writes) {
+                    requestRetention |= write.requestRetention;
+                    durable |= write.durable;
+                }
                 return AppEventLogger.writeBatch(
-                        key.context, key.day, lines, requestRetention);
+                        key.context, key.day, lines, requestRetention, durable);
             case NAV_CAPTURE:
                 return NavCaptureStore.writeBatch(key.context, key.day, key.fileName, lines);
             case DIRECT:

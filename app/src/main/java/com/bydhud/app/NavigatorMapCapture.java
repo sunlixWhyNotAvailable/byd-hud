@@ -380,7 +380,7 @@ public final class NavigatorMapCapture {
         try {
         Bundle answer = new Bundle();
         if (context == null || data == null
-                || (!"poll".equals(method) && !"result".equals(method))) {
+                || (!"poll".equals(method) && !"result".equals(method) && !"journal".equals(method))) {
             return answer;
         }
         Context app = context.getApplicationContext();
@@ -389,6 +389,7 @@ public final class NavigatorMapCapture {
             logRejectedCaller(app, callingUid, callerPackage);
             return answer;
         }
+        if ("journal".equals(method)) return journal(app, data, callerPackage, answer);
         if ("poll".equals(method)) {
             return poll(app, data, callerPackage, answer);
         }
@@ -402,8 +403,55 @@ public final class NavigatorMapCapture {
         }
     }
 
+    private static Bundle journal(Context app, Bundle data, String callerPackage, Bundle answer) {
+        answer.putBoolean("journalTransport", true);
+        if (!callerPackage.equals(string(data, "lifecycleOwner", ""))) return answer;
+        String frameSession;
+        synchronized (LOCK) {
+            long now = SystemClock.elapsedRealtime();
+            if (callerPackage.equals(ownerPackage) && !session.isEmpty()
+                    && FRAME.isCurrent(ownerPackage, ownerGeneration, session)) {
+                frameSession = session;
+            } else if (callerPackage.equals(stoppedOwnerPackage) && !stoppedSession.isEmpty()
+                    && stoppedSession.equals(string(data, "captureSession", ""))
+                    && now - stoppedAtElapsedMs < POST_STOP_JOURNAL_MS) {
+                frameSession = stoppedSession;
+            } else return answer;
+        }
+        String producerSession = string(data, "lifecycleSessionId", "");
+        try {
+            NavigatorMapLifecycleJournal.Result saved = NavigatorMapLifecycleJournal.accept(app,
+                    callerPackage, producerSession, new JSONArray(string(data, "lifecycleEvents", "[]")),
+                    longValue(data, "lifecycleCursorSequence", 0L),
+                    longValue(data, "lifecycleChunkSequence", 0L), integer(data, "lifecycleChunkIndex", 0),
+                    (owner, producer, fragment) -> {
+                        long wall = System.currentTimeMillis();
+                        return AppEventLogger.writeEvent(app,
+                                "navigator_map_capture producer_lifecycle owner=" + field(owner, 96)
+                                + " session=" + field(frameSession, 96) + " producerSession=" + field(producer, 96)
+                                + " fragment=" + fragment, wall, NavCaptureStore.todayDir(wall));
+                    });
+            if (!saved.error.isEmpty()) answer.putString("journalError", saved.error);
+            if (saved.accepted) {
+                answer.putBoolean("journalAccepted", true);
+                answer.putString("journalOwner", callerPackage);
+                answer.putString("journalSessionId", producerSession);
+                answer.putLong("journalAckSequence", saved.ackSequence);
+                answer.putLong("journalAckChunkSequence", saved.ackChunkSequence);
+                answer.putInt("journalAckChunkIndex", saved.ackChunkIndex);
+            }
+        } catch (JSONException error) {
+            answer.putString("journalError", android.util.Log.getStackTraceString(error));
+            log(app, "navigator_map_capture journal_parse_error owner=" + field(callerPackage, 96)
+                    + " producerSession=" + field(producerSession, 96) + " cause=" + android.util.Log.getStackTraceString(error));
+        }
+        return answer;
+    }
+
     private static Bundle poll(Context app, Bundle data, String callerPackage, Bundle answer) {
         long now = SystemClock.elapsedRealtime();
+        boolean detailed = HudPrefs.isDetailedDebugArtifactsEnabled(app);
+        answer.putBoolean("detailedLogs", detailed);
         int updateRateHz = HudPrefs.mapUpdateRateHz(app);
         String lifeEvents = string(data, "lifecycleEvents", "[]");
         String logRequest = null;
@@ -425,6 +473,7 @@ public final class NavigatorMapCapture {
                     && FRAME.isCurrent(ownerPackage, ownerGeneration, session)) {
                 renderStatsLog = renderStatsLocked(data, callerPackage, session, now);
                 answer.putBoolean("active", true);
+                answer.putBoolean("journalEnabled", true);
                 answer.putBoolean("fullSourceMemory", true);
                 answer.putInt("outputMaxEdge", MAX_BITMAP_SIDE);
                 answer.putLong("frameTimeoutMs", 2500L);
@@ -442,6 +491,8 @@ public final class NavigatorMapCapture {
                         + " producerError=" + field(string(data, "producerError", ""), 384)
                         + " lifecycleJournalError=" + field(string(data, "lifecycleJournalError", ""), 128)
                         + " lifecyclePending=" + integer(data, "lifecyclePendingCount", 0)
+                        + " lifecycleUnackedBatch=" + integer(data, "lifecycleUnackedBatchCount", 0)
+                        + " lifecycleUnpersisted=" + longValue(data, "lifecycleUnpersistedCount", 0L)
                         + " backgroundState=" + field(string(data, "backgroundState", ""), 96)
                         + " carReadiness=" + field(string(data, "carReadiness", ""), 192);
                 if (!producerState.equals(lastProducerState)) {
@@ -544,7 +595,7 @@ public final class NavigatorMapCapture {
                     skippedPollStartedAtElapsedMs = -1L;
                     lastPollSkipReason = "";
                     processingWaitAccumulatedMs = 0L;
-                    logRequest = "navigator_map_capture request owner="
+                    if (detailed) logRequest = "navigator_map_capture request owner="
                             + field(ownerPackage, 96) + " session=" + session + " id=" + pendingId
                             + " requestedSource=" + sourceName(requestSourceMode)
                             + " pollIntervalMs=" + interval;
@@ -570,6 +621,7 @@ public final class NavigatorMapCapture {
                     && string(data, "captureSession", "").equals(stoppedSession)
                     && !stoppedSession.isEmpty()
                     && now - stoppedAtElapsedMs < POST_STOP_JOURNAL_MS) {
+                answer.putBoolean("journalEnabled", true);
                 if (!"[]".equals(lifeEvents) && !lifeEvents.isEmpty() && lifecycleIdentityValid) {
                     acceptLifecycle = true;
                     lifeSession = stoppedSession;
@@ -592,7 +644,7 @@ public final class NavigatorMapCapture {
             if (modernLifecycle) {
                 try {
                     final String journalFrameSession = lifeSession;
-                    NavigatorMapLifecycleJournal.Result journal = NavigatorMapLifecycleJournal.accept(
+                    NavigatorMapLifecycleJournal.Result journal = NavigatorMapLifecycleJournal.acceptLater(
                             app, callerPackage, producerJournalSession, new JSONArray(lifeEvents),
                             longValue(data, "lifecycleCursorSequence", 0L),
                             longValue(data, "lifecycleChunkSequence", 0L),
@@ -606,6 +658,7 @@ public final class NavigatorMapCapture {
                                 return AppEventLogger.writeEvent(app, line, wall,
                                         NavCaptureStore.todayDir(wall));
                             });
+                    if (!journal.error.isEmpty()) answer.putString("journalError", journal.error);
                     if (journal.accepted) {
                         answer.putBoolean("journalAccepted", true);
                         answer.putString("journalOwner", callerPackage);
@@ -616,7 +669,8 @@ public final class NavigatorMapCapture {
                     }
                 } catch (JSONException error) {
                     log(app, "navigator_map_capture journal_parse_error owner="
-                            + field(callerPackage, 96) + " session=" + field(producerJournalSession, 96));
+                            + field(callerPackage, 96) + " session=" + field(producerJournalSession, 96)
+                            + " cause=" + android.util.Log.getStackTraceString(error));
                 }
             } else {
                 logLifecycleEvents(app, callerPackage, lifeSession, lifeEvents);
@@ -1350,6 +1404,10 @@ public final class NavigatorMapCapture {
         return new String(result);
     }
 
+    private static String frameLogSession = "";
+    private static long lastFrameHealthMs;
+    private static long framesSinceHealth;
+
     private static void logFrame(
             Context app,
             String callerPackage,
@@ -1367,6 +1425,21 @@ public final class NavigatorMapCapture {
         long age = Math.max(0L, SystemClock.elapsedRealtime() - receivedAt);
         saveFrameArtifacts(app, callerPackage, frameSession, id, png, source, selection);
         markProcessingComplete(data);
+        if (!HudPrefs.isDetailedDebugArtifactsEnabled(app)) {
+            long now = SystemClock.elapsedRealtime();
+            long requestNs = longValue(data, "requestNs", 0L);
+            long totalMs = requestNs > 0L ? Math.max(0L, now - requestNs / 1_000_000L) : 0L;
+            boolean first = !frameSession.equals(frameLogSession);
+            framesSinceHealth++;
+            if (first || now - lastFrameHealthMs >= 10000L || totalMs >= 1000L) {
+                log(app, "navigator_map_capture frame_health owner=" + field(callerPackage, 96)
+                        + " session=" + frameSession + " id=" + id + " first=" + first
+                        + " frames=" + framesSinceHealth + " totalMs=" + totalMs
+                        + " receivedAgeMs=" + age);
+                lastFrameHealthMs = now; frameLogSession = frameSession; framesSinceHealth = 0L;
+            }
+            return;
+        }
         log(app, "navigator_map_capture frame owner=" + field(callerPackage, 96)
                 + " session=" + frameSession + " id=" + id
                 + " status=" + field(status, 64) + " source=" + field(string(data, "source", ""), 96)

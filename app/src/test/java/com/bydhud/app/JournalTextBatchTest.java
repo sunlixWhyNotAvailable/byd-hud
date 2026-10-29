@@ -17,6 +17,21 @@ import org.junit.rules.TemporaryFolder;
 public final class JournalTextBatchTest {
     @Rule public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
+    @Test public void durableAppendFlushesFullRecordsAndPreservesExistingFile() throws Exception {
+        File file = new File(temporaryFolder.newFolder(), "durable.jsonl");
+        assertTrue(JournalTextBatch.append(file, Collections.singletonList("earlier\n")));
+        String large = repeat('d', 70 * 1024) + "\n";
+        assertTrue(JournalTextBatch.append(file, Arrays.asList(large, "last\n"), true));
+        assertArrayEquals(("earlier\n" + large + "last\n").getBytes(Charset.defaultCharset()),
+                Files.readAllBytes(file.toPath()));
+    }
+
+    @Test(expected = java.io.IOException.class)
+    public void durableAppendPropagatesRealOpenFailure() throws Exception {
+        JournalTextBatch.append(temporaryFolder.newFolder(),
+                Collections.singletonList("not acknowledged\n"), true);
+    }
+
     @Test public void appendPreservesOrderAndDoesNotTruncateOversizedRecord() throws Exception {
         File file = new File(temporaryFolder.newFolder(), "records.jsonl");
         String oversized = repeat('x', 70 * 1024) + "\n";

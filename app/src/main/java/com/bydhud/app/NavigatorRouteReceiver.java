@@ -168,6 +168,10 @@ final class NavigatorRouteReceiver {
 
     /** Clear one source after its generation-guarded owner reports the connection ended. */
     static void sourceEnded(String packageOrNavigator, String reason) {
+        sourceEnded(packageOrNavigator, reason, true);
+    }
+
+    static void sourceEnded(String packageOrNavigator, String reason, boolean logTransition) {
         String source = normalizeSource(packageOrNavigator);
         if (source == null) return;
         RuntimeState state = activeState();
@@ -181,7 +185,7 @@ final class NavigatorRouteReceiver {
         state.ingress.post(() -> {
             if (!isActive(state)) return;
             clearSourceState(state, source);
-            NavigatorRouteLog.event(state.app, "source_ended source=" + source
+            if (logTransition) NavigatorRouteLog.event(state.app, "source_ended source=" + source
                     + " reason=" + safeReason);
         });
     }

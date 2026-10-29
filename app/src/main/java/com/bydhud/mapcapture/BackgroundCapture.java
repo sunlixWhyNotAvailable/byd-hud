@@ -13,9 +13,7 @@ import android.view.Surface;
 import android.view.SurfaceView;
 import android.view.TextureView;
 import android.view.View;
-import java.io.IOException;
 import java.lang.ref.WeakReference;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.WeakHashMap;
 
@@ -41,79 +39,13 @@ public final class BackgroundCapture {
     private static volatile String carReadiness = "none";
     private static volatile long lastVisibleWazeFrame;
     private static volatile String lastVisibleWazeSource = "unknown";
-    private static final Object JOURNAL_LOCK = new Object();
-    private static final int MAX_PRE_INIT_EVENTS = 128;
-    private static final long MAX_PRE_INIT_BYTES = 512L * 1024L;
-    private static final ArrayDeque<PendingJournalEvent> PRE_INIT_EVENTS = new ArrayDeque<>();
-    private static long preInitBytes;
-    private static volatile LifecycleJournalSpool journal;
-    private static volatile long sentCursorSequence;
-    private static volatile long sentChunkSequence;
-    private static volatile int sentChunkIndex;
     private static final Class<?>[] NONE = {};
 
-    private static final class PendingJournalEvent {
-        final String name;
-        final String owner;
-        final String detail;
-        final long elapsedNs;
-        final long bytes;
-
-        PendingJournalEvent(String name, String owner, String detail, long elapsedNs) {
-            this.name = name == null ? "unknown" : name;
-            this.owner = owner == null ? "none" : owner;
-            this.detail = detail == null ? "" : detail;
-            this.elapsedNs = elapsedNs;
-            this.bytes = this.name.length() * 2L + this.owner.length() * 2L + this.detail.length() * 2L + 32L;
-        }
+    static String initializeJournal(Context context, int processId, String newSessionId) {
+        LifecycleJournalTransport.start(context);
+        return newSessionId;
     }
-
-    static String initializeJournal(Context context, int processId, String newSessionId) throws IOException {
-        synchronized (JOURNAL_LOCK) {
-            if (journal == null) journal = new LifecycleJournalSpool(context, processId, newSessionId);
-            drainPreInitEvents();
-            return journal.sessionId();
-        }
-    }
-
-    static boolean journalReady() { return journal != null; }
-
-    private static void drainPreInitEvents() {
-        LifecycleJournalSpool current = journal;
-        if (current == null) return;
-        while (!PRE_INIT_EVENTS.isEmpty()) {
-            PendingJournalEvent pending = PRE_INIT_EVENTS.peekFirst();
-            try {
-                current.append(pending.name, pending.owner, pending.detail, pending.elapsedNs);
-                PRE_INIT_EVENTS.removeFirst();
-                preInitBytes -= pending.bytes;
-                if (!current.writeFault().isEmpty()) {
-                    state = "lifecycle_journal_write_pending: " + current.writeFault();
-                    android.util.Log.e("BydHudMapCapture", "pre-initialization lifecycle event awaits durable retry: "
-                            + "event=" + pending.name + " owner=" + pending.owner + " detail=" + pending.detail);
-                }
-            } catch (IOException error) {
-                state = "lifecycle_journal_write_failed: " + error.getClass().getSimpleName();
-                android.util.Log.e("BydHudMapCapture", "pre-initialization lifecycle event remains queued",
-                        new IOException("event=" + pending.name + " owner=" + pending.owner
-                                + " detail=" + pending.detail, error));
-                return;
-            }
-        }
-    }
-
-    private static void retainBeforeJournal(PendingJournalEvent event) {
-        synchronized (JOURNAL_LOCK) {
-            if (PRE_INIT_EVENTS.size() >= MAX_PRE_INIT_EVENTS || preInitBytes + event.bytes > MAX_PRE_INIT_BYTES) {
-                state = "lifecycle_journal_unavailable: pre-init retry queue full";
-                android.util.Log.e("BydHudMapCapture", "lifecycle event could not be retained before journal init: "
-                        + event.name + " owner=" + event.owner + " detail=" + event.detail);
-                return;
-            }
-            PRE_INIT_EVENTS.addLast(event);
-            preInitBytes += event.bytes;
-        }
-    }
+    static boolean journalReady() { return true; }
 
     private static final class Target {
         Object owner, driver, callbacks, scheduler, surfaceOwner, resizer, frameSource;
@@ -890,71 +822,19 @@ public final class BackgroundCapture {
                 try {
                     info += " followingOwned=" + item.owned + " followingStopped=" + item.stopped;
                     // Keep camera/location details out of mapsState's existing 512-char cap.
-                    event("following_state",item.owner.get(),item.info());
+                    if(LifecycleJournalTransport.detailed())event("following_state",item.owner.get(),item.info());
                 }
                 catch (Throwable e) { info += " followingStateError=" + e; }
             }
             for (MapsNavigationCamera item : navigationCameras) if (item.map.get() == controller)
-                event("navigation_camera_state",item.owner.get(),item.info());
+                if(LifecycleJournalTransport.detailed())event("navigation_camera_state",item.owner.get(),item.info());
             return info + (found ? "" : " following=untracked");
         } catch (Throwable e) { return "state_error=" + e; }
     }
     public static Bundle metadata(boolean includeJournal) {
         Bundle data = new Bundle(); data.putString("backgroundState",state);
         data.putString("carReadiness",carReadiness);
-        LifecycleJournalSpool current;
-        int preInitCount;
-        synchronized (JOURNAL_LOCK) {
-            drainPreInitEvents();
-            current = journal;
-            preInitCount = PRE_INIT_EVENTS.size();
-        }
-        if (current == null) {
-            data.putString("lifecycleEvents", "[]");
-            data.putString("lifecycleJournalError", "journal_not_initialized");
-            data.putInt("lifecyclePendingCount", preInitCount);
-            data.putLong("lifecycleSequence", 0L);
-            data.putLong("lifecycleStartSequence", 0L);
-            data.putLong("lifecycleCursorSequence", 0L);
-            data.putLong("lifecycleChunkSequence", 0L);
-            data.putInt("lifecycleChunkIndex", 0);
-            return data;
-        }
-        if (preInitCount > 0) {
-            data.putString("lifecycleEvents", "[]");
-            data.putString("lifecycleJournalError", "pre_init_events_pending");
-            data.putInt("lifecyclePendingCount", preInitCount);
-            data.putLong("lifecycleSequence", current.acknowledgedSequence());
-            data.putLong("lifecycleStartSequence", 0L);
-            data.putLong("lifecycleCursorSequence", current.acknowledgedSequence());
-            data.putLong("lifecycleChunkSequence", current.acknowledgedPartialSequence());
-            data.putInt("lifecycleChunkIndex", current.acknowledgedPartialChunk());
-            return data;
-        }
-        try {
-            LifecycleJournalBatch batch = current.batch(includeJournal);
-            data.putString("lifecycleEvents",batch.events.toString());
-            // Old collectors acknowledge only complete records.
-            data.putLong("lifecycleSequence",batch.completeThrough);
-            data.putLong("lifecycleStartSequence",batch.firstSequence);
-            data.putLong("lifecycleCursorSequence",batch.completeThrough);
-            data.putLong("lifecycleChunkSequence",batch.partialSequence);
-            data.putInt("lifecycleChunkIndex",batch.partialChunkIndex);
-            data.putInt("lifecyclePendingCount", current.pendingEventCount());
-            if (!current.writeFault().isEmpty()) data.putString("lifecycleJournalError", current.writeFault());
-            sentCursorSequence = batch.completeThrough;
-            sentChunkSequence = batch.partialSequence;
-            sentChunkIndex = batch.partialChunkIndex;
-        } catch (IOException | RuntimeException error) {
-            data.putString("lifecycleEvents", "[]");
-            data.putString("lifecycleJournalError", error.getClass().getSimpleName());
-            data.putLong("lifecycleSequence", current.acknowledgedSequence());
-            data.putLong("lifecycleStartSequence", 0L);
-            data.putLong("lifecycleCursorSequence", current.acknowledgedSequence());
-            data.putLong("lifecycleChunkSequence", current.acknowledgedPartialSequence());
-            data.putInt("lifecycleChunkIndex", current.acknowledgedPartialChunk());
-            data.putInt("lifecyclePendingCount", current.pendingEventCount());
-        }
+        data.putAll(LifecycleJournalTransport.health());
         return data;
     }
     public static void frame(Object source) {
@@ -980,84 +860,12 @@ public final class BackgroundCapture {
         }
         frame(source);
     }
-    public static void acknowledged(long through) {
-        LifecycleJournalSpool current = journal;
-        if (current == null) return;
-        synchronized (JOURNAL_LOCK) {
-            long safe = Math.min(through, sentCursorSequence);
-            if (safe <= current.acknowledgedSequence()) return;
-            try { current.acknowledge(safe, 0L, 0); }
-            catch (IOException error) {
-                state = "lifecycle_journal_ack_failed: " + error.getClass().getSimpleName();
-            }
-        }
-    }
-
+    // Retained for the pinned producer ABI. ACKs now arrive only on the journal transport.
+    public static void acknowledged(long through) { }
     public static void acknowledged(long through, long chunkSequence, int chunkIndex,
-            long sentThrough, long sentPartialSequence, int sentPartialChunk) {
-        LifecycleJournalSpool current = journal;
-        if (current == null) return;
-        synchronized (JOURNAL_LOCK) {
-            long complete = Math.min(through, Math.min(sentThrough, sentCursorSequence));
-            long acknowledgedSequence = current.acknowledgedSequence();
-            long acknowledgedPartialSequence = current.acknowledgedPartialSequence();
-            int acknowledgedPartialChunk = current.acknowledgedPartialChunk();
-            long partialSequence = 0L;
-            int partialChunk = 0;
-            if (chunkSequence > 0L && chunkSequence == sentPartialSequence
-                    && chunkSequence == sentChunkSequence && chunkSequence > complete) {
-                int maxChunk = Math.min(sentPartialChunk, sentChunkIndex);
-                if (chunkIndex > 0) {
-                    partialSequence = chunkSequence;
-                    partialChunk = Math.min(chunkIndex, maxChunk);
-                }
-            }
-            if (complete < acknowledgedSequence
-                    || (complete == acknowledgedSequence && partialSequence == 0L
-                    && acknowledgedPartialSequence > 0L)) return;
-            if (partialSequence > acknowledgedSequence
-                    && (partialSequence > acknowledgedPartialSequence
-                    || (partialSequence == acknowledgedPartialSequence && partialChunk > acknowledgedPartialChunk))) {
-                acknowledgedPartialSequence = partialSequence;
-                acknowledgedPartialChunk = partialChunk;
-            } else if (complete >= acknowledgedPartialSequence) {
-                acknowledgedPartialSequence = 0L;
-                acknowledgedPartialChunk = 0;
-            }
-            try { current.acknowledge(complete, acknowledgedPartialSequence, acknowledgedPartialChunk); }
-            catch (IOException error) {
-                state = "lifecycle_journal_ack_failed: " + error.getClass().getSimpleName();
-            }
-        }
-    }
+            long sentThrough, long sentPartialSequence, int sentPartialChunk) { }
     static void event(String name, Object owner, String detail) {
-        String eventOwner = identity(owner);
-        String eventDetail = detail == null ? "" : detail;
-        long elapsedNs = SystemClock.elapsedRealtimeNanos();
-        synchronized (JOURNAL_LOCK) {
-            LifecycleJournalSpool current = journal;
-            if (current == null) {
-                state = "lifecycle_journal_unavailable";
-                retainBeforeJournal(new PendingJournalEvent(name, eventOwner, eventDetail, elapsedNs));
-                return;
-            }
-            drainPreInitEvents();
-            if (!PRE_INIT_EVENTS.isEmpty()) {
-                retainBeforeJournal(new PendingJournalEvent(name, eventOwner, eventDetail, elapsedNs));
-                return;
-            }
-            try { current.append(name, eventOwner, eventDetail, elapsedNs); }
-            catch (IOException | RuntimeException error) {
-                state = "lifecycle_journal_write_failed: " + error.getClass().getSimpleName();
-                android.util.Log.e("BydHudMapCapture", "lifecycle event could not be persisted: event="
-                        + name + " owner=" + eventOwner + " detail=" + eventDetail, error);
-            }
-            if (!current.writeFault().isEmpty()) {
-                state = "lifecycle_journal_write_pending: " + current.writeFault();
-                android.util.Log.e("BydHudMapCapture", "lifecycle event awaits durable retry: event="
-                        + name + " owner=" + eventOwner + " detail=" + eventDetail);
-            }
-        }
+        LifecycleJournalTransport.append(name, identity(owner), detail);
     }
     static void failure(String action, Throwable e) {
         state = action + ": " + e;

@@ -17,7 +17,6 @@ import android.os.SystemClock;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
-import java.util.UUID;
 import android.os.SharedMemory;
 import android.system.ErrnoException;
 import android.system.OsConstants;
@@ -43,11 +42,9 @@ public final class CaptureBridge {
     private static volatile long draws;
     private static volatile String lastError = "";
     private static String session = "";
-    private static volatile String lifecycleSessionId = "";
     private static long pollIntervalMs = CapturePollPolicy.DEFAULT_MS;
     private static long captureDeliveredId;
     private static String captureDeliveredSession = "";
-    private static volatile boolean journalSendingEnabled = true;
     private static volatile int outputEdge = 320;
     private static Boolean swapRedBlue;
     private static volatile long leaseMs = 6000;
@@ -70,14 +67,7 @@ public final class CaptureBridge {
             }
             app = context.getApplicationContext();
             if (app == null) return;
-            String newJournalSession = android.os.Process.myPid() + "-" + UUID.randomUUID();
-            try {
-                lifecycleSessionId = BackgroundCapture.initializeJournal(app,
-                        android.os.Process.myPid(), newJournalSession);
-            } catch (Throwable error) {
-                lifecycleSessionId = newJournalSession;
-                lastError = "lifecycle_journal_init: " + error(error);
-            }
+            LifecycleJournalTransport.start(app);
             HandlerThread thread = new HandlerThread("MapProbeProducer");
             thread.start();
             worker = new Handler(thread.getLooper());
@@ -94,16 +84,9 @@ public final class CaptureBridge {
         long delay = CapturePollPolicy.DEFAULT_MS;
         long targetIntervalMs = CapturePollPolicy.DEFAULT_MS;
         try {
-            if (!BackgroundCapture.journalReady()) {
-                String newJournalSession = android.os.Process.myPid() + "-" + UUID.randomUUID();
-                lifecycleSessionId = BackgroundCapture.initializeJournal(app,
-                        android.os.Process.myPid(), newJournalSession);
-            }
             Bundle hello = new Bundle();
             hello.putString("package", app.getPackageName());
             hello.putString("revision", REVISION);
-            hello.putString("lifecycleOwner", app.getPackageName());
-            hello.putString("lifecycleSessionId", lifecycleSessionId);
             hello.putString("build", app.getPackageName().equals("com.waze")
                     ? "map-probe-r11-render-demand-hud-consumer-v1" : "map-probe-r12-policy-watchdog-hud-consumer-v1");
             if (waze525) hello.putString("wazeCapture", "bydhud-waze525-embedded-v1");
@@ -123,7 +106,7 @@ public final class CaptureBridge {
             hello.putString("controller", controller == null ? "none" : identity(controller));
             hello.putString("producerError", lastError);
             hello.putString("captureSession",session);
-            hello.putAll(BackgroundCapture.metadata(journalSendingEnabled));
+            hello.putAll(BackgroundCapture.metadata(false));
             WazeRenderScheduler.metadata(hello);
             Bundle request = app.getContentResolver().call(ENDPOINT, "poll", null, hello);
             if (request == null) throw new IllegalStateException("empty_collector_reply");
@@ -149,23 +132,7 @@ public final class CaptureBridge {
             if (app.getPackageName().equals("com.waze")) WazeRenderScheduler.policy(active,
                     request.getLong("pollIntervalMs", 1000), leaseMs);
             BackgroundCapture.lease(active);
-            boolean journalAccepted = request.getBoolean("journalAccepted");
-            if (request.containsKey("journalAckSequence")) {
-                if (journalAccepted
-                        && app.getPackageName().equals(request.getString("journalOwner"))
-                        && lifecycleSessionId.equals(request.getString("journalSessionId"))) {
-                    BackgroundCapture.acknowledged(request.getLong("journalAckSequence"),
-                            request.getLong("journalAckChunkSequence", 0L),
-                            request.getInt("journalAckChunkIndex", 0),
-                            hello.getLong("lifecycleCursorSequence"),
-                            hello.getLong("lifecycleChunkSequence"),
-                            hello.getInt("lifecycleChunkIndex", 0));
-                }
-            } else if (active || journalAccepted) {
-                // Older collectors acknowledge only complete legacy event sequences.
-                BackgroundCapture.acknowledged(hello.getLong("lifecycleSequence"));
-            }
-            journalSendingEnabled = active || journalAccepted;
+            LifecycleJournalTransport.policy(request);
             if (!request.getBoolean("active")) {
                 captureDeliveredId = 0L;
                 captureDeliveredSession = "";
@@ -190,7 +157,6 @@ public final class CaptureBridge {
                 }
             }
         } catch (Throwable e) {
-            journalSendingEnabled = false;
             lastError = error(e);
             delay = CapturePollPolicy.DEFAULT_MS;
         } // Existing lease expires if IPC stays unavailable.

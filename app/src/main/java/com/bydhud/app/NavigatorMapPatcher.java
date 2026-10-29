@@ -95,7 +95,7 @@ public final class NavigatorMapPatcher {
             new HashSet<>(Arrays.asList("CaptureBridge", "BackgroundCapture", "CaptureLease",
                     "CapturePollPolicy", "CarCapturePolicy", "MapsFollowing",
                     "MapsNavigationCamera", "PixelMath", "CaptureReadbackBuffer",
-                    "LifecycleJournalBatch", "LifecycleJournalSpool", "WazeRenderScheduler", "WazeRenderPolicy", "WazeSurfaceCopy",
+                    "LifecycleJournalBatch", "LifecycleJournalSpool", "LifecycleJournalTransport", "LifecycleJournalPolicy", "WazeRenderScheduler", "WazeRenderPolicy", "WazeSurfaceCopy",
                     "WazeHudMap", "WazeHudStyle")));
     private static final Set<String> REQUIRED_PAYLOAD_CLASSES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(BRIDGE, BACKGROUND,

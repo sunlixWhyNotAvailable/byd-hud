@@ -66,7 +66,7 @@ final class LifecycleJournalSpool {
     JSONObject append(String name, String owner, String detail, long elapsedNs) throws IOException {
         synchronized (lock) {
             try { flushPending(); }
-            catch (IOException error) { writeFault = error.getClass().getSimpleName(); }
+            catch (IOException error) { recordFault(error); }
             JSONObject entry = event(sequence + pendingEvents.size() + 1L,
                     name, owner, detail, elapsedNs);
             if (!pendingEvents.isEmpty()) {
@@ -78,7 +78,7 @@ final class LifecycleJournalSpool {
                 sequence++;
                 writeFault = "";
             } catch (IOException | JSONException error) {
-                writeFault = error.getClass().getSimpleName();
+                recordFault(error);
                 enqueue(entry);
             }
             return entry;
@@ -88,7 +88,7 @@ final class LifecycleJournalSpool {
     LifecycleJournalBatch batch(boolean include) throws IOException {
         synchronized (lock) {
             try { flushPending(); }
-            catch (IOException error) { writeFault = error.getClass().getSimpleName(); }
+            catch (IOException error) { recordFault(error); }
             if (!include) {
                 return LifecycleJournalBatch.build(Collections.<JSONObject>emptyList(), false,
                         acknowledgedSequence, acknowledgedPartialSequence, acknowledgedPartialChunk);
@@ -99,7 +99,7 @@ final class LifecycleJournalSpool {
                     recoveredPartialTail = true;
                     queueRecoveryEvent();
                     try { flushPending(); }
-                    catch (IOException error) { writeFault = error.getClass().getSimpleName(); }
+                    catch (IOException error) { recordFault(error); }
                 }
             }
             if (recoveredPartialTail) {
@@ -114,6 +114,12 @@ final class LifecycleJournalSpool {
 
     int pendingEventCount() { synchronized (lock) { return pendingEvents.size(); } }
     String writeFault() { synchronized (lock) { return writeFault; } }
+
+    private void recordFault(Throwable error) {
+        String trace = Log.getStackTraceString(error);
+        if (!trace.equals(writeFault)) Log.e("BydHudMapCapture", "lifecycle journal write", error);
+        writeFault = trace;
+    }
 
     private void enqueue(JSONObject entry) throws IOException {
         long bytes = entry.toString().getBytes(StandardCharsets.UTF_8).length;
@@ -151,7 +157,7 @@ final class LifecycleJournalSpool {
                 removePending();
                 writeFault = "";
             } catch (IOException | JSONException error) {
-                writeFault = error.getClass().getSimpleName();
+                recordFault(error);
                 throw new IOException("cannot flush pending lifecycle event", error);
             }
         }
@@ -173,7 +179,7 @@ final class LifecycleJournalSpool {
             sequence++;
             writeFault = "";
         } catch (IOException | JSONException error) {
-            writeFault = error.getClass().getSimpleName();
+            recordFault(error);
             enqueue(marker);
         }
         recoveredPartialTail = false;
@@ -311,7 +317,7 @@ final class LifecycleJournalSpool {
             try {
                 writeLine(file, cursorRecord());
             } catch (IOException error) {
-                writeFault = error.getClass().getSimpleName();
+                recordFault(error);
                 acknowledgedSequence = previousComplete;
                 acknowledgedPartialSequence = previousPartialSequence;
                 acknowledgedPartialChunk = previousPartialChunk;

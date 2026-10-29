@@ -6,7 +6,6 @@ import android.content.Context;
 import android.util.Log;
 
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -52,10 +51,8 @@ final class AppEventLogger {
             String line,
             long wallClockMs,
             String targetDay) {
-        boolean written = append(context, targetDay, EVENTS_FILE,
-                timestamp(wallClockMs) + " " + line + "\n");
-        if (written) NavigationLogStorage.enforceNavCaptureRetention(context);
-        return written;
+        return writeBatch(context, targetDay,
+                java.util.Collections.singletonList(queuedEvent(line, wallClockMs)), true, true);
     }
 
     static String queuedEvent(String line, long wallClockMs) {
@@ -68,6 +65,11 @@ final class AppEventLogger {
 
     static boolean writeBatch(
             Context context, String targetDay, List<String> lines, boolean requestRetention) {
+        return writeBatch(context, targetDay, lines, requestRetention, false);
+    }
+
+    static boolean writeBatch(Context context, String targetDay, List<String> lines,
+            boolean requestRetention, boolean durable) {
         if (context == null || targetDay == null || lines == null || lines.isEmpty()) return false;
         synchronized (WRITE_LOCK) {
             int index = 0;
@@ -88,7 +90,7 @@ final class AppEventLogger {
                             projectedLength += JournalTextBatch.byteCount(line);
                             if (projectedLength > MAX_FILE_BYTES) break;
                         }
-                        JournalTextBatch.append(destination, chunk);
+                        JournalTextBatch.append(destination, chunk, durable);
                         return new BatchAppend(destination, next, true);
                     } catch (IOException | RuntimeException error) {
                         WazeCaptureDebugWriter.recordWriteFailure("events append: " + error);
@@ -137,38 +139,6 @@ final class AppEventLogger {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static File file(Context context, String targetDay, String name) {
         return new File(NavigationLogStorage.logsDir(context, targetDay), name);
-    }
-
-    //guard event log rotation and append because runtime callbacks write from multiple threads.
-    private static boolean append(
-            Context context,
-            String targetDay,
-            String name,
-            String text) {
-        synchronized (WRITE_LOCK) {
-            File file = NavigationLogStorage.withReadLock(() -> {
-                File target = file(context, targetDay, name);
-                try {
-                    try (FileWriter writer = new FileWriter(target, true)) {
-                        writer.write(text);
-                        return target;
-                    }
-                } catch (IOException e) {
-                    WazeCaptureDebugWriter.recordWriteFailure("events append: " + e);
-                    Log.e(TAG, "write failed: " + target.getAbsolutePath(), e);
-                    return null;
-                } finally {
-                    NavigationLogStorage.markStorageFileChanged(target);
-                }
-            });
-            if (file != null) WazeCaptureDebugWriter.recordWriteSuccess();
-            if (file != null
-                    && file.length() > MAX_FILE_BYTES
-                    && !NavigationLogStorage.holdsTopologyRead()) {
-                NavCaptureStore.rotate(file);
-            }
-            return file != null;
-        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

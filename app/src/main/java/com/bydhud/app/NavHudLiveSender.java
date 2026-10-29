@@ -3819,11 +3819,28 @@ final class NavHudLiveSender {
                 tbtDispatched, hudDispatched));
     }
 
+    private long lastWazeFrameHealthMs, lastMapsFrameHealthMs;
+    private long inactiveHeartbeatCount, lastInactiveHeartbeatLogMs;
+
+    private void logDirectFrameHealth(boolean maps, DirectTbtFrame frame, String reason) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        long previous = maps ? lastMapsFrameHealthMs : lastWazeFrameHealthMs;
+        if (previous != 0L && now - previous < 10000L) return;
+        if (maps) lastMapsFrameHealthMs = now; else lastWazeFrameHealthMs = now;
+        log((maps ? "gmaps" : "waze") + " direct frame_health reason=" + safeReason(reason)
+                + " maneuver=" + frame.getRawManeuverType() + " lanes=" + frame.getLanes().size()
+                + " alert=" + frame.getAlertOverlay().isActive());
+    }
+
     private void logWazeDirectFrame(DirectTbtFrame rawFrame, DirectTbtFrame frame,
                                     int sourceDistanceMeters, String reason,
                                     long receivedAtMs,
                                     long receivedWallClockMs,
                                     DirectTbtPayload.Options options) {
+        if (!HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
+            logDirectFrameHealth(false, frame, reason);
+            return;
+        }
         byte[] maneuver = frame.getManeuverPng();
         byte[] lanes = frame.getLanePng();
         DirectTbtFrame.AlertOverlay alert = frame.getAlertOverlay();
@@ -3941,16 +3958,31 @@ final class NavHudLiveSender {
                     + " routeGeneration=" + routeGeneration);
             return;
         }
+        boolean unchangedInactive = !routeActive && "heartbeat".equals(reason)
+                && gmapsDirectState == GMapsDirectState.QUIESCENT
+                && gmapsDirectStateSessionGeneration == sessionGeneration
+                && gmapsDirectStateProducerEpoch == producerEpoch
+                && gmapsDirectStateRouteGeneration == routeGeneration;
         boolean sameSession = gmapsDirectStateSessionGeneration == sessionGeneration;
         gmapsDirectStateSessionGeneration = sessionGeneration;
         gmapsDirectStateProducerEpoch = producerEpoch;
         gmapsDirectStateRouteGeneration = routeGeneration;
         if (!routeActive) {
-            NavigatorRouteReceiver.sourceEnded(ownerPackage, "gmaps-inactive:" + reason);
+            NavigatorRouteReceiver.sourceEnded(ownerPackage, "gmaps-inactive:" + reason, !unchangedInactive);
             gmapsDirectState = GMapsDirectState.QUIESCENT;
             gmapsDirectTimedOut = false;
             cancelGMapsDirectTimeout();
             gmapsDirectFrameReceived = false;
+            if (unchangedInactive) {
+                inactiveHeartbeatCount++;
+                long now = android.os.SystemClock.elapsedRealtime();
+                if (now - lastInactiveHeartbeatLogMs >= 60000L) {
+                    log("gmaps route inactive_heartbeat_summary count=" + inactiveHeartbeatCount
+                            + " session=" + sessionGeneration);
+                    inactiveHeartbeatCount = 0L; lastInactiveHeartbeatLogMs = now;
+                }
+                return;
+            }
             log("gmaps route state=QUIESCENT session=" + sessionGeneration
                     + " producerEpoch=" + producerEpoch
                     + " routeGeneration=" + routeGeneration
@@ -4184,6 +4216,10 @@ final class NavHudLiveSender {
     private void logGMapsDirectFrame(DirectTbtFrame rawFrame, DirectTbtFrame frame,
             int sourceDistanceMeters, String reason, long receivedAtMs,
             long receivedWallClockMs) {
+        if (!HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
+            logDirectFrameHealth(true, frame, reason);
+            return;
+        }
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.describe(
                 frame, DirectTbtPayload.Options.from(context), receivedWallClockMs);
         String raw = "reason=" + safeReason(reason)
