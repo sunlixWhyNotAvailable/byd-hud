@@ -257,6 +257,41 @@ public final class ClusterProjectionService extends Service
         return service.retainProjectionIdle(packageName, generation, ownerToken, "surface-finished");
     }
 
+    static String finishMissingTaskProjection(String packageName, BooleanSupplier requestCurrent) {
+        ClusterProjectionService service = instance;
+        if (service == null) return "";
+        final int generation;
+        final long ownerToken;
+        synchronized (service.lock) {
+            if (!service.projectionRequested || !packageName.equals(service.projectedPackage)) return "";
+            generation = service.projectionGeneration;
+            ownerToken = service.projectionOwnerToken;
+        }
+        CountDownLatch completed = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicBoolean open = new java.util.concurrent.atomic.AtomicBoolean(true);
+        java.util.concurrent.atomic.AtomicReference<String> result =
+                new java.util.concurrent.atomic.AtomicReference<>("projection cleanup not confirmed");
+        if (!service.mainHandler.post(() -> {
+            try {
+                if (!open.get() || instance != service || !requestCurrent.getAsBoolean()
+                        || !service.isReturnOwnerCurrent(packageName, generation, ownerToken)) {
+                    result.set("projection cleanup blocked: owner changed");
+                    return;
+                }
+                result.set(service.retainProjectionIdle(packageName, generation, ownerToken, "task-already-closed"));
+            } catch (RuntimeException error) {
+                result.set(FailureDiagnostics.format(error, "projection-cleanup", "task-already-closed"));
+            } finally { completed.countDown(); }
+        })) return "projection cleanup failed: handler stopped";
+        try {
+            if (!completed.await(5000L, TimeUnit.MILLISECONDS)) return "projection cleanup not confirmed: timeout";
+            return result.get();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return FailureDiagnostics.format(error, "projection-cleanup", "wait");
+        } finally { open.set(false); }
+    }
+
     //Captures an app-owned projection generation for widget work; service recreation yields a new token.
     static long projectedGenerationTokenForWidget(String packageName) {
         ClusterProjectionService service = instance;

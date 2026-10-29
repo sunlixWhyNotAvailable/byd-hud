@@ -403,6 +403,20 @@ public final class NavigatorMapCapture {
         }
     }
 
+    private static boolean storeJournalBatch(Context app, String owner, String producer,
+            String frameSession, java.util.List<org.json.JSONObject> fragments) {
+        long wall = System.currentTimeMillis();
+        java.util.List<String> lines = new java.util.ArrayList<>(fragments.size());
+        for (org.json.JSONObject fragment : fragments) {
+            lines.add(AppEventLogger.queuedEvent(
+                    "navigator_map_capture producer_lifecycle owner=" + field(owner, 96)
+                    + " session=" + field(frameSession, 96) + " producerSession=" + field(producer, 96)
+                    + " fragment=" + fragment, wall));
+        }
+        return WazeCaptureDebugWriter.get().writeEventsSynchronously(
+                app, NavCaptureStore.todayDir(wall), lines);
+    }
+
     private static Bundle journal(Context app, Bundle data, String callerPackage, Bundle answer) {
         answer.putBoolean("journalTransport", true);
         if (!callerPackage.equals(string(data, "lifecycleOwner", ""))) return answer;
@@ -424,13 +438,7 @@ public final class NavigatorMapCapture {
                     callerPackage, producerSession, new JSONArray(string(data, "lifecycleEvents", "[]")),
                     longValue(data, "lifecycleCursorSequence", 0L),
                     longValue(data, "lifecycleChunkSequence", 0L), integer(data, "lifecycleChunkIndex", 0),
-                    (owner, producer, fragment) -> {
-                        long wall = System.currentTimeMillis();
-                        return AppEventLogger.writeEvent(app,
-                                "navigator_map_capture producer_lifecycle owner=" + field(owner, 96)
-                                + " session=" + field(frameSession, 96) + " producerSession=" + field(producer, 96)
-                                + " fragment=" + fragment, wall, NavCaptureStore.todayDir(wall));
-                    });
+                    (owner, producer, fragments) -> storeJournalBatch(app, owner, producer, frameSession, fragments));
             if (!saved.error.isEmpty()) answer.putString("journalError", saved.error);
             if (saved.accepted) {
                 answer.putBoolean("journalAccepted", true);
@@ -649,15 +657,8 @@ public final class NavigatorMapCapture {
                             longValue(data, "lifecycleCursorSequence", 0L),
                             longValue(data, "lifecycleChunkSequence", 0L),
                             integer(data, "lifecycleChunkIndex", 0),
-                            (journalOwner, producerSession, fragment) -> {
-                                long wall = System.currentTimeMillis();
-                                String line = "navigator_map_capture producer_lifecycle owner="
-                                        + field(journalOwner, 96) + " session=" + field(journalFrameSession, 96)
-                                        + " producerSession=" + field(producerSession, 96)
-                                        + " fragment=" + fragment;
-                                return AppEventLogger.writeEvent(app, line, wall,
-                                        NavCaptureStore.todayDir(wall));
-                            });
+                            (journalOwner, producerSession, fragments) -> storeJournalBatch(
+                                    app, journalOwner, producerSession, journalFrameSession, fragments));
                     if (!journal.error.isEmpty()) answer.putString("journalError", journal.error);
                     if (journal.accepted) {
                         answer.putBoolean("journalAccepted", true);
@@ -757,6 +758,9 @@ public final class NavigatorMapCapture {
             scheduleExpiryLocked(callerPackage, generation, resultSession, FRAME.frameSequence(), receivedAt);
         }
         Bitmap acceptedBitmap = bitmap;
+        if (HudPrefs.isDetailedDebugArtifactsEnabled(app)) {
+            data.putLong("collectorEnqueueNs", SystemClock.elapsedRealtimeNanos());
+        }
         if (receiverWorker == null || !receiverWorker.post(() -> processFrame(
                 app, callerPackage, generation, resultSession, id, receivedAt,
                 modeAtRequest, modeRevision, expectedAtRequest,
@@ -783,6 +787,12 @@ public final class NavigatorMapCapture {
             Bitmap bitmap) {
         boolean retained = false;
         Bitmap crop = null;
+        final boolean detailedTiming = data.containsKey("collectorEnqueueNs")
+                && HudPrefs.isDetailedDebugArtifactsEnabled(app);
+        if (detailedTiming) {
+            data.putLong("collectorQueueNs", SystemClock.elapsedRealtimeNanos()
+                    - data.getLong("collectorEnqueueNs"));
+        }
         try {
             String sourceMetadata = string(data, "source", "");
             String backgroundState = string(data, "backgroundState", "");
@@ -813,11 +823,15 @@ public final class NavigatorMapCapture {
 
             ProfileSelection selection = profileSelection(app, frameSource);
             long cropStart = SystemClock.elapsedRealtimeNanos();
+            long cpuStart = detailedTiming ? android.os.Debug.threadCpuTimeNanos() : 0L;
             crop = HudMapImage.profileCrop(bitmap, selection.profile);
+            if (detailedTiming) data.putLong("cropCpuNs", android.os.Debug.threadCpuTimeNanos() - cpuStart);
             if (crop == null) throw new IllegalStateException("empty_crop");
             data.putLong("cropNs", SystemClock.elapsedRealtimeNanos() - cropStart);
             long compareStart = SystemClock.elapsedRealtimeNanos();
+            cpuStart = detailedTiming ? android.os.Debug.threadCpuTimeNanos() : 0L;
             String inputHash = pixelHash(crop);
+            if (detailedTiming) data.putLong("cropHashCpuNs", android.os.Debug.threadCpuTimeNanos() - cpuStart);
             data.putLong("cropHashNs", SystemClock.elapsedRealtimeNanos() - compareStart);
             NavigatorMapSessionState.FrameUpdate update = NavigatorMapSessionState.FrameUpdate.REJECTED;
             long sequence = 0L;
@@ -860,7 +874,9 @@ public final class NavigatorMapCapture {
             }
 
             long encodeStart = SystemClock.elapsedRealtimeNanos();
+            cpuStart = detailedTiming ? android.os.Debug.threadCpuTimeNanos() : 0L;
             byte[] png = HudMapImage.encodePng(crop);
+            if (detailedTiming) data.putLong("pngEncodeCpuNs", android.os.Debug.threadCpuTimeNanos() - cpuStart);
             data.putLong("pngEncodeNs", SystemClock.elapsedRealtimeNanos() - encodeStart);
             if (png == null || png.length == 0) {
                 logResultError(app, callerPackage, resultSession, id, status, "empty_cropped_png", data);
@@ -1444,6 +1460,12 @@ public final class NavigatorMapCapture {
                 + " session=" + frameSession + " id=" + id
                 + " status=" + field(status, 64) + " source=" + field(string(data, "source", ""), 96)
                 + " receiverCopyNs=" + longValue(data, "receiverCopyNs", 0L)
+                + " collectorQueueNs=" + longValue(data, "collectorQueueNs", 0L)
+                + " cropCpuNs=" + longValue(data, "cropCpuNs", 0L)
+                + " cropHashCpuNs=" + longValue(data, "cropHashCpuNs", 0L)
+                + " pngEncodeCpuNs=" + longValue(data, "pngEncodeCpuNs", 0L)
+                + " producerFinishQueueNs=" + longValue(data, "producerFinishQueueNs", 0L)
+                + " producerFinishCpuNs=" + longValue(data, "producerFinishCpuNs", 0L)
                 + " cropNs=" + longValue(data, "cropNs", 0L)
                 + " cropHashNs=" + longValue(data, "cropHashNs", 0L)
                 + " pngEncodeNs=" + longValue(data, "pngEncodeNs", 0L)

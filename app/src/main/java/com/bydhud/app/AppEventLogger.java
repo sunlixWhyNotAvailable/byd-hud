@@ -21,6 +21,32 @@ final class AppEventLogger {
     private static final Object WRITE_LOCK = new Object();
     private static final SimpleDateFormat FORMAT =
             new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US);
+    private static final RoutineCounts ROUTINE = new RoutineCounts();
+
+    static final class RoutineCounts {
+        private final java.util.Set<String> seen = new java.util.HashSet<>();
+        private final java.util.Map<String, Long> counts = new java.util.TreeMap<>();
+        private long lastSummary = -1L;
+        synchronized boolean record(String kind) {
+            counts.put(kind, counts.getOrDefault(kind, 0L) + 1L);
+            return seen.add(kind);
+        }
+        synchronized String summary(long now) {
+            if (lastSummary < 0L) { lastSummary = now; return ""; }
+            if (now - lastSummary < 10000L || counts.isEmpty()) return "";
+            String result = counts.toString();
+            counts.clear(); lastSummary = now;
+            return result;
+        }
+    }
+
+    /** Call before constructing routine-success detail; first occurrence and errors stay visible. */
+    static boolean routine(Context context, String kind) {
+        boolean first = ROUTINE.record(kind);
+        String counts = ROUTINE.summary(android.os.SystemClock.elapsedRealtime());
+        if (!counts.isEmpty()) event(context, "routine_health counts=" + counts);
+        return first || HudPrefs.isDetailedDebugArtifactsEnabled(context);
+    }
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private AppEventLogger() {

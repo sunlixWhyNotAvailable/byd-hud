@@ -1384,7 +1384,9 @@ public final class WazeDirectChannel {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) return new byte[0];
             byte[] bytes = out.toByteArray();
-            log("icon rendered kind=" + kind + " bytes=" + bytes.length);
+            if (AppEventLogger.routine(context, "waze.icon_rendered")) {
+                log("icon rendered kind=" + kind + " bytes=" + bytes.length);
+            }
             return bytes;
         } catch (Throwable t) {
             log("icon render failed kind=" + kind + ": " + t);
@@ -2483,7 +2485,7 @@ public final class WazeDirectChannel {
         @Override
         public void invalidate() {
             postBinder(expectedGeneration, () -> {
-                log("app invalidated");
+                if (AppEventLogger.routine(context, "waze.app_invalidated")) log("app invalidated");
                 if (invalidateCallback != null) invalidateCallback.run();
             });
         }

@@ -455,6 +455,7 @@ public final class CaptureBridge {
             Bundle request, Bitmap bitmap, String status, String source, int width, int height,
             SharedMemory sourceMemory) {
         Handler handler = worker;
+        if (LifecycleJournalTransport.detailed()) request.putLong("producerFinishEnqueueNs", SystemClock.elapsedRealtimeNanos());
         try {
             if (handler != null && handler.post(
                     () -> finish(request, bitmap, status, source, width, height, sourceMemory))) return;
@@ -478,6 +479,12 @@ public final class CaptureBridge {
             SharedMemory sourceMemory) {
         SharedMemory shared = sourceMemory;
         boolean accepted = false;
+        final boolean detailedTiming = LifecycleJournalTransport.detailed();
+        final long cpuStart = detailedTiming ? android.os.Debug.threadCpuTimeNanos() : 0L;
+        if (detailedTiming && request.containsKey("producerFinishEnqueueNs")) {
+            request.putLong("producerFinishQueueNs", SystemClock.elapsedRealtimeNanos()
+                    - request.getLong("producerFinishEnqueueNs"));
+        }
         try {
             request.putLong("captureProtocol", 2L);
             request.putString("package", app.getPackageName());
@@ -505,6 +512,7 @@ public final class CaptureBridge {
                         producerReadyNs / 1_000_000L - requestNs / 1_000_000L - interval));
             }
             request.putLong("sendNs", SystemClock.elapsedRealtimeNanos());
+            if (detailedTiming) request.putLong("producerFinishCpuNs", android.os.Debug.threadCpuTimeNanos() - cpuStart);
             Bundle result = app.getContentResolver().call(ENDPOINT, "result", null, request);
             accepted = result != null && result.getBoolean("accepted");
         } catch (Throwable e) { lastError = error(e); }

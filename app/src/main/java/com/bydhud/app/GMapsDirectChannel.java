@@ -111,6 +111,7 @@ final class GMapsDirectChannel {
     private int currentInstructionFallbackSource = -1;
     private String currentManeuverQualifierText = "";
     private String lastBitmapDiagnosticKey = "";
+    private String lastBitmapSelectionState = "";
     private String lastGuidanceUnavailableReason = "";
     private boolean guidanceUnavailable;
     private long instructionStartSequence = -1L;
@@ -1096,7 +1097,7 @@ final class GMapsDirectChannel {
                 && currentFrame != null;
         long frameDelayMs = currentStructuredFrameAtMs <= 0L
                 ? -1L : sourceAtMs - currentStructuredFrameAtMs;
-        listener.onLog("bitmap_rx sequence=" + lastSequence
+        if (AppEventLogger.routine(context, "gmaps.bitmap_rx")) listener.onLog("bitmap_rx sequence=" + lastSequence
                 + " maneuver=" + maneuver
                 + " viewId=" + viewId
                 + " sha=" + candidate.sha
@@ -1154,6 +1155,7 @@ final class GMapsDirectChannel {
         currentInstructionFallbackSource = -1;
         currentManeuverQualifierText = "";
         lastBitmapDiagnosticKey = "";
+        lastBitmapSelectionState = "";
         lastGuidanceUnavailableReason = "";
         guidanceUnavailable = false;
         instructionStartSequence = -1L;
@@ -1552,7 +1554,11 @@ final class GMapsDirectChannel {
         String key = selection.diagnosticKey();
         if (key.equals(lastBitmapDiagnosticKey)) return;
         lastBitmapDiagnosticKey = key;
-        listener.onLog(selection.message());
+        String state = selection.selected + '|' + selection.currentMatch;
+        boolean changed = !state.equals(lastBitmapSelectionState);
+        lastBitmapSelectionState = state;
+        boolean detail = AppEventLogger.routine(context, "gmaps.bitmap_selection");
+        if (changed || detail) listener.onLog(selection.message());
     }
 
     static final class ManeuverBitmap {

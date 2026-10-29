@@ -1061,12 +1061,13 @@ final class NavAppDisplayController {
                         "independent dashboard failed: empty package"));
                 return;
             }
+            final long returnIntentGeneration = projectionGenerationForPackage(packageName);
             NavAppDisplayState current = admittedState == null
                     ? checkDisplay(packageName, toDashboard
                             ? "independent-dashboard-precheck"
                             : "independent-return-precheck")
                     : admittedState;
-            if (!isShutdownReturnReason(reason) && isShutdownReturnCurrent(shutdownToken)) {
+            if (toDashboard && !isShutdownReturnReason(reason) && isShutdownReturnCurrent(shutdownToken)) {
                 current = recoverSurfaceForMove(packageName, current, -1, reason, requestCurrent);
             }
             if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
@@ -1075,12 +1076,32 @@ final class NavAppDisplayController {
                 return;
             }
             if (current.taskId < 0) {
+                if (!toDashboard && current.isConfirmedMissingTask()) {
+                    BooleanSupplier stillCurrent = () -> isShutdownReturnCurrent(shutdownToken)
+                            && (requestCurrent == null || requestCurrent.getAsBoolean())
+                            && projectionGenerationForPackage(packageName) == returnIntentGeneration;
+                    String cleanupFailure = ClusterProjectionService.finishMissingTaskProjection(packageName, stillCurrent);
+                    if (!stillCurrent.getAsBoolean()) {
+                        remember(new NavAppDisplayState(packageName, -1, NavAppDisplayState.DISPLAY_UNKNOWN,
+                                false, "return cleanup blocked: request changed"));
+                        return;
+                    }
+                    if (cleanupFailure.isEmpty()) {
+                        clearReturnedProjectionIntent(packageName, returnIntentGeneration, "task-already-closed:" + safe(reason));
+                        cleanupFailure = releaseAutoContainerLeaseIfRequested(
+                                packageName, returnIntentGeneration, true, reason);
+                    }
+                    remember(new NavAppDisplayState(packageName, -1, NavAppDisplayState.DISPLAY_UNKNOWN,
+                            false, cleanupFailure.isEmpty() ? "independent dashboard already closed"
+                                    : "independent dashboard already closed; cleanup failed: " + cleanupFailure));
+                    return;
+                }
                 remember(new NavAppDisplayState(
                         packageName,
                         -1,
                         NavAppDisplayState.DISPLAY_UNKNOWN,
                         false,
-                        "independent dashboard failed: task missing"));
+                        "independent dashboard failed: " + current.status));
                 return;
             }
             if (!SteeringTransferPolicy.canToggleTask(

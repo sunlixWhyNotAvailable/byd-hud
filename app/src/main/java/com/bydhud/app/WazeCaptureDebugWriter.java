@@ -549,6 +549,32 @@ final class WazeCaptureDebugWriter {
         }
     }
 
+    boolean writeEventsSynchronously(Context context, String targetDay, List<String> lines) {
+        if (context == null || targetDay == null || lines == null || lines.isEmpty()) return false;
+        Context app = context.getApplicationContext();
+        final Context target = app == null ? context : app;
+        if (android.os.Looper.myLooper() == thread.getLooper()) {
+            flushBeforeSynchronousEvent();
+            boolean written = AppEventLogger.writeBatch(target, targetDay, lines, true, true);
+            if (!written && currentWriterTask != null) currentWriterTask.failed = true;
+            return written;
+        }
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicBoolean result = new AtomicBoolean(false);
+        AtomicBoolean written = new AtomicBoolean(false);
+        if (!enqueue(new WriterTask("app_event_batch_sync", () -> {
+            written.set(AppEventLogger.writeBatch(target, targetDay, lines, true, true));
+        }, null, null, false, true, false, android.os.SystemClock.elapsedRealtime(),
+                completed, result))) return false;
+        boolean interrupted = false;
+        try {
+            while (true) {
+                try { completed.await(); return result.get() && written.get(); }
+                catch (InterruptedException error) { interrupted = true; }
+            }
+        } finally { if (interrupted) Thread.currentThread().interrupt(); }
+    }
+
     //Waits for work queued before this call; share/retirement invoke it from background threads.
     boolean awaitIdle() {
         if (android.os.Looper.myLooper() == thread.getLooper()) {

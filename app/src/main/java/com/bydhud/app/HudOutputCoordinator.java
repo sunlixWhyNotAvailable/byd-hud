@@ -1676,7 +1676,7 @@ final class HudOutputCoordinator {
                     directFirstPhysicalSendLogged = true;
                 }
                 if (pendingDirectReceivedAtMs > 0L) {
-                    log("direct emitted_frame_first_send reason=" + pendingDirectReason
+                    if (AppEventLogger.routine(context, "hud.emitted_frame")) log("direct emitted_frame_first_send reason=" + pendingDirectReason
                             + " elapsedMs=" + Math.max(0L,
                             SystemClock.elapsedRealtime() - pendingDirectReceivedAtMs));
                     pendingDirectReceivedAtMs = 0L;
@@ -2355,6 +2355,7 @@ final class HudOutputCoordinator {
         }
         if (!shouldEmitBitmapTx(lastBitmapTxDiagnosticKey, key)) return;
         lastBitmapTxDiagnosticKey = key;
+        if (!AppEventLogger.routine(context, "hud.bitmap_tx")) return;
         String message = preparedDirectBitmapSelection.txMessage(
                 preparedDirectPayload, sentAtMs);
         try {
@@ -2998,7 +2999,7 @@ final class HudOutputCoordinator {
         directLeaseDeadlineMs = now + DIRECT_LEASE_MS;
         worker.removeCallbacks(directLeaseExpiry);
         worker.postDelayed(directLeaseExpiry, DIRECT_LEASE_MS);
-        if (!safe(reason).isEmpty()) {
+        if (!safe(reason).isEmpty() && AppEventLogger.routine(context, "hud.lease_renewed")) {
             log("direct lease renewed owner=" + safe(ownerPackage)
                     + " session=" + ownerSessionGeneration
                     + " reason=" + safe(reason));

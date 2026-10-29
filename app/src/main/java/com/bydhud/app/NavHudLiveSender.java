@@ -2434,7 +2434,7 @@ final class NavHudLiveSender {
         if (!shouldAcceptWazeFrameAfterTerminalForTest(
                 wazeDirectRouteTerminalFence, true)) return;
         frame = currentWazeGuidanceFrame(frame, fromSurface, guidanceSequence);
-        if (coalesced > 0) {
+        if (coalesced > 0 && AppEventLogger.routine(context, "waze.frames_coalesced")) {
             WazeCaptureDebugWriter.get().appEvent(context,
                     "nav_live waze_direct frames_coalesced=" + coalesced);
         }
@@ -3119,7 +3119,8 @@ final class NavHudLiveSender {
         synchronized (wazeDirectFrameLock) {
             batch = wazeListenerFrames.take();
         }
-        if (batch.coalescedCluster > 0 || batch.coalescedSurface > 0) {
+        if ((batch.coalescedCluster > 0 || batch.coalescedSurface > 0)
+                && AppEventLogger.routine(context, "waze.listener_frames_coalesced")) {
             WazeCaptureDebugWriter.get().appEvent(context,
                     "nav_live waze_direct listener_frames_coalesced="
                             + (batch.coalescedCluster + batch.coalescedSurface)
@@ -3802,9 +3803,11 @@ final class NavHudLiveSender {
         }
         logWazeDirectTiming(timing, tbtDispatchElapsedMs,
                 hudDispatchElapsedMs, tbtDispatched, hudDispatched);
-        String sourceLine = "waze source=direct reason=" + safeReason(reason);
-        Log.i(TAG, sourceLine);
-        WazeCaptureDebugWriter.get().appEvent(context, "nav_live " + sourceLine);
+        if (AppEventLogger.routine(context, "waze.direct_delivery")) {
+            String sourceLine = "waze source=direct reason=" + safeReason(reason);
+            Log.i(TAG, sourceLine);
+            WazeCaptureDebugWriter.get().appEvent(context, "nav_live " + sourceLine);
+        }
     }
 
     private void logWazeDirectTiming(WazeRouteTiming.Frame timing,

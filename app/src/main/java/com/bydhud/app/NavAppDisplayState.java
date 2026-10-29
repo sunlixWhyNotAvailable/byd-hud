@@ -37,6 +37,10 @@ final class NavAppDisplayState {
         return displayId == 0;
     }
 
+    boolean isConfirmedMissingTask() {
+        return taskId < 0 && ("task missing".equals(status) || "Surface task missing".equals(status));
+    }
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isOnDashboardDisplay() {
         return displayId > 0;

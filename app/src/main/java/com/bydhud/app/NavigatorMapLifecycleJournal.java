@@ -60,7 +60,47 @@ final class NavigatorMapLifecycleJournal {
     }
 
     interface Store {
-        boolean store(String owner, String producerSession, JSONObject fragment);
+        boolean store(String owner, String producerSession, java.util.List<JSONObject> fragments);
+    }
+
+    /** A contiguous validated prefix; selecting it does not acknowledge or persist anything. */
+    static final class Batch {
+        final java.util.List<JSONObject> fragments = new java.util.ArrayList<>();
+        long complete, partial;
+        int chunk;
+        boolean accepted;
+        Batch(long complete, long partial, int chunk) {
+            this.complete = complete; this.partial = partial; this.chunk = chunk;
+        }
+    }
+
+    static Batch select(JSONArray fragments, long complete, long partial, int chunk,
+            long sentThrough, long sentPartial, int sentChunk) {
+        Batch batch = new Batch(complete, partial, chunk);
+        for (int i = 0; i < fragments.length(); i++) {
+            JSONObject fragment = fragments.optJSONObject(i);
+            if (fragment == null) break;
+            long sequence = fragment.optLong("sequence", -1L);
+            int index = fragment.optInt("detailChunkIndex", 1);
+            int count = fragment.optInt("detailChunkCount", 1);
+            if (sequence <= 0L || index < 1 || count < index
+                    || !(sequence <= sentThrough || (sequence == sentPartial && index <= sentChunk))) break;
+            if (sequence <= batch.complete
+                    || (sequence == batch.partial && index <= batch.chunk)) {
+                batch.accepted = true;
+                continue;
+            }
+            if (!((batch.partial == 0L && sequence == batch.complete + 1L && index == 1)
+                    || (batch.partial > 0L && sequence == batch.partial && index == batch.chunk + 1))) break;
+            batch.fragments.add(fragment);
+            if (index == count) {
+                batch.complete = sequence; batch.partial = 0L; batch.chunk = 0;
+            } else {
+                batch.partial = sequence; batch.chunk = index;
+            }
+            batch.accepted = true;
+        }
+        return batch;
     }
 
     static final class Result {
@@ -99,67 +139,24 @@ final class NavigatorMapLifecycleJournal {
             long complete = Math.max(0L, prefs.getLong(prefix + ".sequence", 0L));
             long partialSequence = Math.max(0L, prefs.getLong(prefix + ".partialSequence", 0L));
             int partialChunk = Math.max(0, prefs.getInt(prefix + ".partialChunk", 0));
-            boolean accepted = false;
-            boolean cursorConfirmed = false;
-            String failure = "";
-
-            for (int i = 0; i < fragments.length(); i++) {
-                JSONObject fragment = fragments.optJSONObject(i);
-                if (fragment == null) break;
-                long sequence = fragment.optLong("sequence", -1L);
-                int chunkIndex = fragment.optInt("detailChunkIndex", 1);
-                int chunkCount = fragment.optInt("detailChunkCount", 1);
-                if (sequence <= 0L || chunkIndex < 1 || chunkCount < chunkIndex) break;
-                boolean inSentRange = sequence <= sentThrough
-                        || (sequence == sentPartialSequence && chunkIndex <= sentPartialChunk);
-                if (!inSentRange) break;
-
-                boolean duplicate = sequence < complete || (sequence == complete && partialSequence == 0L)
-                        || (partialSequence > 0L && sequence == partialSequence && chunkIndex <= partialChunk);
-                if (duplicate) {
-                    // A failed commit can still change SharedPreferences' in-memory cursor.
-                    if (!cursorConfirmed) {
-                        cursorConfirmed = prefs.edit()
-                                .putLong(prefix + ".sequence", complete)
-                                .putLong(prefix + ".partialSequence", partialSequence)
-                                .putInt(prefix + ".partialChunk", partialChunk).commit();
-                        if (!cursorConfirmed) {
-                            failure = "cursor_retry_commit_unconfirmed: SharedPreferences returned false; platform cause unavailable";
-                            break;
-                        }
-                    }
-                    accepted = true;
-                    continue;
-                }
-
-                boolean startsNext = partialSequence == 0L
-                        && sequence == complete + 1L && chunkIndex == 1;
-                boolean continuesPartial = partialSequence > 0L
-                        && sequence == partialSequence && chunkIndex == partialChunk + 1;
-                if (!startsNext && !continuesPartial) break;
-                if (!store.store(owner, producerSession, fragment)) {
-                    failure = "event_write_unconfirmed: writer returned false; underlying cause is in collector diagnostics";
-                    break;
-                }
-
-                long nextComplete = chunkIndex == chunkCount ? sequence : complete;
-                long nextPartialSequence = chunkIndex == chunkCount ? 0L : sequence;
-                int nextPartialChunk = chunkIndex == chunkCount ? 0 : chunkIndex;
-                boolean saved = prefs.edit()
-                        .putLong(prefix + ".sequence", nextComplete)
-                        .putLong(prefix + ".partialSequence", nextPartialSequence)
-                        .putInt(prefix + ".partialChunk", nextPartialChunk)
-                        .commit();
-                if (!saved) {
-                    failure = "cursor_commit_unconfirmed: SharedPreferences returned false; platform cause unavailable";
-                    break;
-                }
-                complete = nextComplete;
-                partialSequence = nextPartialSequence;
-                partialChunk = nextPartialChunk;
-                cursorConfirmed = true;
-                accepted = true;
+            Batch batch = select(fragments, complete, partialSequence, partialChunk,
+                    sentThrough, sentPartialSequence, sentPartialChunk);
+            if (!batch.accepted) return new Result(false, 0L, 0L, 0);
+            if (!batch.fragments.isEmpty() && !store.store(owner, producerSession, batch.fragments)) {
+                return new Result(false, 0L, 0L, 0,
+                        "event_batch_write_unconfirmed: writer returned false; underlying cause is in collector diagnostics");
             }
+            // Commit once, after every affected event file is synced. Also retry duplicate-only
+            // cursors: a failed SharedPreferences commit can still update its in-memory values.
+            if (!prefs.edit().putLong(prefix + ".sequence", batch.complete)
+                    .putLong(prefix + ".partialSequence", batch.partial)
+                    .putInt(prefix + ".partialChunk", batch.chunk).commit()) {
+                return new Result(false, 0L, 0L, 0,
+                        "cursor_commit_unconfirmed: SharedPreferences returned false; platform cause unavailable");
+            }
+            complete = batch.complete;
+            partialSequence = batch.partial;
+            partialChunk = batch.chunk;
 
             long ackComplete = Math.min(complete, sentThrough);
             long ackChunkSequence = 0L;
@@ -168,7 +165,7 @@ final class NavigatorMapLifecycleJournal {
                 ackChunkSequence = sentPartialSequence;
                 ackChunkIndex = Math.min(partialChunk, sentPartialChunk);
             }
-            return new Result(accepted, ackComplete, ackChunkSequence, ackChunkIndex, failure);
+            return new Result(true, ackComplete, ackChunkSequence, ackChunkIndex);
         }
     }
 
