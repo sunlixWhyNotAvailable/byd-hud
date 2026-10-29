@@ -570,7 +570,14 @@ final class NavHudLiveSender {
     }
 
     static synchronized String hudCheckStatus(String language) {
-        if (instance == null || !instance.hudCheckState.running) return "";
+        if (instance == null) return "";
+        String startError = instance.hudCheckStartError;
+        if (!startError.isEmpty()) {
+            return ("uk".equals(language) ? "Denza OEM Test: помилка запуску: "
+                    : "ru".equals(language) ? "Denza OEM Test: ошибка запуска: "
+                    : "Denza OEM Test: start failed: ") + startError;
+        }
+        if (!instance.hudCheckState.running) return "";
         return instance.hudOutput.hudCheckStatus(language) + " · "
                 + instance.tbtPublisher.hudCheckStatus(language);
     }
@@ -581,6 +588,7 @@ final class NavHudLiveSender {
             HudCheckState next = action.apply(previous);
             if (next.running && !isRuntimeEnabled()) return;
             if (next.equals(previous)) return;
+            hudCheckStartError = "";
             if (next.running && mapProfileCalibrationState.running) {
                 stopMapProfileOnWorker("hud-check-start:" + safeReason(reason),
                         () -> updateHudCheck(action, reason));
@@ -1067,7 +1075,6 @@ final class NavHudLiveSender {
                 denzaOemRecording = DenzaOemRecording.load(context);
             }
         } catch (IOException error) {
-            denzaOemReplayActive = false;
             String detail = "Denza OEM recording load failed generation=" + generation
                     + " exception=" + error.getClass().getName()
                     + ":" + safeReason(error.getMessage())
@@ -1076,6 +1083,9 @@ final class NavHudLiveSender {
                     + safeReason(error.getCause().getMessage()));
             Log.e(TAG, detail, error);
             log(detail + " stack=" + Log.getStackTraceString(error));
+            hudCheckStartError = error.toString();
+            stopManualOnWorker("denza-oem-start-failed", true);
+            logHudCheckUserUpdate(hudCheckState, "denza-oem-start-failed");
             return;
         }
         denzaOemReplayActive = true;
@@ -1487,6 +1497,7 @@ final class NavHudLiveSender {
     private boolean tbtGMapsObserver;
     private boolean manualTbtActive;
     private volatile HudCheckState hudCheckState = IDLE_HUD_CHECK;
+    private volatile String hudCheckStartError = "";
     private final Runnable hudCheckTick = this::tickHudCheck;
     private final Runnable denzaOemTick = this::tickDenzaOemRecording;
     private DenzaOemRecording denzaOemRecording;

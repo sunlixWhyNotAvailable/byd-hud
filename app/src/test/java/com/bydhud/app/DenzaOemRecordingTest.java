@@ -70,7 +70,8 @@ public final class DenzaOemRecordingTest {
 
     private static byte[] readAsset() throws Exception {
         try (InputStream input = DenzaOemRecordingTest.class
-                .getResourceAsStream("/denza-n9-roadinfo.bin.gz")) {
+                .getResourceAsStream("/" + DenzaOemRecording.ASSET_PATH.substring(
+                        DenzaOemRecording.ASSET_PATH.lastIndexOf('/') + 1))) {
             assertNotNull("The production Denza recording asset must be on the test classpath", input);
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             byte[] buffer = new byte[8192];

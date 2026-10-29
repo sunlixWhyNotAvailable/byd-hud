@@ -18,7 +18,8 @@ import java.util.List;
 
 /** Verified first-30-second RoadInfo recording from the captured Denza N9 stream. */
 public final class DenzaOemRecording {
-    public static final String ASSET_PATH = "hud-check/denza-n9-roadinfo.bin.gz";
+    // A .gz suffix is expanded and stripped by Android resource packaging.
+    public static final String ASSET_PATH = "hud-check/denza-n9-roadinfo.dat";
     private static final byte[] MAGIC = {'D', 'N', 'Z', '1'};
     private static final int FORMAT_VERSION = 1;
     private static final int FRAME_COUNT = 292;

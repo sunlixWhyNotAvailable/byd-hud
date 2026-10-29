@@ -7831,7 +7831,7 @@ private fun HudCheckTab(
         }
         if (state.mode != HudCheckState.Mode.SHANGHAI) {
             item(key = "hud-check-status") {
-                if (state.running && deliveryStatus.isNotBlank()) {
+                if (deliveryStatus.isNotBlank()) {
                     Text(
                         deliveryStatus,
                         color = if (statusIsError) palette.red else palette.muted,
