@@ -96,9 +96,7 @@ final class UserSettingsDiagnostics {
             HudMapProfile profile = saved.get(source);
             boolean explicitlySaved = profile != null;
             if (profile == null) profile = HudMapProfile.defaults(source);
-            resolvedProfiles.put(new JSONObject().put("source", source.name())
-                    .put("saved", explicitlySaved).put("x", profile.x)
-                    .put("y", profile.y).put("scale", profile.scale));
+            resolvedProfiles.put(profile.toJson().put("saved", explicitlySaved));
         }
         output.put("effectiveMapImageProfiles", resolvedProfiles);
         UpdateHintAppearance hint = UpdateHintAppearance.Companion.read(context);

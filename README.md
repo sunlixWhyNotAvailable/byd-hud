@@ -164,6 +164,8 @@ Images update at up to five times per second while changing and slow to once per
 
 #### Navigator image profiles
 
+Updated Waze 5.25 and Google Maps also support per-profile colors for non-route roads, the route, the vehicle marker and the background. Use the palette button to choose a preset, HEX or RGB value. Traffic colors and the ordinary tablet map retain their native appearance. Applying a color rebuilds the HUD map briefly; `Restore defaults` resets framing and colors in the draft, and `Save` keeps them. Older navigator builds do not apply these color settings.
+
 Enable Native or Experimental map display first; profile controls are disabled when map display is Off. Each source can have one saved profile. Use its edit button to change an existing profile, or its delete button to remove it with confirmation.
 
 1. Press `+ Add profile` and choose Google Maps, Waze without Surface, or Waze with Surface. The list depends on installed navigators; the two Waze modes have separate profiles.

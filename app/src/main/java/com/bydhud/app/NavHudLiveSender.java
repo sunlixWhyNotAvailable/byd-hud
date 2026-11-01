@@ -283,8 +283,7 @@ final class NavHudLiveSender {
             JSONObject state = new JSONObject().put("check", hudCheckState.checkpoint())
                     .put("mapLive", mapLiveState.running);
             HudMapProfile draft = mapProfileCalibrationState.running ? mapProfileCalibrationState.draft : null;
-            if (draft != null) state.put("profile", new JSONObject().put("source", draft.source.name())
-                    .put("x", draft.x).put("y", draft.y).put("scale", draft.scale));
+            if (draft != null) state.put("profile", draft.toJson());
             ShellRuntimeSession.checkpointOutput(context, state.toString(),
                     completion == null ? null : () -> handler.post(completion));
         } catch (Exception error) {
@@ -303,9 +302,7 @@ final class NavHudLiveSender {
                 JSONObject state = new JSONObject(checkpoint);
                 JSONObject profile = state.optJSONObject("profile");
                 if (profile != null) {
-                    startMapProfile(context, new HudMapProfile(HudMapProfile.Source.valueOf(profile.getString("source")),
-                            (float) profile.getDouble("x"), (float) profile.getDouble("y"),
-                            (float) profile.getDouble("scale")));
+                    startMapProfile(context, HudMapProfile.fromJson(profile));
                 } else if (state.optBoolean("mapLive")) {
                     startMapLive(context);
                 } else if (state.has("check")) {

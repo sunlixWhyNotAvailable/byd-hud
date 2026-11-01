@@ -240,8 +240,7 @@ final class VehicleConfigurationDiagnostics {
     static JSONArray mapImageProfiles(Iterable<HudMapProfile> profiles) throws Exception {
         JSONArray result = new JSONArray();
         for (HudMapProfile profile : profiles) {
-            result.put(new JSONObject().put("source", profile.source.name())
-                    .put("x", profile.x).put("y", profile.y).put("scale", profile.scale));
+            result.put(profile.toJson());
         }
         return result;
     }

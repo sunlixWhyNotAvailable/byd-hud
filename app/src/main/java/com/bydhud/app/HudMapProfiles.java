@@ -67,9 +67,12 @@ public final class HudMapProfiles {
     }
 
     private static EnumMap<HudMapProfile.Source, HudMapProfile> read(Context context) {
+        return decode(HudPrefs.mapProfilesJson(context));
+    }
+
+    static EnumMap<HudMapProfile.Source, HudMapProfile> decode(String raw) {
         EnumMap<HudMapProfile.Source, HudMapProfile> result =
                 new EnumMap<>(HudMapProfile.Source.class);
-        String raw = HudPrefs.mapProfilesJson(context);
         if (raw.isEmpty()) return result;
         try {
             JSONArray values = new JSONArray(raw);
@@ -79,8 +82,7 @@ public final class HudMapProfiles {
                 try {
                     HudMapProfile.Source source = HudMapProfile.Source.valueOf(
                             value.optString("source", ""));
-                    result.put(source, new HudMapProfile(source,
-                            (float) value.getDouble("x"), (float) value.getDouble("y"), (float) value.getDouble("scale")));
+                    result.put(source, HudMapProfile.fromJson(value));
                 } catch (IllegalArgumentException | JSONException ignored) {
                     // Ignore corrupt/obsolete entries while keeping other saved sources usable.
                 }
@@ -91,18 +93,13 @@ public final class HudMapProfiles {
         return result;
     }
 
-    private static String encode(Map<HudMapProfile.Source, HudMapProfile> profiles) {
+    static String encode(Map<HudMapProfile.Source, HudMapProfile> profiles) {
         JSONArray values = new JSONArray();
         for (HudMapProfile.Source source : HudMapProfile.Source.values()) {
             HudMapProfile profile = profiles.get(source);
             if (profile == null) continue;
-            JSONObject value = new JSONObject();
             try {
-                value.put("source", profile.source.name());
-                value.put("x", profile.x);
-                value.put("y", profile.y);
-                value.put("scale", profile.scale);
-                values.put(value);
+                values.put(profile.toJson());
             } catch (JSONException impossible) {
                 throw new IllegalStateException(impossible);
             }

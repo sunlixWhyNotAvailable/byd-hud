@@ -10,6 +10,7 @@ import android.os.Process;
 import android.os.SystemClock;
 
 import com.bydhud.mapcapture.CapturePollPolicy;
+import com.bydhud.mapcapture.MapPalette;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -461,6 +462,7 @@ public final class NavigatorMapCapture {
         boolean detailed = HudPrefs.isDetailedDebugArtifactsEnabled(app);
         answer.putBoolean("detailedLogs", detailed);
         int updateRateHz = HudPrefs.mapUpdateRateHz(app);
+        java.util.Map<HudMapProfile.Source, HudMapProfile> savedProfiles = HudMapProfiles.profiles(app);
         String lifeEvents = string(data, "lifecycleEvents", "[]");
         String logRequest = null;
         String timeoutLog = null;
@@ -487,6 +489,15 @@ public final class NavigatorMapCapture {
                 answer.putLong("frameTimeoutMs", 2500L);
                 answer.putLong("leaseMs", 6000L);
                 answer.putString("session", session);
+                HudMapProfile.Source paletteSource = MAPS_PACKAGE.equals(callerPackage)
+                        ? HudMapProfile.Source.GOOGLE_MAPS : captureSource(expectedSource, activeSourceMode);
+                if (paletteSource == null) paletteSource = HudMapProfile.Source.WAZE;
+                if (paletteSource != null) {
+                    HudMapProfile paletteProfile = overrideProfile != null && overrideProfile.source == paletteSource
+                            ? overrideProfile : savedProfiles.get(paletteSource);
+                    answer.putIntArray(MapPalette.KEY, (paletteProfile == null
+                            ? MapPalette.DEFAULT : paletteProfile.palette).encode());
+                }
                 if (!"[]".equals(lifeEvents) && !lifeEvents.isEmpty() && lifecycleIdentityValid) {
                     acceptLifecycle = true;
                     lifeSession = session;
@@ -1451,7 +1462,7 @@ public final class NavigatorMapCapture {
                 log(app, "navigator_map_capture frame_health owner=" + field(callerPackage, 96)
                         + " session=" + frameSession + " id=" + id + " first=" + first
                         + " frames=" + framesSinceHealth + " totalMs=" + totalMs
-                        + " receivedAgeMs=" + age);
+                        + " receivedAgeMs=" + age + " paletteApplied=" + paletteApplied(data));
                 lastFrameHealthMs = now; frameLogSession = frameSession; framesSinceHealth = 0L;
             }
             return;
@@ -1475,6 +1486,7 @@ public final class NavigatorMapCapture {
                 + " profile=" + profileName(selection.profile)
                 + " profileRevision=" + selection.catalogRevision
                 + " profileEpoch=" + selection.epoch
+                + " paletteApplied=" + paletteApplied(data)
                 + " size=" + bitmap.getWidth() + "x" + bitmap.getHeight()
                 + " receivedAgeMs=" + age + " pixels=" + pixelChange
                 + " inputHash=" + inputHash
@@ -1682,7 +1694,14 @@ public final class NavigatorMapCapture {
 
     private static String profileName(HudMapProfile profile) {
         return profile == null ? "none" : profile.source.name() + ":"
-                + profile.x + "," + profile.y + "," + profile.scale;
+                + profile.x + "," + profile.y + "," + profile.scale + ":" + profile.palette;
+    }
+
+    private static String paletteApplied(Bundle data) {
+        int[] wire = data.getIntArray("hudPaletteApplied");
+        if (wire == null) return "unsupported";
+        try { return MapPalette.decode(wire).toString(); }
+        catch (IllegalArgumentException error) { return "invalid:" + error.getMessage(); }
     }
 
     private static String field(String value, int maxLength) {

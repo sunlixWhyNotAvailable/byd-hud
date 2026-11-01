@@ -4078,9 +4078,11 @@ private fun WidgetColorLine(
     palette: Palette,
     enabled: Boolean,
     onHelp: (() -> Unit)? = null,
+    rowFill: Color = Color.Transparent,
+    verticalPadding: Dp = 12.dp,
     onPick: () -> Unit
 ) {
-    ActionRow(title, "", palette, enabled = enabled, onHelp = onHelp) {
+    ActionRow(title, "", palette, verticalPadding = verticalPadding, enabled = enabled, onHelp = onHelp, rowFill = rowFill) {
         Row(Modifier.width(106.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.width(52.dp).height(44.dp).clip(RoundedCornerShape(7.dp))
@@ -9670,6 +9672,14 @@ private fun MapProfileEditorDialog(
     val compact = configuration.screenHeightDp < 720 || configuration.fontScale > 1.2f
     val maxDialogHeight = (configuration.screenHeightDp - 28).coerceAtLeast(260).dp
     val draft = editor.draft
+    var choosingColor by remember { mutableIntStateOf(-1) }
+    val colorTitles = listOf(
+        language.choose("Сторонні дороги", "Non-route roads", "Дороги вне маршрута"),
+        language.choose("Маршрут", "Route", "Маршрут"),
+        language.choose("Маркер авто", "Vehicle marker", "Маркер автомобиля"),
+        language.choose("Тло", "Background", "Фон")
+    )
+    val colorValues = listOf(draft.palette.road, draft.palette.route, draft.palette.marker, draft.palette.background)
     val sourceIndex = sourceOptions.indexOf(draft.source).coerceAtLeast(0)
     val disabledSourceOptions = sourceOptions.mapIndexedNotNull { index, source ->
         index.takeIf { source in occupiedSources }
@@ -9815,9 +9825,9 @@ private fun MapProfileEditorDialog(
                     SettingRow(
                         language.choose("Типовий профіль", "Default profile", "Типовой профиль"),
                         language.choose(
-                            "Відновлює X, Y та масштаб. Натисніть «Зберегти», щоб залишити зміни.",
-                            "Restores X, Y and scale. Press Save to keep the changes.",
-                            "Восстанавливает X, Y и масштаб. Нажмите «Сохранить», чтобы оставить изменения."),
+                            "Відновлює X, Y, масштаб і кольори. Натисніть «Зберегти», щоб залишити зміни.",
+                            "Restores X, Y, scale and colors. Press Save to keep the changes.",
+                            "Восстанавливает X, Y, масштаб и цвета. Нажмите «Сохранить», чтобы оставить изменения."),
                         palette,
                         enabled = !saving,
                         rowFill = featureMaturityFill(palette)
@@ -9923,6 +9933,14 @@ private fun MapProfileEditorDialog(
                             ) { onDraftChange(draft.withY(it)) }
                         }
                     }
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        colorTitles.forEachIndexed { index, title ->
+                            WidgetColorLine(title, colorValues[index], palette, !saving,
+                                rowFill = featureMaturityFill(palette), verticalPadding = 6.dp) {
+                                choosingColor = index
+                            }
+                        }
+                    }
                 }
                 Row(
                     Modifier.fillMaxWidth(),
@@ -9943,6 +9961,19 @@ private fun MapProfileEditorDialog(
                 }
             }
         }
+    }
+    if (choosingColor in colorTitles.indices) {
+        WidgetColorPicker(
+            initialArgb = colorValues[choosingColor], title = colorTitles[choosingColor],
+            copy = when (language) { Language.Ua -> uaCopy(); Language.En -> enCopy(); Language.Ru -> ruCopy() },
+            palette = palette, onDismiss = { choosingColor = -1 },
+            onSelect = { color ->
+                val colors = colorValues.toMutableList()
+                colors[choosingColor] = color
+                onDraftChange(draft.withPalette(com.bydhud.mapcapture.MapPalette(colors[0], colors[1], colors[2], colors[3])))
+                choosingColor = -1
+            }
+        )
     }
 }
 
