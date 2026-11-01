@@ -59,6 +59,9 @@ final class VehicleConfigurationZip {
             "(?i)v?[0-9]{1,10}(?:\\.[0-9]{1,10}){0,7}"
                     + "(?:[-+](?:alpha|beta|rc|dev|debug|release|snapshot|build)"
                     + "(?:[._-]?[0-9]{1,10})?){0,2}");
+    private static final Pattern PATCH_REPORT_VERSION_FIELD = Pattern.compile(
+            "(?:/reports/[0-9]+)?(?:/stages/[0-9]+/fields/reports/[0-9]+)*"
+                    + "/(?:components/[0-9]+/fields|stages/[0-9]+/fields/output)/versionName");
     private static final Pattern CONFIG_KEY = Pattern.compile(
             "(?i)(?:^|[\\s\\\"'<,{;])([a-z0-9_.-]{1,128})"
                     + "(?=\\s*(?:[\\\"']\\s*)?[:=>])");
@@ -1106,6 +1109,9 @@ final class VehicleConfigurationZip {
     }
 
     private static boolean knownVersionField(String entry, String field) {
+        if ("navigator-patch-reports.json".equals(entry)) {
+            return PATCH_REPORT_VERSION_FIELD.matcher(field).matches();
+        }
         if ("app/device.json".equals(entry) && "/release".equals(field)) return true;
         if ("adb/properties.json".equals(entry)
                 && "/ro.build.version.release".equals(field)) return true;

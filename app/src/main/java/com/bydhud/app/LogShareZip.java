@@ -6,10 +6,12 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.EOFException;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -285,6 +287,7 @@ final class LogShareZip {
         File part = new File(shares, output.getName() + ".part");
         File staging = new File(shares, output.getName() + ".staging");
         List<String> omissions = new ArrayList<>();
+        List<String> corruptions = new ArrayList<>();
         org.json.JSONArray priorOmissions = input.optJSONArray("omissions");
         if (priorOmissions != null) {
             for (int i = 0; i < priorOmissions.length(); i++) {
@@ -295,13 +298,14 @@ final class LogShareZip {
         try {
             ShellWorkFiles.directory(staging);
             ShellWorkEntryPoint.progress(new JSONObject().put("phase", "COPYING"));
-            List<SnapshotFile> files = copySnapshotToStaging(staging, sources, omissions);
+            List<SnapshotFile> files = copySnapshotToStaging(staging, sources, omissions, corruptions);
             JSONObject reports = input.getJSONObject("reports");
             if (files.isEmpty() && !reportsCoverSelectedDay(reports, input.optJSONArray("days"))) {
                 throw new IOException("No recording files or selected-day patch reports copied: " + omissions);
             }
             boolean incomplete = addWriterStatus(staging, files, ShellWorkEntryPoint.strings(input.getJSONArray("days")),
-                    input.getBoolean("checkpoint"), true, reports, omissions, input.getJSONObject("health"));
+                    input.getBoolean("checkpoint"), true, reports, omissions, corruptions,
+                    input.getJSONObject("health"));
             ShellWorkEntryPoint.progress(new JSONObject().put("phase", "ARCHIVING"));
             NavigatorPatchReportStore.ExportResult exported = writeZip(part, files, context, reports);
             checkCancelled();
@@ -381,13 +385,14 @@ final class LogShareZip {
             List<String> days, boolean checkpoint, boolean storageReady,
             JSONObject reportSnapshot, List<String> omissions) throws IOException {
         try { return addWriterStatus(staging, files, days, checkpoint, storageReady, reportSnapshot,
-                omissions, WazeCaptureDebugWriter.healthSnapshot()); }
+                omissions, Collections.emptyList(), WazeCaptureDebugWriter.healthSnapshot()); }
         catch (JSONException error) { throw new IOException(error); }
     }
 
-    private static boolean addWriterStatus(File staging, List<SnapshotFile> files,
+    static boolean addWriterStatus(File staging, List<SnapshotFile> files,
             List<String> days, boolean checkpoint, boolean storageReady,
-            JSONObject reportSnapshot, List<String> omissions, JSONObject health) throws IOException {
+            JSONObject reportSnapshot, List<String> omissions, List<String> corruptions,
+            JSONObject health) throws IOException {
         try {
             boolean reportsIncomplete = reportSnapshot.optBoolean("incompleteReports");
             JSONObject history = incidentSummary(files);
@@ -395,12 +400,13 @@ final class LogShareZip {
                     || health.optBoolean("incidentPersistenceUncertain");
             boolean confirmedIncomplete = !checkpoint || !storageReady
                     || health.getBoolean("lossObserved") || history.optBoolean("lossObserved")
-                    || !omissions.isEmpty();
+                    || !omissions.isEmpty() || !corruptions.isEmpty();
             boolean incomplete = confirmedIncomplete || uncertain;
             JSONObject transferDiagnostics = transferDiagnosticSummary(files);
             health.put("selectedDays", new org.json.JSONArray(days))
                     .put("incidentHistory", history)
                     .put("omittedOrTruncatedFiles", new org.json.JSONArray(omissions))
+                    .put("corruptedFiles", new org.json.JSONArray(corruptions))
                     .put("collectionOutcome", incomplete ? "PARTIAL" : "FULL")
                     .put("writerCheckpointReady", checkpoint).put("storageSnapshotReady", storageReady)
                     .put("navigatorPatchReportCount", reportSnapshot.optInt("reportCount"))
@@ -429,6 +435,7 @@ final class LogShareZip {
                     + "lossObservedInCurrentProcess=" + health.getBoolean("lossObserved") + "\n"
                     + "historicalIncidents=" + history + "\n"
                     + "omittedOrTruncatedFiles=" + omissions + "\n"
+                    + "corruptedFiles=" + corruptions + "\n"
                     + (storageReady ? "Available files were copied.\n" : "Storage lock timed out; diagnostic status only, no log files copied.\n")
                     + "See " + statusEntry + " for writer progress, pending work and errors.\n");
             return incomplete;
@@ -653,8 +660,8 @@ final class LogShareZip {
         }
     }
 
-    private static List<SnapshotFile> copySnapshotToStaging(
-            File staging, List<SnapshotFile> sources, List<String> omissions) throws IOException {
+    static List<SnapshotFile> copySnapshotToStaging(File staging, List<SnapshotFile> sources,
+            List<String> omissions, List<String> corruptions) throws IOException {
         List<SnapshotFile> copied = new ArrayList<>(sources.size());
         for (SnapshotFile source : sources) {
             checkCancelled();
@@ -665,8 +672,9 @@ final class LogShareZip {
                 throw new IOException("cannot create staging path");
             }
             try {
-                copyFile(source, target);
-                if (appendLog(source.file)) trimIncompleteLine(target, source.entryName, omissions);
+                String corruption = copyFile(source, target);
+                if (corruption != null) corruptions.add(source.entryName + ": " + corruption);
+                else if (appendLog(source.file)) trimIncompleteLine(target, source.entryName, omissions);
                 target.setLastModified(source.file.lastModified());
                 copied.add(new SnapshotFile(target, source.entryName, target.length()));
             } catch (InterruptedIOException cancelled) { throw cancelled; }
@@ -678,12 +686,14 @@ final class LogShareZip {
         return copied;
     }
 
-    private static void copyFile(SnapshotFile source, File target) throws IOException {
-        if (source.captured != null) { Files.write(target.toPath(), source.captured); return; }
+    private static String copyFile(SnapshotFile source, File target) throws IOException {
         byte[] buffer = new byte[BUFFER_BYTES];
-        try (FileInputStream input = openSnapshotSource(source.file);
+        boolean textLog = appendLog(source.file);
+        long offset = 0L, firstNul = -1L, nulBytes = 0L;
+        try (InputStream input = source.captured == null ? openSnapshotSource(source.file)
+                     : new ByteArrayInputStream(source.captured);
              FileOutputStream output = new FileOutputStream(target, false)) {
-            long remaining = source.length;
+            long remaining = source.captured == null ? source.length : source.captured.length;
             while (remaining > 0L) {
                 checkCancelled();
                 int read = input.read(buffer, 0,
@@ -692,9 +702,18 @@ final class LogShareZip {
                     throw new EOFException("source truncated: " + source.entryName);
                 }
                 output.write(buffer, 0, read);
+                if (textLog) {
+                    for (int i = 0; i < read; i++) if (buffer[i] == 0) {
+                        if (firstNul < 0L) firstNul = offset + i;
+                        nulBytes++;
+                    }
+                }
+                offset += read;
                 remaining -= read;
             }
         }
+        return nulBytes == 0L ? null : "NUL bytes=" + nulBytes + " firstByteOffset=" + firstNul
+                + "; original snapshot bytes preserved";
     }
 
     private static FileInputStream openSnapshotSource(File file) throws IOException {

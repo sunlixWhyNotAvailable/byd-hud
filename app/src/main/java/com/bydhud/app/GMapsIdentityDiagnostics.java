@@ -17,6 +17,7 @@ import java.util.Arrays;
 /** Read-only evidence for the existing Google registration fence; never sends/cancels a token. */
 public final class GMapsIdentityDiagnostics {
     static final String BUILD = "identity-20260928-r2";
+    static final String QUERY_UNSUPPORTED = "mapsCanQueryHudCapability=unsupported";
     static final String ACTION = "com.bydhud.app.gmaps.DIRECT_IDENTITY";
     static final int REQUEST = 2101;
     static final int FLAGS = PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT;
@@ -154,13 +155,21 @@ public final class GMapsIdentityDiagnostics {
             return;
         }
         StringBuilder out = new StringBuilder("visibilityProbe=" + BUILD + " user=" + args[0]);
-        field(out, "mapsCanQueryHud", () -> {
-            Class<?> activityThread = Class.forName("android.app.ActivityThread");
-            Object pm = activityThread.getMethod("getPackageManager").invoke(null);
-            return Class.forName("android.content.pm.IPackageManager")
-                    .getMethod("canPackageQuery", String.class, String.class, int.class)
-                    .invoke(pm, GMapsDirectChannel.PACKAGE_NAME, "com.bydhud.app", Integer.parseInt(args[0]));
-        });
+        try {
+            java.lang.reflect.Method query = Class.forName("android.content.pm.IPackageManager")
+                    .getMethod("canPackageQuery", String.class, String.class, int.class);
+            field(out, "mapsCanQueryHud", () -> {
+                Class<?> activityThread = Class.forName("android.app.ActivityThread");
+                Object pm = activityThread.getMethod("getPackageManager").invoke(null);
+                return query.invoke(pm, GMapsDirectChannel.PACKAGE_NAME,
+                        "com.bydhud.app", Integer.parseInt(args[0]));
+            });
+        } catch (NoSuchMethodException missing) {
+            System.out.println(QUERY_UNSUPPORTED);
+            out.append(" mapsCanQueryHudError=").append(error(missing));
+        } catch (Throwable error) {
+            out.append(" mapsCanQueryHudError=").append(error(error));
+        }
         System.out.println(out);
     }
 }

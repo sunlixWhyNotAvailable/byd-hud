@@ -1,6 +1,8 @@
 package com.bydhud.app;
 
 import org.junit.Test;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.OutputStreamWriter;
@@ -60,6 +62,44 @@ public final class VehicleConfigurationZipRedactionTest {
             assertTrue(result.contains("[REDACTED PEM]"));
         } finally {
             if (source.exists()) assertTrue(source.delete());
+        }
+    }
+
+    @Test public void patchReportsRetainTypedVersionsButStillMaskAddresses() throws Exception {
+        for (String version : new String[]{"5.20.0.1", "5.25.0.1", "26.30.09.950492155"}) {
+            JSONObject identity = new JSONObject().put("versionName", version)
+                    .put("address", "192.168.10.15");
+            JSONObject report = new JSONObject()
+                    .put("components", new JSONArray().put(new JSONObject().put("fields", identity)))
+                    .put("stages", new JSONArray().put(new JSONObject().put("fields",
+                            new JSONObject().put("output", identity))))
+                    .put("unrelated", new JSONObject().put("versionName", "192.168.10.15"));
+            JSONObject daily = VehicleConfigurationZip.sanitizeJsonForExport(null, report,
+                    "navigator-patch-reports.json");
+            assertEquals(version, daily.getJSONArray("components").getJSONObject(0)
+                    .getJSONObject("fields").getString("versionName"));
+            assertEquals(version, daily.getJSONArray("stages").getJSONObject(0)
+                    .getJSONObject("fields").getJSONObject("output").getString("versionName"));
+            assertFalse(daily.toString().contains("192.168.10.15"));
+
+            report.getJSONArray("stages").put(new JSONObject().put("fields",
+                    new JSONObject().put("reports", new JSONArray().put(new JSONObject(report.toString())))));
+            JSONObject exported = VehicleConfigurationZip.sanitizeJsonForExport(null,
+                    new JSONObject().put("reports", new JSONArray().put(report)),
+                    "navigator-patch-reports.json");
+            JSONObject retained = exported.getJSONArray("reports").getJSONObject(0);
+            assertEquals(version, retained.getJSONArray("components").getJSONObject(0)
+                    .getJSONObject("fields").getString("versionName"));
+            JSONObject nested = retained.getJSONArray("stages").getJSONObject(1)
+                    .getJSONObject("fields").getJSONArray("reports").getJSONObject(0);
+            assertEquals(version, nested.getJSONArray("stages").getJSONObject(0)
+                    .getJSONObject("fields").getJSONObject("output").getString("versionName"));
+            assertFalse(exported.toString().contains("192.168.10.15"));
+            JSONObject other = VehicleConfigurationZip.sanitizeJsonForExport(null,
+                    new JSONObject().put("components", new JSONArray().put(new JSONObject()
+                            .put("fields", new JSONObject().put("versionName", "192.168.10.15")))),
+                    "other-report.json");
+            assertFalse(other.toString().contains("192.168.10.15"));
         }
     }
 

@@ -89,6 +89,7 @@ final class LocalAdbBridge {
     private static final Pattern SHANGHAI_SESSION_TOKEN = Pattern.compile("[a-f0-9]{12}");
     private static final String KEY_DIR = "adb_keys";
     private static volatile boolean permissionGrantInProgress;
+    private static volatile boolean gMapsPackageQueryUnsupported;
     private static final String PRIVATE_KEY_FILE = "adb_key.priv";
     private static final String PUBLIC_KEY_FILE = "adb_key.pub";
     private static final String LEGACY_PRIVATE_KEY_FILE = "bydhud_adb_private.pk8";
@@ -1702,17 +1703,28 @@ final class LocalAdbBridge {
             throw new SecurityException("Invalid diagnostic APK path");
         }
         int user = android.os.Process.myUid() / 100000;
-        String command = "echo '[visibility]'; /system/bin/app_process -Djava.class.path=" + path
+        String visibility = gMapsPackageQueryUnsupported
+                ? "echo 'mapsCanQueryHudCapability=unsupported cached=true'"
+                : "/system/bin/app_process -Djava.class.path=" + path
                 + " /system/bin com.bydhud.app.GMapsIdentityDiagnostics "
-                + user
-                + "; echo visibility_exit=$?; echo '[hud-pending-intents]'; "
+                + user + "; echo visibility_exit=$?";
+        String command = "echo '[visibility]'; " + visibility + "; echo '[hud-pending-intents]'; "
                 + "dumpsys -t 3 activity intents com.bydhud.app; echo intents_exit=$?; "
                 + "echo '[package-uids]'; cmd package list packages -U --user " + user + " com.bydhud.app; "
                 + "echo hud_package_exit=$?; cmd package list packages -U --user " + user + " app.revanced.android.apps.maps; "
                 + "echo maps_package_exit=$?";
         // Isolated, existing-key-only connection: this evidence must not hold up Instrument launch.
         try (ConfigurationExportSession session = openConfigurationExport(context, 10_000L)) {
-            return session.execute(command, 8_000L, 32 * 1024);
+            ShellResult result = session.execute(command, 8_000L, 32 * 1024);
+            // app_process exits after each probe; retain its capability result in the HUD process.
+            for (String line : result.output.split("\\r?\\n")) {
+                if ("[hud-pending-intents]".equals(line)) break;
+                if (GMapsIdentityDiagnostics.QUERY_UNSUPPORTED.equals(line)) {
+                    gMapsPackageQueryUnsupported = true;
+                    break;
+                }
+            }
+            return result;
         }
     }
 
