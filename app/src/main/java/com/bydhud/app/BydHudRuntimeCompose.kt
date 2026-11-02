@@ -925,6 +925,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var updateHintAppearance by remember { mutableStateOf(UpdateHintManager.appearance(activity)) }
     var showUpdateHintSettings by rememberSaveable { mutableStateOf(false) }
     val updateSnapshot by AppUpdateManager.snapshot.collectAsState()
+    val updatePresentationAllowed by AppUpdateManager.presentationAllowed.collectAsState()
     val updateOperation by AppUpdateManager.operationSnapshot.collectAsState()
     val pendingHintRouteResultId by UpdateHintManager.pendingRouteResultId.collectAsState()
     var showUpdateDialog by remember { mutableStateOf(false) }
@@ -1365,8 +1366,10 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         activity.composeReportMainUiState(blockingUiFlow)
     }
 
-    LaunchedEffect(activity, updateSnapshot.dialogRequested, appInForeground, showSetupDialog) {
-        if (!updateSnapshot.dialogRequested || !appInForeground || showSetupDialog) {
+    LaunchedEffect(activity, updateSnapshot.dialogRequested, updateSnapshot.manual,
+        updatePresentationAllowed, appInForeground, showSetupDialog) {
+        if (!updateSnapshot.dialogRequested || !appInForeground || showSetupDialog ||
+            !updateSnapshot.manual && !updatePresentationAllowed) {
             showUpdateDialog = false
             return@LaunchedEffect
         }

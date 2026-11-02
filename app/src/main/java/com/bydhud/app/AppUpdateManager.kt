@@ -10,11 +10,15 @@ import android.content.Intent
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.database.Cursor
+import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Environment
 import android.os.PowerManager
 import android.os.SystemClock
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.view.Display
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -41,11 +45,9 @@ import java.util.Locale
 
 //defines AppUpdateManager UI/state support so Compose code can keep rendering intent explicit.
 object AppUpdateManager {
-    const val AUTO_CHECK_DELAY_MS = 30_000L
     private const val PREFS_NAME = "bydhud_update_prefs"
     private const val KEY_AUTO_CHECK = "auto_check_enabled"
     private const val KEY_BETA_CHANNEL = "beta_channel_enabled"
-    internal const val SESSION_REFRESH_AGE_MS = 60 * 60 * 1000L
     private const val DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000L
     private const val EXPECTED_PACKAGE_NAME = "com.bydhud.app"
     private const val RELEASE_API_HOST = "api.github.com"
@@ -143,30 +145,39 @@ object AppUpdateManager {
         val result: CheckResult? = null,
         val checking: Boolean = false,
         val dialogRequested: Boolean = false,
-        val resultId: Long = 0L
+        val resultId: Long = 0L,
+        val manual: Boolean = false
     )
 
     private val session = UpdateSession(
         CoroutineScope(SupervisorJob() + Dispatchers.IO),
-        SystemClock::elapsedRealtime,
         ::fetchUpdate,
-        event = { detail -> appContext?.let { AppEventLogger.event(it, "update_check $detail") } }
+        event = { detail -> appContext?.let { AppEventLogger.event(it, "update_check $detail") } },
+        failure = { error -> appContext?.let { AppEventLogger.event(it,
+            FailureDiagnostics.format(error, "update_check", "fetch")) } }
     )
 
     @Volatile private var appContext: Context? = null
     private val wakePolicy = UpdateWakePolicy()
+    private val main = Handler(Looper.getMainLooper())
     private var wakeReceiver: BroadcastReceiver? = null
+    private var displayListener: DisplayManager.DisplayListener? = null
+    private var runtimeAdmitted = false
+    private var observingPower = false
+    private var vehiclePower = VehiclePowerMonitor.Reading()
+    private var channelChanged = false
+    private var lastAdmission = ""
+    private val conditions = MutableStateFlow(false)
+    internal val presentationAllowed: StateFlow<Boolean> = conditions.asStateFlow()
     private val fetchMutex = Mutex()
 
     /** Register only after runtime/user admission, never on coordinator-only process startup. */
-    @Synchronized private fun observeWake(app: Context) {
+    private fun observeWake(app: Context) {
         if (wakeReceiver != null) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
-                if (intent.action == Intent.ACTION_SCREEN_OFF) {
-                    wakePolicy.onSleep()
-                    session.pauseForSleep()
-                } else onRuntimeWake(context, intent.action ?: "")
+                reconcileConditions(app, intent.action ?: "screen",
+                    forceScreenOff = intent.action == Intent.ACTION_SCREEN_OFF)
             }
         }
         val filter = IntentFilter().apply {
@@ -176,24 +187,66 @@ object AppUpdateManager {
         if (Build.VERSION.SDK_INT >= 33) app.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         else app.registerReceiver(receiver, filter)
         wakeReceiver = receiver
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(id: Int) = onDisplayChanged(id)
+            override fun onDisplayRemoved(id: Int) = onDisplayChanged(id)
+            override fun onDisplayChanged(id: Int) {
+                if (id == Display.DEFAULT_DISPLAY) reconcileConditions(app, "display-changed")
+            }
+        }
+        app.getSystemService(DisplayManager::class.java)?.registerDisplayListener(listener, main)
+        displayListener = listener
     }
 
     @JvmStatic
     fun onRuntimeWake(context: Context, action: String) {
         val app = context.applicationContext
-        if (HudPrefs.isUserShutdownActive(app) || !HudPrefs.isBootEnabled(app)) return
-        initialize(app)
-        observeWake(app)
-        val interactive = app.getSystemService(PowerManager::class.java)?.isInteractive == true
-        if (!interactive && action != Intent.ACTION_SCREEN_ON) {
-            wakePolicy.onSleep()
-            session.pauseForSleep()
-            AppEventLogger.event(app, "update_check wake skipped reason=screen-off action=$action")
-            return
+        if (!UserRuntimeSession.allowsRuntime(app)) return
+        onMain {
+            initialize(app)
+            runtimeAdmitted = true
+            observeWake(app)
+            reconcileConditions(app, "wake:$action")
         }
-        if (!wakePolicy.onWake(action, SystemClock.elapsedRealtime())) return
-        AppEventLogger.event(app, "update_check wake action=$action")
-        session.wake(isAutoCheckEnabled(app), isBetaChannelEnabled(app))
+    }
+
+    private fun reconcileConditions(app: Context, reason: String, forceScreenOff: Boolean = false) {
+        val runtime = runtimeAdmitted && UserRuntimeSession.allowsRuntime(app)
+        val screenOn = !forceScreenOff && screenReady(app)
+        val automatic = isAutoCheckEnabled(app)
+        val observe = runtime && screenOn && (automatic || UpdateHintManager.isEnabled(app))
+        if (observe && !observingPower) {
+            observingPower = true
+            VehiclePowerMonitor.observe(app, "updates") { reading ->
+                vehiclePower = reading
+                reconcileConditions(app, "vehicle-power")
+            }
+        } else if (!observe && observingPower) {
+            observingPower = false
+            VehiclePowerMonitor.remove("updates")
+            vehiclePower = VehiclePowerMonitor.Reading(error = "observation-inactive")
+        }
+        val decision = wakePolicy.update(screenOn, vehiclePower.raw, automatic, runtime)
+        session.reconcileAutomatic(automatic, isBetaChannelEnabled(app), decision)
+        conditions.value = decision.allowed
+        val admission = "screen=$screenOn power=${vehiclePower.raw} runtime=$runtime automatic=$automatic allowed=${decision.allowed} error=${vehiclePower.error}"
+        if (admission != lastAdmission || decision.startCheck) {
+            lastAdmission = admission
+            AppEventLogger.event(app, "update_check admission $admission start=${decision.startCheck} source=$reason")
+        }
+    }
+
+    private fun screenReady(app: Context): Boolean =
+        app.getSystemService(PowerManager::class.java)?.isInteractive == true &&
+            app.getSystemService(DisplayManager::class.java)
+                ?.getDisplay(Display.DEFAULT_DISPLAY)?.state == Display.STATE_ON
+
+    private fun onMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) action() else main.post(action)
+    }
+
+    internal fun onPresentationSettingsChanged(context: Context) = onMain {
+        reconcileConditions(context.applicationContext, "hint-setting")
     }
 
     val snapshot: StateFlow<Snapshot> = session.snapshot
@@ -225,17 +278,16 @@ object AppUpdateManager {
     @JvmStatic
     fun onSessionEntry(context: Context) {
         val app = context.applicationContext
-        initialize(app)
-        observeWake(app)
-        val interactive = app.getSystemService(PowerManager::class.java)?.isInteractive == true
-        if (!interactive) {
-            wakePolicy.onSleep()
-            session.pauseForSleep()
-            AppEventLogger.event(app, "update_check entry skipped reason=screen-off")
+        onMain {
+            initialize(app)
+            runtimeAdmitted = UserRuntimeSession.allowsRuntime(app)
+            observeWake(app)
+            if (channelChanged) {
+                channelChanged = false
+                wakePolicy.reset()
+            }
+            reconcileConditions(app, "entry")
         }
-        if (wakePolicy.onEntry(SystemClock.elapsedRealtime(), interactive)) {
-            session.wake(isAutoCheckEnabled(app), isBetaChannelEnabled(app))
-        } else session.enter(isAutoCheckEnabled(app), isBetaChannelEnabled(app))
     }
 
     @JvmStatic
@@ -258,9 +310,16 @@ object AppUpdateManager {
     @JvmStatic
     fun resetForShutdown() {
         session.reset()
-        synchronized(this) {
+        onMain {
+            runtimeAdmitted = false
+            observingPower = false
+            VehiclePowerMonitor.remove("updates")
+            vehiclePower = VehiclePowerMonitor.Reading()
+            conditions.value = false
             wakeReceiver?.let { receiver -> appContext?.unregisterReceiver(receiver) }
             wakeReceiver = null
+            displayListener?.let { appContext?.getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(it) }
+            displayListener = null
             wakePolicy.reset()
         }
         operationController?.shutdown()
@@ -291,7 +350,7 @@ object AppUpdateManager {
             .edit()
             .putBoolean(KEY_AUTO_CHECK, enabled)
             .apply()
-        if (enabled) onSessionEntry(app) else session.disableAutomatic()
+        if (enabled) onSessionEntry(app) else onMain { reconcileConditions(app, "automatic-off") }
     }
 
     fun isBetaChannelEnabled(context: Context): Boolean {
@@ -309,6 +368,7 @@ object AppUpdateManager {
             .putBoolean(KEY_BETA_CHANNEL, enabled)
             .apply()
         session.changeChannel(enabled)
+        onMain { channelChanged = true }
     }
 
     //No Context or UI is retained by the process-owned request.
@@ -341,13 +401,13 @@ object AppUpdateManager {
         }
     }
 
-    /** Small process-session controller; injected clock/delay/fetch make its lifecycle deterministic. */
+    /** Process-owned requests remain independent from Activity recreation. */
     internal class UpdateSession(
         private val scope: CoroutineScope,
-        private val elapsedMs: () -> Long,
         private val fetch: suspend (Boolean) -> CheckResult,
         private val waitBeforeCheck: suspend (Long) -> Unit = { delay(it) },
-        private val event: (String) -> Unit = {}
+        private val event: (String) -> Unit = {},
+        private val failure: (Exception) -> Unit = {}
     ) {
         private class Request(val generation: Long, var manual: Boolean) {
             var dismissed = false
@@ -362,45 +422,39 @@ object AppUpdateManager {
         private var nextResultId = 0L
         private var scheduled: Job? = null
         private var active: Request? = null
-        private var lastCompletedAt: Long? = null
         private var automatic = false
-        private var sleeping = false
+        private var automaticAllowed = false
+        private var cycleActive = false
+        private var pendingAutomatic = false
         private var failures = 0
 
-        fun enter(automaticEnabled: Boolean, betaChannel: Boolean) = synchronized(lock) {
+        fun reconcileAutomatic(automaticEnabled: Boolean, betaChannel: Boolean,
+            decision: UpdateWakePolicy.Decision) = synchronized(lock) {
             changeChannelLocked(betaChannel)
             automatic = automaticEnabled
+            automaticAllowed = automatic && decision.allowed
             if (!automaticEnabled) {
                 disableAutomaticLocked()
                 return@synchronized
             }
-            if (sleeping || scheduled != null || active != null) return@synchronized
-            if (state.value.dialogRequested && state.value.result !is CheckResult.Error) return@synchronized
-            val completed = lastCompletedAt
-            if (completed != null && elapsedMs() - completed < SESSION_REFRESH_AGE_MS) return@synchronized
-            scheduleLocked(AUTO_CHECK_DELAY_MS, "entry")
-        }
-
-        fun wake(automaticEnabled: Boolean, betaChannel: Boolean) = synchronized(lock) {
-            changeChannelLocked(betaChannel)
-            sleeping = false
-            automatic = automaticEnabled
-            failures = 0
-            if (!automatic) {
-                disableAutomaticLocked()
+            if (decision.endCycle) {
+                cycleActive = false
+                pendingAutomatic = false
+                cancelScheduledLocked()
+                cancelAutomaticRequestLocked()
                 return@synchronized
             }
-            cancelScheduledLocked()
-            // A user-owned request already in progress supplies this wake's result.
-            if (active?.manual == true) return@synchronized
-            cancelAutomaticRequestLocked()
-            scheduleLocked(AUTO_CHECK_DELAY_MS, "wake")
-        }
-
-        fun pauseForSleep() = synchronized(lock) {
-            sleeping = true
-            cancelScheduledLocked()
-            cancelAutomaticRequestLocked()
+            if (decision.startCheck) {
+                cycleActive = true
+                pendingAutomatic = false
+                failures = 0
+                cancelScheduledLocked()
+                if (active?.manual == true) return@synchronized
+                cancelAutomaticRequestLocked()
+                startRequestLocked(manual = false)
+            } else if (automaticAllowed && pendingAutomatic && scheduled == null && active == null) {
+                startRequestLocked(manual = false)
+            }
         }
 
         private fun scheduleLocked(waitMs: Long, reason: String) {
@@ -428,7 +482,7 @@ object AppUpdateManager {
             if (current != null) {
                 current.manual = true
                 current.dismissed = false
-                state.value = state.value.copy(dialogRequested = true)
+                state.value = state.value.copy(dialogRequested = true, manual = true)
             } else {
                 startRequestLocked(manual = true)
             }
@@ -449,31 +503,29 @@ object AppUpdateManager {
             true
         }
 
-        fun disableAutomatic() = synchronized(lock) { disableAutomaticLocked() }
-
         fun changeChannel(betaChannel: Boolean) = synchronized(lock) { changeChannelLocked(betaChannel) }
 
         fun reset() = synchronized(lock) {
+            disableAutomaticLocked()
             clearLocked()
             channel = null
         }
 
         private fun changeChannelLocked(betaChannel: Boolean) {
             if (channel == betaChannel) return
-            clearLocked(preserveSleep = true)
+            clearLocked()
             channel = betaChannel
         }
 
-        private fun clearLocked(preserveSleep: Boolean = false) {
+        private fun clearLocked() {
             ++generation
             scheduled?.cancel()
             scheduled = null
             val previous = active
             active = null
             previous?.job?.cancel()
-            lastCompletedAt = null
+            pendingAutomatic = false
             failures = 0
-            if (!preserveSleep) sleeping = false
             state.value = Snapshot()
         }
 
@@ -486,6 +538,9 @@ object AppUpdateManager {
 
         private fun disableAutomaticLocked() {
             automatic = false
+            automaticAllowed = false
+            cycleActive = false
+            pendingAutomatic = false
             failures = 0
             cancelScheduledLocked()
             cancelAutomaticRequestLocked()
@@ -502,11 +557,16 @@ object AppUpdateManager {
         }
 
         private fun startRequestLocked(manual: Boolean) {
+            if (!manual && !automaticAllowed) {
+                pendingAutomatic = cycleActive
+                return
+            }
+            pendingAutomatic = false
             val request = Request(++generation, manual)
             val requestChannel = checkNotNull(channel)
             event("started generation=${request.generation} manual=$manual beta=$requestChannel")
             active = request
-            state.value = state.value.copy(checking = true, dialogRequested = manual)
+            state.value = state.value.copy(checking = true, dialogRequested = manual, manual = manual)
             val job = scope.launch(start = CoroutineStart.LAZY) {
                 try {
                     val result = try {
@@ -514,6 +574,7 @@ object AppUpdateManager {
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (error: Exception) {
+                        failure(error)
                         CheckResult.Error(error.message ?: "Update check failed")
                     }
                     currentCoroutineContext().ensureActive()
@@ -521,17 +582,17 @@ object AppUpdateManager {
                         if (active === request && generation == request.generation) {
                             active = null
                             if (result !is CheckResult.Error) {
-                                lastCompletedAt = elapsedMs()
                                 failures = 0
-                            } else lastCompletedAt = null
+                            }
                             state.value = Snapshot(
                                 result = result,
                                 checking = false,
                                 dialogRequested = !request.dismissed && (request.manual || result is CheckResult.Available),
-                                resultId = ++nextResultId
+                                resultId = ++nextResultId,
+                                manual = request.manual
                             )
                             event("completed generation=${request.generation} resultId=$nextResultId outcome=${result.javaClass.simpleName}")
-                            if (result is CheckResult.Error && automatic && !sleeping) {
+                            if (result is CheckResult.Error && automatic && cycleActive) {
                                 val retryMs = when (failures++) {
                                     0 -> 30_000L
                                     1 -> 60_000L

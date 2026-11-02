@@ -37,18 +37,7 @@ internal object DashboardWidgetController {
     private var displayListener: DisplayManager.DisplayListener? = null
     private var pendingWake: Pair<String, Long>? = null
     private var vehiclePower = -1
-    private var powerContext: Context? = null
-    private var powerObserversRegistered = false
-    private var powerReadPending = false
-    private var powerGeneration = 0L
     private var lastPowerError = ""
-    private val powerPoll = Runnable { powerContext?.let(::pollVehiclePower) }
-    private val powerReadExpiry = Runnable {
-        powerContext?.let { app ->
-            ++powerGeneration
-            applyVehiclePower(app, -1, "read-timeout")
-        }
-    }
 
     private fun wantsPowerObservation(app: Context): Boolean = state.visible &&
         overlayPermission == DashboardWidgetLifecyclePolicy.Permission.GRANTED &&
@@ -59,29 +48,15 @@ internal object DashboardWidgetController {
         DashboardWidgetLifecyclePolicy.visibleForVehiclePower(state.visible, vehiclePower)
 
     private fun observePower(app: Context) {
-        powerContext = app
-        if (!powerObserversRegistered) {
-            powerObserversRegistered = true
-            val proxy = InstrumentProxyManager.get(app)
-            proxy.addReadyListener { main.post { schedulePowerRead(app) } }
-            proxy.addUnavailableListener { reason -> main.post {
-                invalidatePower(app, "helper-unavailable:$reason")
-                schedulePowerRead(app)
-            } }
-        }
-        if (wantsPowerObservation(app)) schedulePowerRead(app)
-        else invalidatePower(app, "observation-inactive")
-    }
-
-    private fun schedulePowerRead(app: Context) {
-        if (!wantsPowerObservation(app) || powerReadPending || main.hasCallbacks(powerPoll)) return
-        main.post(powerPoll)
+        if (wantsPowerObservation(app)) {
+            VehiclePowerMonitor.observe(app, "dashboard-widget") { reading ->
+                applyVehiclePower(app, reading.raw, reading.error)
+            }
+        } else invalidatePower(app, "observation-inactive")
     }
 
     private fun invalidatePower(app: Context, reason: String) {
-        ++powerGeneration
-        main.removeCallbacks(powerPoll)
-        main.removeCallbacks(powerReadExpiry)
+        VehiclePowerMonitor.remove("dashboard-widget")
         applyVehiclePower(app, -1, reason)
     }
 
@@ -98,26 +73,6 @@ internal object DashboardWidgetController {
             state = state.copy(expanded = false)
         }
         if (changed) reconcile(app, allowRetry = true)
-    }
-
-    private fun pollVehiclePower(app: Context) {
-        if (!wantsPowerObservation(app)) {
-            invalidatePower(app, "observation-inactive")
-            return
-        }
-        if (powerReadPending) return
-        powerReadPending = true
-        val request = ++powerGeneration
-        // Bound the request while retaining the last confirmed power across read failures.
-        main.postDelayed(powerReadExpiry, 3_000L)
-        InstrumentProxyManager.get(app).readVehiclePower { result -> main.post {
-            powerReadPending = false
-            main.removeCallbacks(powerReadExpiry)
-            if (request == powerGeneration && wantsPowerObservation(app)) {
-                applyVehiclePower(app, result.vehiclePower, result.error)
-            }
-            if (wantsPowerObservation(app)) main.postDelayed(powerPoll, 1_000L)
-        } }
     }
 
     // Process-scoped observers also cover a manual session with auto-start disabled.

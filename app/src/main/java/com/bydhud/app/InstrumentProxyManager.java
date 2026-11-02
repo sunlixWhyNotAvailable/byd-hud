@@ -1258,7 +1258,7 @@ final class InstrumentProxyManager {
         boolean ready;
         synchronized (lock) { ready = state == State.READY && proxyBinder != null && proxyBinder.isBinderAlive(); }
         if (!ready) {
-            ensureStarted("dashboard-widget-power");
+            ensureStarted("vehicle-power");
             deliver(callback, Result.unavailable("vehicle power helper not ready"));
             return;
         }

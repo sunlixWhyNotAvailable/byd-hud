@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import java.util.Collections
 import java.util.IdentityHashMap
@@ -46,10 +47,13 @@ internal class UpdateHintPresentationPolicy {
     private var activeResultId = 0L
     private var ownUiVisible = false
 
-    fun onSnapshot(snapshot: AppUpdateManager.Snapshot, enabled: Boolean): UpdateHintPresentationDecision {
+    fun onSnapshot(snapshot: AppUpdateManager.Snapshot, enabled: Boolean,
+        conditionsMet: Boolean): UpdateHintPresentationDecision {
         if (snapshot.resultId == 0L) {
             return release("result-invalidated")
         }
+        if (!conditionsMet) return release("screen-or-vehicle-not-ready")
+        if (snapshot.checking && !snapshot.manual) return UpdateHintPresentationDecision.None
         if (snapshot.resultId <= lastHandledResultId) return UpdateHintPresentationDecision.None
         lastHandledResultId = snapshot.resultId
         val available = snapshot.result as? AppUpdateManager.CheckResult.Available
@@ -189,8 +193,8 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
             }
             if (intent.action != Intent.ACTION_SCREEN_ON) return
             val hint = active ?: return
-            if (!screenReady(application ?: context.applicationContext)) {
-                dismiss(hint.resultId, "screen-off", hint.attempt)
+            if (!presentationReady(application ?: context.applicationContext)) {
+                dismiss(hint.resultId, "screen-or-vehicle-not-ready", hint.attempt)
                 return
             }
             if (hint.expiresAtElapsedMs > 0L && SystemClock.elapsedRealtime() >= hint.expiresAtElapsedMs) {
@@ -213,7 +217,9 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
             application.registerActivityLifecycleCallbacks(this)
             registerScreenReceiver()
             scope.launch {
-                AppUpdateManager.snapshot.collect { snapshot ->
+                combine(AppUpdateManager.snapshot, AppUpdateManager.presentationAllowed) { snapshot, allowed ->
+                    snapshot to allowed
+                }.collect { (snapshot, allowed) ->
                     pendingRoute.value?.let { pending ->
                         if (pending != snapshot.resultId) pendingRoute.value = null
                     }
@@ -222,13 +228,14 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
                         lastLoggedResultId = snapshot.resultId
                         val reason = when {
                             snapshot.result !is AppUpdateManager.CheckResult.Available -> "not-available"
+                            !allowed -> "screen-or-vehicle-not-ready"
                             !enabled -> "disabled"
                             visibleActivities.isNotEmpty() -> "own-ui-visible"
                             else -> "eligible"
                         }
                         AppEventLogger.event(application, "update_hint admission resultId=${snapshot.resultId} reason=$reason")
                     }
-                    applyDecision(policy.onSnapshot(snapshot, enabled))
+                    applyDecision(policy.onSnapshot(snapshot, enabled, allowed))
                 }
             }
         }
@@ -242,6 +249,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
     fun setEnabled(context: Context, enabled: Boolean) {
         UpdateHintAppearance.setEnabled(context, enabled)
         onMain { if (!enabled) applyDecision(policy.disable()) }
+        AppUpdateManager.onPresentationSettingsChanged(context)
     }
 
     internal fun setAppearance(context: Context, value: UpdateHintAppearance) {
@@ -326,9 +334,9 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
             dismiss(resultId, "stale-result")
             return
         }
-        if (!screenReady(app)) {
-            AppEventLogger.event(app, "update_hint skipped resultId=$resultId reason=screen-off")
-            dismiss(resultId, "screen-off")
+        if (!presentationReady(app)) {
+            AppEventLogger.event(app, "update_hint skipped resultId=$resultId reason=screen-or-vehicle-not-ready")
+            dismiss(resultId, "screen-or-vehicle-not-ready")
             return
         }
         if (!Settings.canDrawOverlays(app)) {
@@ -351,9 +359,9 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
             dismiss(resultId, "stale-result")
             return
         }
-        if (!screenReady(app)) {
-            AppEventLogger.event(app, "update_hint skipped resultId=$resultId attempt=${attempt.number} reason=screen-off")
-            dismiss(resultId, "screen-off")
+        if (!presentationReady(app)) {
+            AppEventLogger.event(app, "update_hint skipped resultId=$resultId attempt=${attempt.number} reason=screen-or-vehicle-not-ready")
+            dismiss(resultId, "screen-or-vehicle-not-ready")
             return
         }
         if (!Settings.canDrawOverlays(app)) {
@@ -405,7 +413,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
     private fun onPlacement(hint: ActiveHint, placement: UpdateHintPlacement) {
         if (active !== hint || !retryPolicy.isCurrent(hint.attempt)) return
         if (!isCurrentResult(hint.resultId)) { dismiss(hint.resultId, "stale-result", hint.attempt); return }
-        if (!screenReady(application ?: return)) { dismiss(hint.resultId, "screen-off", hint.attempt); return }
+        if (!presentationReady(application ?: return)) { dismiss(hint.resultId, "screen-or-vehicle-not-ready", hint.attempt); return }
         if (!Settings.canDrawOverlays(application ?: return)) { dismiss(hint.resultId, "overlay-permission-lost", hint.attempt); return }
         val params = hint.params
         if (params == null) attach(hint, placement) else animatePlacement(hint, placement)
@@ -424,7 +432,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
             }
             setCardScale(hint, placement)
             val app = application ?: run { dismiss(hint.resultId, "application-missing", hint.attempt); return }
-            if (!screenReady(app)) { dismiss(hint.resultId, "screen-off", hint.attempt); return }
+            if (!presentationReady(app)) { dismiss(hint.resultId, "screen-or-vehicle-not-ready", hint.attempt); return }
             if (!Settings.canDrawOverlays(app)) { dismiss(hint.resultId, "overlay-permission-lost", hint.attempt); return }
             hint.windows.addView(hint.container, params)
             hint.params = params
@@ -433,7 +441,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
                 return
             }
             hint.expiresAtElapsedMs = SystemClock.elapsedRealtime() + DISPLAY_DURATION_MS
-            if (!screenReady(app)) { dismiss(hint.resultId, "screen-off", hint.attempt); return }
+            if (!presentationReady(app)) { dismiss(hint.resultId, "screen-or-vehicle-not-ready", hint.attempt); return }
             if (!Settings.canDrawOverlays(app)) { dismiss(hint.resultId, "overlay-permission-lost", hint.attempt); return }
         } catch (error: RuntimeException) {
             Log.w(TAG, "attach failed: ${error.javaClass.simpleName}")
@@ -460,7 +468,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
     }
 
     private fun animatePlacement(hint: ActiveHint, target: UpdateHintPlacement) {
-        if (!screenReady(application ?: return)) { dismiss(hint.resultId, "screen-off", hint.attempt); return }
+        if (!presentationReady(application ?: return)) { dismiss(hint.resultId, "screen-or-vehicle-not-ready", hint.attempt); return }
         val start = hint.placement ?: target
         if (start == target) return
         hint.animator?.cancel()
@@ -507,7 +515,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
 
     private fun updateActiveAppearance() {
         val hint = active ?: return
-        if (!screenReady(application ?: return)) { dismiss(hint.resultId, "screen-off", hint.attempt); return }
+        if (!presentationReady(application ?: return)) { dismiss(hint.resultId, "screen-or-vehicle-not-ready", hint.attempt); return }
         if (!Settings.canDrawOverlays(application ?: return)) {
             dismiss(hint.resultId, "overlay-permission-lost", hint.attempt)
             return
@@ -615,9 +623,9 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
     ) {
         if (!retryPolicy.isCurrent(attempt)) return
         val app = application ?: run { dismiss(resultId, "application-missing"); return }
-        if (!screenReady(app)) {
-            AppEventLogger.event(app, "update_hint failure-cancelled resultId=$resultId attempt=${attempt.number} reason=screen-off")
-            dismiss(resultId, "screen-off")
+        if (!presentationReady(app)) {
+            AppEventLogger.event(app, "update_hint failure-cancelled resultId=$resultId attempt=${attempt.number} reason=screen-or-vehicle-not-ready")
+            dismiss(resultId, "screen-or-vehicle-not-ready")
             return
         }
         if (!Settings.canDrawOverlays(app)) {
@@ -641,9 +649,9 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
             if (!retryPolicy.isCurrent(retry.attempt)) return@Runnable
             if (!isCurrentResult(resultId)) { dismiss(resultId, "stale-result"); return@Runnable }
             val app = application ?: run { dismiss(resultId, "application-missing"); return@Runnable }
-            if (!screenReady(app)) {
-                AppEventLogger.event(app, "update_hint retry-cancelled resultId=$resultId reason=screen-off")
-                dismiss(resultId, "screen-off")
+            if (!presentationReady(app)) {
+                AppEventLogger.event(app, "update_hint retry-cancelled resultId=$resultId reason=screen-or-vehicle-not-ready")
+                dismiss(resultId, "screen-or-vehicle-not-ready")
                 return@Runnable
             }
             if (!Settings.canDrawOverlays(app)) {
@@ -678,7 +686,8 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
         dismiss(resultId, "screen-off")
     }
 
-    private fun screenReady(context: Context): Boolean {
+    private fun presentationReady(context: Context): Boolean {
+        if (!AppUpdateManager.presentationAllowed.value) return false
         val interactive = context.getSystemService(PowerManager::class.java)?.isInteractive == true
         val displayOn = context.getSystemService(DisplayManager::class.java)
             ?.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.state == android.view.Display.STATE_ON
