@@ -260,7 +260,7 @@ final class NavigatorAssetManager {
                 1030736L,
                 "com.waze",
                 NavigatorAssetSignerCatalog.WAZE_PROJECT_SIGNER,
-                "06ACCFA9AFB672056C4108EFAF3E2F043D51B3120AFF7C7E50809B8E9E7D079F",
+                "B4A82B4656503F725A165EA0361FCB64F9813446481AB4063A0B1A78CFA84648",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v3/waze-5.25.0.1-direct-v3.apk",
                 "waze-5.25.0.1-direct-v3.apk",
@@ -274,7 +274,7 @@ final class NavigatorAssetManager {
                 1068694917L,
                 "app.revanced.android.apps.maps",
                 NavigatorAssetSignerCatalog.GMAPS_PROJECT_SIGNER,
-                "8A9DF04ECA00297736DDB62A043B70A49BAA37B4B78B06DF9784E44E5E473F61",
+                "27BDDA4E6E9E9E58577E77F07ACDD9ECCBD383D6EAB540A9BF7C1E1582ABE7C9",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v3/google-maps-revanced-26.30.09.950492155-direct-v3.apk",
                 "google-maps-revanced-26.30.09.950492155-direct-v3.apk",
