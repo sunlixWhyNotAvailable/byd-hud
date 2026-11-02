@@ -358,11 +358,20 @@ final class WazePatchEngine {
     }
 
     static void patchLifecycle(byte[] inputDex, File outputDex) throws IOException {
-        LEGACY.patchLifecycleImpl(inputDex, outputDex);
+        LEGACY.patchLifecycleImpl(inputDex, outputDex, true);
     }
 
     static void patchLifecycle(byte[] inputDex, File outputDex, String version) throws IOException {
-        forVersion(version).patchLifecycleImpl(inputDex, outputDex);
+        patchLifecycle(inputDex, outputDex, version, true);
+    }
+
+    static void patchLifecycle(byte[] inputDex, File outputDex, String version, boolean patchGeometry) throws IOException {
+        forVersion(version).patchLifecycleImpl(inputDex, outputDex, patchGeometry);
+    }
+
+    static void patchLifecycle(byte[] inputDex, File outputDex, String version,
+            boolean patchStability, boolean patchGeometry) throws IOException {
+        forVersion(version).patchLifecycleImpl(inputDex, outputDex, patchStability, patchGeometry);
     }
 
     static LaneInspection inspectLane(byte[] dex) throws IOException {
@@ -630,7 +639,12 @@ final class WazePatchEngine {
         }
     }
 
-    private void patchLifecycleImpl(byte[] inputDex, File outputDex) throws IOException {
+    private void patchLifecycleImpl(byte[] inputDex, File outputDex, boolean patchGeometry) throws IOException {
+        patchLifecycleImpl(inputDex, outputDex, true, patchGeometry);
+    }
+
+    private void patchLifecycleImpl(byte[] inputDex, File outputDex,
+            boolean patchStability, boolean patchGeometry) throws IOException {
         DexBackedDexFile input = DexBackedDexFile.fromInputStream(
                 Opcodes.forApi(29), new ByteArrayInputStream(inputDex));
         AtomicInteger applicationMatches = new AtomicInteger();
@@ -641,8 +655,9 @@ final class WazePatchEngine {
             @Override
             public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
                 return method -> {
-                    ImmutableMethodReference geometry = geometryHook(method);
+                    ImmutableMethodReference geometry = patchGeometry ? geometryHook(method) : null;
                     if (geometry != null) method = injectGeometry(method, geometry);
+                    if (!patchStability) return method;
                     if (matchesApplication(method)) {
                         applicationMatches.incrementAndGet();
                         if (countCall(method, BRIDGE_INIT) == 1

@@ -18,7 +18,7 @@ import java.util.UUID;
 @android.annotation.SuppressLint("ApplySharedPref")
 final class NavigatorPatchStore {
     // Invalidate cached results whenever component structural classification changes.
-    private static final int SCAN_CACHE_REVISION = 12;
+    private static final int SCAN_CACHE_REVISION = 13;
     static final String NOT_CHECKED = "NOT_CHECKED";
     static final String PATCHABLE = "PATCHABLE";
     static final String PATCHED = "PATCHED";
@@ -81,6 +81,8 @@ final class NavigatorPatchStore {
     private static final String KEY_EXPECTED_MAP_REVISION = "key_expected_map_revision";
     private static final String KEY_EXPECTED_MAP_REASON = "key_expected_map_reason";
     private static final String KEY_EXPECTED_MAP = "key_expected_map";
+    private static final String KEY_EXPECTED_AUDIO = "expected_audio";
+    private static final String KEY_EXPECTED_EXPORT = "expected_route_export";
     private static final String KEY_INITIAL_UPDATE_TIME = "initial_update_time";
     private static final String KEY_INITIAL_VERSION_CODE = "initial_version_code";
     private static final String KEY_INITIAL_SIGNER = "initial_signer";
@@ -140,6 +142,8 @@ final class NavigatorPatchStore {
         final String reason;
         final String mapState;
         final String mapReason;
+        final String audioState;
+        final String exportState;
         final boolean patchEnabled;
 
         ProfileSnapshot(Profile profile, boolean installed, String label,
@@ -160,6 +164,21 @@ final class NavigatorPatchStore {
                 long sourceVersionCode, String directState, String gmsCoreState,
                 String optionalState, String alertState, String reason,
                 boolean patchEnabled, String mapState, String mapReason) {
+            this(profile, installed, label, installedVersion, installedVersionCode, externalSource,
+                    sourceName, sourceVersion, sourceVersionCode, directState, gmsCoreState,
+                    optionalState, alertState, reason, patchEnabled, mapState, mapReason,
+                    NOT_CHECKED, NOT_CHECKED);
+        }
+
+        ProfileSnapshot(Profile profile, boolean installed, String label,
+                String installedVersion, long installedVersionCode,
+                boolean externalSource, String sourceName, String sourceVersion,
+                long sourceVersionCode, String directState, String gmsCoreState,
+                String optionalState, String alertState, String reason,
+                boolean patchEnabled, String mapState, String mapReason,
+                String audioState, String exportState) {
+            this.audioState = audioState;
+            this.exportState = exportState;
             this.profile = profile;
             this.installed = installed;
             this.label = label;
@@ -314,6 +333,8 @@ final class NavigatorPatchStore {
                 .remove(profile.id + "_scan_alert")
                 .remove(profile.id + "_scan_reason")
                 .remove(profile.id + "_scan_map")
+                .remove(profile.id + "_scan_audio")
+                .remove(profile.id + "_scan_export")
                 .remove(profile.id + "_scan_map_reason")
                 .remove(profile.id + "_scan_map_revision")
                 .remove(profile.id + "_scan_source_uri")
@@ -347,6 +368,8 @@ final class NavigatorPatchStore {
                 .putString(profile.id + "_scan_alert", result.alertState)
                 .putString(profile.id + "_scan_reason", result.reason)
                 .putString(profile.id + "_scan_map", result.mapState)
+                .putString(profile.id + "_scan_audio", result.audioState)
+                .putString(profile.id + "_scan_export", result.exportState)
                 .putString(profile.id + "_scan_map_reason", result.mapReason)
                 .putString(profile.id + "_scan_map_revision", result.mapRevision)
                 .putString(profile.id + "_scan_source_uri", sourceUri == null ? "" : sourceUri)
@@ -474,6 +497,8 @@ final class NavigatorPatchStore {
                         preferences.getString(profileKey(profile, KEY_EXPECTED_MAP_REASON), ""))
                 .putString(KEY_EXPECTED_MAP,
                         preferences.getString(profileKey(profile, KEY_EXPECTED_MAP), ""))
+                .putString(KEY_EXPECTED_EXPORT, preferences.getString(profileKey(profile, KEY_EXPECTED_EXPORT), ""))
+                .putString(KEY_EXPECTED_AUDIO, preferences.getString(profileKey(profile, KEY_EXPECTED_AUDIO), ""))
                 .putLong(KEY_INITIAL_UPDATE_TIME,
                         preferences.getLong(profileKey(profile, KEY_INITIAL_UPDATE_TIME), -1L))
                 .putLong(KEY_INITIAL_VERSION_CODE,
@@ -531,6 +556,8 @@ final class NavigatorPatchStore {
                 .putString(KEY_EXPECTED_MAP_REVISION, expected.mapRevision)
                 .putString(KEY_EXPECTED_MAP_REASON, expected.mapReason)
                 .putString(KEY_EXPECTED_MAP, expected.mapState)
+                .putString(KEY_EXPECTED_EXPORT, expected.exportState)
+                .putString(KEY_EXPECTED_AUDIO, expected.audioState)
                 .putLong(KEY_INITIAL_UPDATE_TIME, initialUpdateTime)
                 .putLong(KEY_INITIAL_VERSION_CODE, initialVersionCode)
                 .putString(KEY_INITIAL_SIGNER, initialSigner == null ? "" : initialSigner)
@@ -805,6 +832,8 @@ final class NavigatorPatchStore {
                 .putString(profileKey(profile, KEY_EXPECTED_MAP_REVISION), expected.mapRevision)
                 .putString(profileKey(profile, KEY_EXPECTED_MAP_REASON), expected.mapReason)
                 .putString(profileKey(profile, KEY_EXPECTED_MAP), expected.mapState)
+                .putString(profileKey(profile, KEY_EXPECTED_EXPORT), expected.exportState)
+                .putString(profileKey(profile, KEY_EXPECTED_AUDIO), expected.audioState)
                 .putLong(profileKey(profile, KEY_INITIAL_UPDATE_TIME), initialUpdateTime)
                 .putLong(profileKey(profile, KEY_INITIAL_VERSION_CODE), initialVersionCode)
                 .putString(profileKey(profile, KEY_INITIAL_SIGNER), initialSigner == null ? "" : initialSigner)
@@ -952,6 +981,8 @@ final class NavigatorPatchStore {
                 .putString(KEY_EXPECTED_MAP_REVISION, "")
                 .putString(KEY_EXPECTED_MAP_REASON, "")
                 .putString(KEY_EXPECTED_MAP, "")
+                .putString(KEY_EXPECTED_EXPORT, "")
+                .putString(KEY_EXPECTED_AUDIO, "")
                 .putLong(KEY_INITIAL_UPDATE_TIME, initialUpdateTime)
                 .putLong(KEY_INITIAL_VERSION_CODE, initialVersionCode)
                 .putString(KEY_INITIAL_SIGNER, initialSigner == null ? "" : initialSigner)
@@ -1043,6 +1074,16 @@ final class NavigatorPatchStore {
     static String expectedOptional(Context context, Profile profile) {
         return profile == null || !localOperation(context, profile) ? expectedOptional(context)
                 : prefs(context).getString(profileKey(profile, KEY_EXPECTED_OPTIONAL), "");
+    }
+
+    static String expectedAudio(Context context, Profile profile) {
+        String key = localOperation(context, profile) ? profileKey(profile, KEY_EXPECTED_AUDIO) : KEY_EXPECTED_AUDIO;
+        return prefs(context).getString(key, "");
+    }
+
+    static String expectedExport(Context context, Profile profile) {
+        String key = localOperation(context, profile) ? profileKey(profile, KEY_EXPECTED_EXPORT) : KEY_EXPECTED_EXPORT;
+        return prefs(context).getString(key, "");
     }
 
     static String expectedMap(Context context, Profile profile) {
@@ -1471,6 +1512,8 @@ final class NavigatorPatchStore {
                 .remove(profileKey(profile, KEY_EXPECTED_MAP_REVISION))
                 .remove(profileKey(profile, KEY_EXPECTED_MAP_REASON))
                 .remove(profileKey(profile, KEY_EXPECTED_MAP))
+                .remove(profileKey(profile, KEY_EXPECTED_EXPORT))
+                .remove(profileKey(profile, KEY_EXPECTED_AUDIO))
                 .remove(profileKey(profile, KEY_INITIAL_UPDATE_TIME))
                 .remove(profileKey(profile, KEY_INITIAL_VERSION_CODE))
                 .remove(profileKey(profile, KEY_INITIAL_SIGNER))
@@ -1501,6 +1544,8 @@ final class NavigatorPatchStore {
                 .remove(KEY_EXPECTED_MAP_REVISION)
                 .remove(KEY_EXPECTED_MAP_REASON)
                 .remove(KEY_EXPECTED_MAP)
+                .remove(KEY_EXPECTED_EXPORT)
+                .remove(KEY_EXPECTED_AUDIO)
                 .remove(KEY_INITIAL_UPDATE_TIME)
                 .remove(KEY_INITIAL_VERSION_CODE)
                 .remove(KEY_INITIAL_SIGNER)
@@ -1555,6 +1600,8 @@ final class NavigatorPatchStore {
                 .remove(KEY_EXPECTED_MAP_REVISION)
                 .remove(KEY_EXPECTED_MAP_REASON)
                 .remove(KEY_EXPECTED_MAP)
+                .remove(KEY_EXPECTED_EXPORT)
+                .remove(KEY_EXPECTED_AUDIO)
                 .remove(KEY_INITIAL_UPDATE_TIME)
                 .remove(KEY_INITIAL_VERSION_CODE)
                 .remove(KEY_INITIAL_SIGNER)
@@ -1593,7 +1640,7 @@ final class NavigatorPatchStore {
     static void recordInstalledVerification(
             Context context, Profile profile, long updateTime, long versionCode,
             String sha256, String directState, String gmsCoreState,
-            String optionalState, String alertState) {
+            String optionalState, String alertState, String audioState, String exportState) {
         prefs(context).edit()
                 .putLong(profile.id + "_installed_update", updateTime)
                 .putLong(profile.id + "_installed_version_code", versionCode)
@@ -1602,6 +1649,8 @@ final class NavigatorPatchStore {
                 .putString(profile.id + "_installed_gms_core", gmsCoreState)
                 .putString(profile.id + "_installed_optional", optionalState)
                 .putString(profile.id + "_installed_alert", alertState)
+                .putString(profile.id + "_installed_audio", audioState)
+                .putString(profile.id + "_installed_export", exportState)
                 .commit();
     }
 
@@ -1639,6 +1688,8 @@ final class NavigatorPatchStore {
         String reason = preferences.getString(profile.id + "_scan_reason", "");
         String map = preferences.getString(profile.id + "_scan_map", NOT_CHECKED);
         String mapReason = preferences.getString(profile.id + "_scan_map_reason", "");
+        String audio = preferences.getString(profile.id + "_scan_audio", NOT_CHECKED);
+        String routeExport = preferences.getString(profile.id + "_scan_export", NOT_CHECKED);
         String scannedUri = preferences.getString(profile.id + "_scan_source_uri", "");
         long scannedInstalledUpdate = preferences.getLong(
                 profile.id + "_scan_installed_update", -1L);
@@ -1657,6 +1708,8 @@ final class NavigatorPatchStore {
             alert = NOT_CHECKED;
             reason = "";
             map = NOT_CHECKED;
+            audio = NOT_CHECKED;
+            routeExport = NOT_CHECKED;
             mapReason = "";
         }
         if (!external && !isInstalled) {
@@ -1666,14 +1719,16 @@ final class NavigatorPatchStore {
             alert = NOT_CHECKED;
             reason = "";
             map = NOT_CHECKED;
+            audio = NOT_CHECKED;
+            routeExport = NOT_CHECKED;
             mapReason = "";
         }
-        boolean patchEnabled = isPatchEnabled(profile, direct, gmsCore, optional, alert, map);
+        boolean patchEnabled = isPatchEnabled(profile, direct, gmsCore, optional, alert, map, audio, routeExport);
         return new ProfileSnapshot(profile, isInstalled, label, installedVersion, installedCode,
                 external, sourceName == null ? "" : sourceName,
                 sourceVersion == null ? "" : sourceVersion, sourceCode,
                 direct, gmsCore, optional, alert, reason == null ? "" : reason, patchEnabled,
-                map, mapReason);
+                map, mapReason, audio, routeExport);
     }
 
     static boolean isPatchEnabled(Profile profile, String direct, String optional,
@@ -1688,12 +1743,17 @@ final class NavigatorPatchStore {
 
     static boolean isPatchEnabled(Profile profile, String direct, String gmsCore,
             String optional, String auxiliary, String map) {
+        return isPatchEnabled(profile, direct, gmsCore, optional, auxiliary, map, NOT_CHECKED, NOT_CHECKED);
+    }
+
+    static boolean isPatchEnabled(Profile profile, String direct, String gmsCore,
+            String optional, String auxiliary, String map, String audio, String routeExport) {
         if (profile == Profile.WAZE) {
             boolean coreCompatible = (PATCHABLE.equals(direct) || PATCHED.equals(direct))
                     && (PATCHABLE.equals(gmsCore) || PATCHED.equals(gmsCore));
             return coreCompatible && (PATCHABLE.equals(direct) || PATCHABLE.equals(gmsCore)
                     || PATCHABLE.equals(optional) || PATCHABLE.equals(auxiliary)
-                    || PATCHABLE.equals(map));
+                    || PATCHABLE.equals(map) || PATCHABLE.equals(audio) || PATCHABLE.equals(routeExport));
         }
         return PATCHABLE.equals(direct)
                 || PATCHABLE.equals(gmsCore)

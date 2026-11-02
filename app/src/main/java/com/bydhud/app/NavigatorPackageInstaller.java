@@ -280,7 +280,7 @@ final class NavigatorPackageInstaller {
                         appContext, profile, info.lastUpdateTime, info.getLongVersionCode(),
                         visibleResult.sha256, visibleResult.directState,
                         visibleResult.gmsCoreState,
-                        visibleResult.optionalState, visibleResult.alertState);
+                        visibleResult.optionalState, visibleResult.alertState, visibleResult.audioState, visibleResult.exportState);
                 String reportId = NavigatorPatchStore.reportId(appContext, profile);
                 String detail = NavigatorPatchPipeline.preparedDetail(
                         visibleResult, "Installed and verified");
@@ -642,6 +642,11 @@ final class NavigatorPackageInstaller {
         String expectedGmsCore = NavigatorPatchStore.expectedGmsCore(context, profile);
         String expectedAlert = NavigatorPatchStore.expectedAlert(context, profile);
         String expectedMap = NavigatorPatchStore.expectedMap(context, profile);
+        String expectedAudio = NavigatorPatchStore.expectedAudio(context, profile);
+        String expectedExport = NavigatorPatchStore.expectedExport(context, profile);
+        if (includeComponents && ((!expectedAudio.isEmpty() && !expectedAudio.equals(actual.audioState))
+                || (!expectedExport.isEmpty() && !expectedExport.equals(actual.exportState))))
+            throw new IOException("Installed audio/route-export component differs from the staged artifact");
         boolean gmsCoreMatches = expectedGmsCore.equals(actual.gmsCoreState)
                 || (NavigatorPatchStore.FAILED.equals(expectedGmsCore)
                 && NavigatorPatchStore.PATCHABLE.equals(actual.gmsCoreState));
@@ -693,7 +698,7 @@ final class NavigatorPackageInstaller {
                 auxiliaryFailed ? NavigatorPatchStore.FAILED : actual.alertState,
                 gmsCoreFailed || optionalFailed || auxiliaryFailed
                         ? "Optional patch attempt failed" : actual.reason,
-                mapState, mapReason, mapRevision);
+                mapState, mapReason, mapRevision, actual.audioState, actual.exportState);
     }
 
     private static boolean sameArtifact(NavigatorPatchPipeline.ScanResult first,

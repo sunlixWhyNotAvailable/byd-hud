@@ -467,6 +467,20 @@ Copy this number and use your bank's card-to-card transfer feature. You do not n
 - [BYD Mate](https://github.com/AndyShaman/BYDMate) inspired dashboard resizing.
 - Олексій (Oleksiy) supplied Sea Lion 06 EV diagnostics and vehicle testing.
 
+## Building from source
+
+Use JDK 17 and an Android SDK with platforms 34 and 35, Build Tools 35.0.0 and
+NDK 30.0.15729638. Configure the SDK through `local.properties` (`sdk.dir`) or
+`ANDROID_HOME`, then run `./gradlew :app:assemblePerformance`
+(`.\gradlew.bat :app:assemblePerformance` in PowerShell).
+The Linux build host must be x86_64, as required by this NDK toolchain.
+
+Gradle compiles the navigator HUD extensions from `navigator-extensions/` and
+the shared capture sources, generates their packages under `app/build/`, and
+includes them in the APK automatically. No Python step, original navigator APKs
+or prebuilt extension ZIPs are required. The APK is written to `build_outputs/`
+and uses the local Android debug signing key.
+
 ## License
 
 BYD HUD is licensed under the [GNU Affero General Public License v3.0](LICENSE). Dashboard mode illustrations contain original BYD artwork, which remains the property of its owners.

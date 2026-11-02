@@ -96,7 +96,7 @@ public final class NavigatorMapPatcher {
                     "CapturePollPolicy", "CarCapturePolicy", "MapsFollowing",
                     "MapsNavigationCamera", "PixelMath", "CaptureReadbackBuffer",
                     "LifecycleJournalBatch", "LifecycleJournalSpool", "LifecycleJournalTransport", "LifecycleJournalPolicy", "WazeRenderScheduler", "WazeRenderPolicy", "WazeSurfaceCopy",
-                    "WazeHudMap", "WazeHudStyle")));
+                    "WazeHudMap", "WazeHudStyle", "MapPalette")));
     private static final Set<String> REQUIRED_PAYLOAD_CLASSES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(BRIDGE, BACKGROUND,
                     "Lcom/bydhud/mapcapture/CaptureLease;",
@@ -110,15 +110,21 @@ public final class NavigatorMapPatcher {
         public final String state;
         public final String reason;
         public final String revision;
+        public final Throwable failure;
 
         private Inspection(String state, String reason) {
             this(state, reason, "");
         }
 
         private Inspection(String state, String reason, String revision) {
+            this(state, reason, revision, null);
+        }
+
+        private Inspection(String state, String reason, String revision, Throwable failure) {
             this.state = state;
             this.reason = reason;
             this.revision = revision;
+            this.failure = failure;
         }
     }
 
@@ -217,11 +223,17 @@ public final class NavigatorMapPatcher {
 
     public static Inspection inspect(List<File> apks, String profile, String version) {
         try {
+            if (NavigatorHudProfile.supports(profile, version)) {
+                boolean current = NavigatorHudProfile.load(profile, version).inspect(apks, "map").current;
+                return new Inspection(current ? PATCHED : PATCHABLE,
+                        current ? "Accepted v3 HUD module verified" : "Compatible HUD module upgrade available",
+                        current ? NavigatorHudProfile.REVISION : "");
+            }
             return new NavigatorMapPatcher(profile, version).inspectInternal(apks, profile, version);
-        } catch (UnsupportedPatchException error) {
-            return result(UNSUPPORTED, message(error));
+        } catch (UnsupportedPatchException | NavigatorHudProfile.InputMismatch error) {
+            return new Inspection(UNSUPPORTED, message(error), "", error);
         } catch (IOException | RuntimeException error) {
-            return result(FAILED, message(error));
+            return new Inspection(FAILED, message(error), "", error);
         }
     }
 
@@ -233,6 +245,16 @@ public final class NavigatorMapPatcher {
 
     public static Inspection patch(List<File> sourceApks, File outputDir, File payloadDex,
             File hudNative, String profile, String version) {
+        if (NavigatorHudProfile.supports(profile, version)) {
+            try {
+                NavigatorHudProfile.load(profile, version).patch(sourceApks, outputDir, "map");
+                return inspect(outputMembers(sourceApks, outputDir), profile, version);
+            } catch (NavigatorHudProfile.InputMismatch error) {
+                return new Inspection(UNSUPPORTED, message(error), "", error);
+            } catch (IOException | RuntimeException error) {
+                return new Inspection(FAILED, message(error), "", error);
+            }
+        }
         return new NavigatorMapPatcher(profile, version).patchInternal(sourceApks, outputDir, payloadDex, hudNative, profile, version);
     }
 
@@ -1524,6 +1546,38 @@ public final class NavigatorMapPatcher {
         Set<String> targets = targetOwners(family);
         for (ClassDef classDef : dex.getClasses()) if (targets.contains(classDef.getType())) return true;
         return false;
+    }
+
+    static Method patchCaptureMethod(Method method, String family) {
+        NavigatorMapPatcher patcher = new NavigatorMapPatcher(family,
+                "waze".equals(family) ? "5.25.0.1" : "26.30.09.950492155");
+        boolean captured = false;
+        if (method.getImplementation() != null) for (Instruction instruction : method.getImplementation().getInstructions()) {
+            if (instruction instanceof ReferenceInstruction && ((ReferenceInstruction) instruction).getReference() instanceof MethodReference) {
+                MethodReference call = (MethodReference) ((ReferenceInstruction) instruction).getReference();
+                if (call.getDefiningClass().startsWith(PAYLOAD_PREFIX)) captured = true;
+            }
+        }
+        Method result = captured ? method : patcher.patchMethod(method, patcher.new PatchPlan(family));
+        if (!captured && "gmaps".equals(family) && key(method).equals("Lbrer;->pF(Lbrha;Lbrha;)V")) {
+            MutableMethodImplementation body = new MutableMethodImplementation(result.getImplementation());
+            for (int index = 0; index + 1 < body.getInstructions().size(); index++) {
+                Instruction instruction = body.getInstructions().get(index);
+                if (!(instruction instanceof ReferenceInstruction)) continue;
+                Object ref = ((ReferenceInstruction) instruction).getReference();
+                if (!(ref instanceof MethodReference) || !key((MethodReference) ref).equals(
+                        BACKGROUND + "->mapsNavigationApplied(Ljava/lang/Object;)V")) continue;
+                // Retain the accepted capture prelude for all branches to the shared return.
+                var target = body.getInstructions().get(index + 1).getLocation();
+                var hook = body.getInstructions().get(index).getLocation();
+                for (Label label : new ArrayList<>(target.getLabels())) {
+                    target.getLabels().remove(label); hook.getLabels().add(label);
+                }
+            }
+            result = new ImmutableMethod(method.getDefiningClass(), method.getName(), method.getParameters(),
+                    method.getReturnType(), method.getAccessFlags(), method.getAnnotations(), method.getHiddenApiRestrictions(), body);
+        }
+        return "waze".equals(family) ? WazeRenderPatch.patch(result, true) : result;
     }
 
     private Method patchMethod(Method method, PatchPlan plan) {

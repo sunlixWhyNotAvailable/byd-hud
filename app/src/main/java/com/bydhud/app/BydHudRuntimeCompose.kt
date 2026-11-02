@@ -6937,6 +6937,11 @@ private fun PatchTab(
                                     add(patchAlertLabel(row, copy.language, copy) to row.alertState)
                                 }
                                 add(copy.patchMap to row.mapState)
+                                if (row.profileId == "waze" &&
+                                    row.sourceVersion.ifEmpty { row.installedVersion } == "5.25.0.1") {
+                                    add(copy.language.choose("Аудіоканал", "Audio channel", "Аудиоканал") to row.audioState)
+                                    add(copy.language.choose("Експорт маршруту", "Route export", "Экспорт маршрута") to row.exportState)
+                                }
                             }
                             Row(
                                 modifier = Modifier.weight(1f),

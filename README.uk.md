@@ -467,6 +467,20 @@ Preview показує фрагмент, який надсилається на 
 - [BYD Mate](https://github.com/AndyShaman/BYDMate) надихнув зміну розмірів вікна приборки.
 - Олексій надав діагностику Sea Lion 06 EV і проводив перевірки на автомобілі.
 
+## Збірка з вихідного коду
+
+Потрібні JDK 17 та Android SDK із платформами 34 і 35, Build Tools 35.0.0 та
+NDK 30.0.15729638. Задайте SDK через `local.properties` (`sdk.dir`) або
+`ANDROID_HOME`, потім виконайте `./gradlew :app:assemblePerformance`
+(`.\gradlew.bat :app:assemblePerformance` у PowerShell).
+Для Linux потрібен комп'ютер з архітектурою x86_64 відповідно до вимог цього NDK.
+
+Gradle компілює HUD-розширення навігаторів із `navigator-extensions/` та спільних
+джерел захоплення кадрів, створює пакети в `app/build/` і автоматично включає їх
+в APK. Python, оригінальні APK навігаторів та готові ZIP розширень не потрібні.
+Готовий APK зберігається у `build_outputs/` і підписується локальним Android
+debug-ключем.
+
 ## Ліцензія
 
 BYD HUD ліцензовано за [GNU Affero General Public License v3.0](LICENSE). Ілюстрації режимів приборки містять оригінальні зображення BYD, права на які залишаються у їхніх власників.

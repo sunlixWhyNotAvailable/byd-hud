@@ -73,6 +73,8 @@ final class NavigatorPatchPipeline {
         final String mapState;
         final String mapReason;
         final String mapRevision;
+        final String audioState;
+        final String exportState;
 
         ScanResult(NavigatorPatchStore.Profile profile, String sha256,
                 String versionName, long versionCode, String signerSha256,
@@ -88,6 +90,18 @@ final class NavigatorPatchPipeline {
                 String directState, String gmsCoreState, String optionalState,
                 String alertState, String reason, String mapState, String mapReason,
                 String mapRevision) {
+            this(profile, sha256, versionName, versionCode, signerSha256, directState,
+                    gmsCoreState, optionalState, alertState, reason, mapState, mapReason,
+                    mapRevision, NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED);
+        }
+
+        ScanResult(NavigatorPatchStore.Profile profile, String sha256,
+                String versionName, long versionCode, String signerSha256,
+                String directState, String gmsCoreState, String optionalState,
+                String alertState, String reason, String mapState, String mapReason,
+                String mapRevision, String audioState, String exportState) {
+            this.audioState = audioState;
+            this.exportState = exportState;
             this.profile = profile;
             this.sha256 = sha256;
             this.versionName = versionName;
@@ -258,10 +272,10 @@ final class NavigatorPatchPipeline {
             NavigatorPatchReportStore.recordStage(context, id, stage, "SUCCESS", result.reason,
                     new JSONObject().put("output", identity));
             String[] names = result.profile == NavigatorPatchStore.Profile.WAZE
-                    ? new String[]{"direct", "lanes", "stable_session", "alerts", "map"}
+                    ? new String[]{"direct", "lanes", "stable_session", "alerts", "map", "audio", "route_export"}
                     : new String[]{"direct", "gms_core", "audio", "pip", "map"};
             String[] states = {result.directState, result.gmsCoreState, result.optionalState,
-                    result.alertState, result.mapState};
+                    result.alertState, result.mapState, result.audioState, result.exportState};
             for (int i = 0; i < names.length; i++) {
                 NavigatorPatchReportStore.recordComponent(context, id, names[i], states[i],
                         stage, states[i], i == 4 ? result.mapReason : result.reason, identity);
@@ -328,6 +342,8 @@ final class NavigatorPatchPipeline {
         data.putString("map", result.mapState);
         data.putString("map_reason", result.mapReason);
         data.putString("map_revision", result.mapRevision);
+        data.putString("audio", result.audioState);
+        data.putString("route_export", result.exportState);
         return data;
     }
 
@@ -344,7 +360,9 @@ final class NavigatorPatchPipeline {
                 data.getString("alert", NavigatorPatchStore.NOT_CHECKED),
                 data.getString("reason", ""),
                 data.getString("map", NavigatorPatchStore.NOT_CHECKED),
-                data.getString("map_reason", ""), data.getString("map_revision", ""));
+                data.getString("map_reason", ""), data.getString("map_revision", ""),
+                data.getString("audio", NavigatorPatchStore.NOT_CHECKED),
+                data.getString("route_export", NavigatorPatchStore.NOT_CHECKED));
     }
 
     /**
@@ -403,7 +421,7 @@ final class NavigatorPatchPipeline {
                 : NavigatorSigningKey.installedCertificateSha256(context, profile.packageName),
                 snapshot.directState, snapshot.gmsCoreState, snapshot.optionalState,
                 snapshot.alertState, snapshot.reason, snapshot.mapState, snapshot.mapReason,
-                prefs.getString(profile.id + "_scan_map_revision", ""));
+                prefs.getString(profile.id + "_scan_map_revision", ""), snapshot.audioState, snapshot.exportState);
     }
 
     static ScanResult scanViaWorker(Context context, NavigatorPatchStore.Profile profile)
@@ -648,7 +666,7 @@ final class NavigatorPatchPipeline {
             throw new IOException("APK changed after compatibility check");
         }
         if (!NavigatorPatchStore.isPatchEnabled(profile, input.directState, input.gmsCoreState,
-                input.optionalState, input.alertState, input.mapState)) {
+                input.optionalState, input.alertState, input.mapState, input.audioState, input.exportState)) {
             throw new IOException("No compatible patch is available: " + input.reason);
         }
         checkWorkerInterrupted();
@@ -680,7 +698,11 @@ final class NavigatorPatchPipeline {
                     output.optionalState, NavigatorPatchStore.FAILED,
                     "PiP patch attempt failed");
         }
-        boolean optionalApplied = (NavigatorPatchStore.PATCHABLE.equals(input.gmsCoreState)
+        boolean optionalApplied = (NavigatorPatchStore.PATCHABLE.equals(input.audioState)
+                && NavigatorPatchStore.PATCHED.equals(output.audioState))
+                || (NavigatorPatchStore.PATCHABLE.equals(input.exportState)
+                && NavigatorPatchStore.PATCHED.equals(output.exportState))
+                || (NavigatorPatchStore.PATCHABLE.equals(input.gmsCoreState)
                 && NavigatorPatchStore.PATCHED.equals(output.gmsCoreState))
                 || (NavigatorPatchStore.PATCHABLE.equals(input.optionalState)
                 && NavigatorPatchStore.PATCHED.equals(output.optionalState))
@@ -711,19 +733,13 @@ final class NavigatorPatchPipeline {
             checkWorkerInterrupted();
             reportStage(context, "MAP", "IN_PROGRESS", baseline.mapRevision);
             File payload = new File(transaction, "map-capture-payload.dex");
-            PatchPayloadDex.extract(context, "Lcom/bydhud/mapcapture/", payload);
-            File hudNative = null;
-            if ("waze".equals(profile.id) && "5.25.0.1".equals(baseline.versionName)) {
-                hudNative = new File(transaction, "libbydhud_hudmap.so");
-                try (InputStream input = context.getAssets().open("mapcapture/waze525/libbydhud_hudmap.so")) {
-                    Files.copy(input, hudNative.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                }
-            }
+            if (!NavigatorHudProfile.supports(profile.id, baseline.versionName))
+                PatchPayloadDex.extract(context, "Lcom/bydhud/mapcapture/", payload);
             NavigatorMapPatcher.Inspection patchedMap = NavigatorMapPatcher.patch(
                     NavigatorApkSet.memberFiles(patched), new File(candidate, "members"),
-                    payload, hudNative, profile.id, baseline.versionName);
+                    payload, null, profile.id, baseline.versionName);
             if (!NavigatorPatchStore.PATCHED.equals(patchedMap.state)) {
-                throw new IOException(patchedMap.reason);
+                throw new IOException(patchedMap.reason, patchedMap.failure);
             }
             checkWorkerInterrupted();
             signSet(candidate);
@@ -770,6 +786,8 @@ final class NavigatorPatchPipeline {
     static boolean navigationComponentsUnchanged(ScanResult before, ScanResult after) {
         return before.directState.equals(after.directState)
                 && before.gmsCoreState.equals(after.gmsCoreState)
+                && before.audioState.equals(after.audioState)
+                && before.exportState.equals(after.exportState)
                 && before.optionalState.equals(after.optionalState)
                 && before.alertState.equals(after.alertState);
     }
@@ -777,7 +795,7 @@ final class NavigatorPatchPipeline {
     static ScanResult withMap(ScanResult source, String state, String reason, String revision) {
         return new ScanResult(source.profile, source.sha256, source.versionName,
                 source.versionCode, source.signerSha256, source.directState, source.gmsCoreState,
-                source.optionalState, source.alertState, source.reason, state, reason, revision);
+                source.optionalState, source.alertState, source.reason, state, reason, revision, source.audioState, source.exportState);
     }
 
     static String preparedDetail(ScanResult output, String otherwise) {
@@ -835,6 +853,12 @@ final class NavigatorPatchPipeline {
                 && !NavigatorPatchStore.PATCHED.equals(output.alertState)) {
             throw new IOException("Waze alert-hook post-verification failed");
         }
+        if (NavigatorPatchStore.PATCHABLE.equals(input.audioState)
+                && !NavigatorPatchStore.PATCHED.equals(output.audioState))
+            throw new IOException("Waze audio post-verification failed");
+        if (NavigatorPatchStore.PATCHABLE.equals(input.exportState)
+                && !NavigatorPatchStore.PATCHED.equals(output.exportState))
+            throw new IOException("Route export post-verification failed");
     }
 
     private static int lowerCurrentThreadPriority() {
@@ -1103,6 +1127,7 @@ final class NavigatorPatchPipeline {
             NavigatorMapPatcher.Inspection map = NavigatorMapPatcher.inspect(
                     members, metadata.profile.id, metadata.versionName);
             checkWorkerInterrupted();
+            if (map.failure != null) reportStageFailure(context, "MAP_INSPECTION", map.failure);
             return withMap(navigation, map.state, map.reason, map.revision);
         } catch (IOException | OutOfMemoryError error) {
             checkWorkerInterrupted();
@@ -1194,6 +1219,9 @@ final class NavigatorPatchPipeline {
         int lifecycleTargets = 0;
         boolean lifecyclePatchable = false;
         boolean lifecyclePatched = false;
+        String routeExport = NavigatorPatchStore.NOT_CHECKED;
+        int exportOwners = 0;
+        int exportTargets = 0;
         int alertOwnerMembers = 0;
         boolean alertPatched = false;
         boolean alertCompatible = true;
@@ -1218,6 +1246,14 @@ final class NavigatorPatchPipeline {
                     + inspection.speedTargetCount + inspection.clusterEtaTargetCount;
             lifecyclePatchable |= inspection.lifecyclePatchable();
             lifecyclePatched |= inspection.lifecyclePatched();
+            if (inspection.requiresGeometry && (inspection.geometryTargetCount > 0
+                    || inspection.geometryPayloadClassCount > 0)) {
+                exportOwners++;
+                exportTargets += inspection.geometryTargetCount;
+                routeExport = inspection.geometryPatched() ? NavigatorPatchStore.PATCHED
+                        : inspection.geometryStock() || inspection.geometryUpgradeEligible()
+                        ? NavigatorPatchStore.PATCHABLE : NavigatorPatchStore.UNSUPPORTED;
+            }
             if (inspection.alertClassCount > 0 || inspection.alertOnceClassCount > 0) {
                 alertOwnerMembers++;
             }
@@ -1228,6 +1264,7 @@ final class NavigatorPatchPipeline {
             }
             if (!inspection.reason.isEmpty()) reason = inspection.reason;
         }
+        routeExport = routeExportState(set.versionName, exportOwners, routeExport);
         String directState = allowlistStock + allowlistPatched != 1
                 ? NavigatorPatchStore.FAILED
                 : allowlistPatched == 1 && hudVisible
@@ -1251,9 +1288,31 @@ final class NavigatorPatchPipeline {
                 : NavigatorPatchStore.FAILED.equals(optional)
                 ? "Stable session anchors are incompatible"
                 : NavigatorPatchStore.FAILED.equals(alert)
-                ? "Waze alert anchors are incompatible" : "Compatible";
-        return copyStates(metadata, directState, laneState,
-                optional, alert, compatibilityReason);
+                ? "Waze alert anchors are incompatible"
+                : NavigatorPatchStore.UNSUPPORTED.equals(routeExport)
+                ? "Waze route export anchors are incompatible: owner APKs=" + exportOwners
+                        + ", targets=" + exportTargets + " (expected 1 owner and 8 compatible targets)"
+                : "Compatible";
+        ScanResult result = copyStates(metadata, directState, laneState, optional, alert, compatibilityReason);
+        String audioState = NavigatorPatchStore.NOT_CHECKED;
+        if (NavigatorHudProfile.supports("waze", set.versionName)) {
+            try {
+                audioState = NavigatorHudProfile.load("waze", set.versionName)
+                        .inspect(memberFiles(set), "audio").current
+                        ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.PATCHABLE;
+            } catch (IOException error) {
+                reportStageFailure(context, "AUDIO_INSPECTION", error);
+                audioState = NavigatorPatchStore.UNSUPPORTED;
+            }
+        }
+        return withExtras(result, audioState, routeExport);
+    }
+
+    static String routeExportState(String version, int ownerCount, String ownerState) {
+        if (!"5.25.0.1".equals(version)) return NavigatorPatchStore.NOT_CHECKED;
+        return ownerCount == 1 && (NavigatorPatchStore.PATCHED.equals(ownerState)
+                || NavigatorPatchStore.PATCHABLE.equals(ownerState))
+                ? ownerState : NavigatorPatchStore.UNSUPPORTED;
     }
 
     private static PatchOutcome buildUnsignedSet(Context context, NavigatorPatchStore.Profile profile,
@@ -1519,29 +1578,34 @@ final class NavigatorPatchPipeline {
             repack(target, rewrittenApk, replacements, Collections.emptyMap());
             replaceFile(rewrittenApk, target);
         }
-        if (NavigatorPatchStore.PATCHABLE.equals(input.optionalState)) {
+        boolean patchStability = NavigatorPatchStore.PATCHABLE.equals(input.optionalState);
+        boolean patchGeometry = NavigatorPatchStore.PATCHABLE.equals(input.exportState);
+        if (patchStability || patchGeometry) {
             if (reportProgress) NavigatorPatchStore.transition(context,
                     NavigatorPatchStore.Profile.WAZE,
-                    NavigatorPatchStore.PATCHING, "Patching stable session");
+                    NavigatorPatchStore.PATCHING, patchStability ? "Patching stable session" : "Patching route export");
             WazeApkInspection lifecycleOwner = null;
             for (WazeApkInspection inspection : inspections) {
-                if (inspection.applicationTargetCount > 0 || inspection.routeTargetCount > 0
+                if (patchStability && (inspection.applicationTargetCount > 0 || inspection.routeTargetCount > 0
                         || inspection.speedTargetCount > 0
-                        || inspection.clusterEtaTargetCount > 0) {
+                        || inspection.clusterEtaTargetCount > 0)
+                        || !patchStability && inspection.geometryTargetCount > 0) {
                     if (lifecycleOwner != null) {
-                        throw new IOException("Waze stable-session target member is ambiguous");
+                        throw new IOException("Waze " + (patchStability ? "stable-session" : "route-export") + " target member is ambiguous");
                     }
                     lifecycleOwner = inspection;
                 }
             }
-            if (lifecycleOwner == null || lifecycleOwner.routeTargetCount != 1
+            if (lifecycleOwner == null || patchStability && (lifecycleOwner.routeTargetCount != 1
                     || lifecycleOwner.applicationTargetCount != 1
                     || lifecycleOwner.speedTargetCount != 1
-                    || lifecycleOwner.clusterEtaTargetCount != 1) {
-                throw new IOException("Waze stable-session target missing");
+                    || lifecycleOwner.clusterEtaTargetCount != 1)) {
+                throw new IOException("Waze " + (patchStability ? "stable-session" : "route-export") + " target missing");
             }
-            boolean addV2Bridge = lifecycleOwner.lifecycleCoreStock();
-            boolean upgradeGeometryPayload = lifecycleOwner.requiresGeometry
+            if (patchGeometry && !lifecycleOwner.geometryStock() && !lifecycleOwner.geometryUpgradeEligible())
+                throw new IOException("Waze route-export target is not patchable");
+            boolean addV2Bridge = patchStability && lifecycleOwner.lifecycleCoreStock();
+            boolean upgradeGeometryPayload = patchGeometry
                     && lifecycleOwner.geometryUpgradeEligible();
             File target = outputMember(outputDirectory, lifecycleOwner.fileName);
             Map<String, File> replacements = new HashMap<>();
@@ -1549,8 +1613,8 @@ final class NavigatorPatchPipeline {
                 File rewritten = new File(transaction,
                         "lifecycle-" + lifecycleOwner.fileName + "-"
                                 + dexEntry.replace('/', '_'));
-                reportStage(context, "STABLE_SESSION", "IN_PROGRESS", "");
-                WazePatchEngine.patchLifecycle(readEntry(target, dexEntry), rewritten, input.versionName);
+                reportStage(context, patchStability ? "STABLE_SESSION" : "ROUTE_EXPORT", "IN_PROGRESS", "");
+                WazePatchEngine.patchLifecycle(readEntry(target, dexEntry), rewritten, input.versionName, patchStability, patchGeometry);
                 replacements.put(dexEntry, rewritten);
             }
             File lifecycleApk = new File(transaction, "waze-lifecycle-unsigned.apk");
@@ -1560,13 +1624,13 @@ final class NavigatorPatchPipeline {
                 upgradeRouteExportPayload(context, lifecycleApk, updatedApk, transaction,
                         lifecycleOwner, true);
                 replaceFile(updatedApk, target);
-            } else if (addV2Bridge || (lifecycleOwner.requiresGeometry
+            } else if (addV2Bridge || (patchGeometry
                     && lifecycleOwner.geometryPayloadCount == 0)) {
                 File bridgeDex = new File(transaction, "waze-route-v2.dex");
                 PatchPayloadDex.extract(
                         context, addV2Bridge ? "Lcom/waze/bydhud/RouteStateBridgeV2"
                                 : "Lcom/bydhud/navexport/WazeRouteExport", bridgeDex,
-                        lifecycleOwner.requiresGeometry ? new String[] {
+                        patchGeometry ? new String[] {
                                 "Lcom/bydhud/navexport/WazeRouteExport",
                                 "Lcom/bydhud/navexport/RouteExport",
                                 "Lcom/bydhud/navexport/RouteData",
@@ -1615,6 +1679,13 @@ final class NavigatorPatchPipeline {
             File alertApk = new File(transaction, "waze-alert-hook-unsigned.apk");
             repack(target, alertApk, replacements, Collections.emptyMap());
             replaceFile(alertApk, target);
+        }
+        if (NavigatorPatchStore.PATCHABLE.equals(input.audioState)) {
+            reportStage(context, "AUDIO", "IN_PROGRESS", "");
+            File candidate = new File(transaction, "waze-audio-candidate");
+            List<File> sourceMembers = NavigatorApkSet.memberFiles(outputDirectory);
+            NavigatorHudProfile.load("waze", input.versionName).patch(sourceMembers, candidate, "audio");
+            for (File member : sourceMembers) replaceFile(new File(candidate, member.getName()), member);
         }
         return new PatchOutcome(false, false, false);
     }
@@ -1714,11 +1785,24 @@ final class NavigatorPatchPipeline {
         return directory;
     }
 
+    private static List<File> memberFiles(NavigatorApkSet.SetInfo set) {
+        List<File> members = new ArrayList<>();
+        for (NavigatorApkSet.Member member : set.members) members.add(member.file);
+        return members;
+    }
+
+    private static ScanResult withExtras(ScanResult value, String audio, String routeExport) {
+        return new ScanResult(value.profile, value.sha256, value.versionName, value.versionCode,
+                value.signerSha256, value.directState, value.gmsCoreState, value.optionalState,
+                value.alertState, value.reason, value.mapState, value.mapReason, value.mapRevision,
+                audio, routeExport);
+    }
+
     private static ScanResult copyStates(ScanResult source, String direct,
             String gmsCore, String optional, String alert, String reason) {
         return new ScanResult(source.profile, source.sha256, source.versionName,
                 source.versionCode, source.signerSha256, direct, gmsCore, optional, alert, reason,
-                source.mapState, source.mapReason, source.mapRevision);
+                source.mapState, source.mapReason, source.mapRevision, source.audioState, source.exportState);
     }
 
     private static WazeApkInspection inspectWaze(File apk, String version) throws IOException {
@@ -2194,14 +2278,11 @@ final class NavigatorPatchPipeline {
         boolean lifecyclePatchable() {
             boolean coreCompatible = lifecycleCoreStock() || lifecycleCoreV2Patched();
             boolean etaCompatible = clusterEtaStock() || clusterEtaPatched();
-            return coreCompatible && etaCompatible && (!requiresGeometry
-                    || geometryStock() || geometryPatched() || geometryUpgradeEligible())
-                    && !lifecyclePatched();
+            return coreCompatible && etaCompatible && !lifecyclePatched();
         }
 
         boolean lifecyclePatched() {
-            return lifecycleCoreV2Patched() && clusterEtaPatched()
-                    && (!requiresGeometry || geometryPatched());
+            return lifecycleCoreV2Patched() && clusterEtaPatched();
         }
 
         boolean geometryStock() {

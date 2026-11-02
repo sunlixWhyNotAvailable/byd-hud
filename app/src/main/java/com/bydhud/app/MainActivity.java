@@ -2222,7 +2222,7 @@ public final class MainActivity extends ComponentActivity {
                     value.directState, value.gmsCoreState, profile.gmsCoreLabel,
                     value.optionalState, profile.optionalLabel,
                     value.alertState, profile.alertLabel,
-                    value.reason, value.patchEnabled, value.mapState, value.mapReason));
+                    value.reason, value.patchEnabled, value.mapState, value.mapReason, value.audioState, value.exportState));
         }
         return Collections.unmodifiableList(rows);
     }
@@ -3315,6 +3315,8 @@ public final class MainActivity extends ComponentActivity {
         public final String reason;
         public final String mapState;
         public final String mapReason;
+        public final String audioState;
+        public final String exportState;
         public final boolean patchEnabled;
 
         ComposeNavigatorPatchRow(String profileId, String label, String packageName,
@@ -3348,6 +3350,21 @@ public final class MainActivity extends ComponentActivity {
                 String optionalState, String optionalLabel, String alertState,
                 String alertLabel, String reason, boolean patchEnabled,
                 String mapState, String mapReason) {
+            this(profileId, label, packageName, installedVersion, installed, externalSource,
+                    sourceName, sourceVersion, directState, gmsCoreState, gmsCoreLabel,
+                    optionalState, optionalLabel, alertState, alertLabel, reason, patchEnabled,
+                    mapState, mapReason, NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED);
+        }
+
+        ComposeNavigatorPatchRow(String profileId, String label, String packageName,
+                String installedVersion, boolean installed, boolean externalSource,
+                String sourceName, String sourceVersion, String directState,
+                String gmsCoreState, String gmsCoreLabel,
+                String optionalState, String optionalLabel, String alertState,
+                String alertLabel, String reason, boolean patchEnabled,
+                String mapState, String mapReason, String audioState, String exportState) {
+            this.audioState = audioState;
+            this.exportState = exportState;
             this.profileId = profileId == null ? "" : profileId;
             this.label = label == null ? "" : label;
             this.packageName = packageName == null ? "" : packageName;
@@ -3391,7 +3408,9 @@ public final class MainActivity extends ComponentActivity {
                     && Objects.equals(alertLabel, other.alertLabel)
                     && Objects.equals(reason, other.reason)
                     && Objects.equals(mapState, other.mapState)
-                    && Objects.equals(mapReason, other.mapReason);
+                    && Objects.equals(mapReason, other.mapReason)
+                    && Objects.equals(audioState, other.audioState)
+                    && Objects.equals(exportState, other.exportState);
         }
 
         @Override
@@ -3399,7 +3418,7 @@ public final class MainActivity extends ComponentActivity {
             return Objects.hash(profileId, label, packageName, installedVersion, installed,
                     externalSource, sourceName, sourceVersion, directState, gmsCoreState,
                     gmsCoreLabel, optionalState, optionalLabel, alertState, alertLabel,
-                    reason, mapState, mapReason, patchEnabled);
+                    reason, mapState, mapReason, patchEnabled, audioState, exportState);
         }
     }
 
