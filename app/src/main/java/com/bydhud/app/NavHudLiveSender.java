@@ -280,14 +280,33 @@ final class NavHudLiveSender {
 
     private void checkpointOutput(Runnable completion) {
         try {
-            JSONObject state = new JSONObject().put("check", hudCheckState.checkpoint())
+            JSONObject check = hudCheckState.checkpoint();
+            if (!HudCheckState.experimentalControlsEnabled()) {
+                String saved = ShellRuntimeSession.prefs(context).getString("output", "");
+                JSONObject previous = null;
+                try {
+                    if (!saved.isEmpty()) {
+                        JSONObject priorOutput = new JSONObject(saved);
+                        if (priorOutput.has("check")) previous = priorOutput.getJSONObject("check");
+                    }
+                } catch (org.json.JSONException error) {
+                    Log.e(TAG, "cannot retain hidden HUD Check selections from invalid checkpoint", error);
+                    log("cannot retain hidden HUD Check selections from invalid checkpoint "
+                            + error.getClass().getName() + ":" + safeReason(error.getMessage())
+                            + " stack=" + Log.getStackTraceString(error));
+                }
+                check = hudCheckState.checkpointForStableRelease(previous);
+            }
+            JSONObject state = new JSONObject().put("check", check)
                     .put("mapLive", mapLiveState.running);
             HudMapProfile draft = mapProfileCalibrationState.running ? mapProfileCalibrationState.draft : null;
             if (draft != null) state.put("profile", draft.toJson());
             ShellRuntimeSession.checkpointOutput(context, state.toString(),
                     completion == null ? null : () -> handler.post(completion));
         } catch (Exception error) {
-            log("runtime output checkpoint failed " + error.getClass().getSimpleName());
+            Log.e(TAG, "runtime output checkpoint failed", error);
+            log("runtime output checkpoint failed " + error.getClass().getName()
+                    + ":" + safeReason(error.getMessage()) + " stack=" + Log.getStackTraceString(error));
             if (completion != null) completion.run();
         }
     }
@@ -582,7 +601,9 @@ final class NavHudLiveSender {
     void updateHudCheck(UnaryOperator<HudCheckState> action, String reason) {
         handler.post(() -> {
             HudCheckState previous = hudCheckState;
-            HudCheckState next = action.apply(previous);
+            HudCheckState updated = action.apply(previous);
+            HudCheckState next = HudCheckState.experimentalControlsEnabled()
+                    ? updated : updated.forStableRelease();
             if (next.running && !isRuntimeEnabled()) return;
             if (next.equals(previous)) return;
             hudCheckStartError = "";

@@ -133,6 +133,19 @@ public final class HudCheckState {
                 Channel.BASIC, false, false);
     }
 
+    public static boolean experimentalControlsEnabled() {
+        return BuildConfig.VERSION_NAME.contains("-beta.");
+    }
+
+    HudCheckState forStableRelease() {
+        if (format == Format.NO_PNG && !denzaOem) return this;
+        return new HudCheckState(mode, running, automatic, maneuverIndex, laneIndex,
+                distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap,
+                laneBitmap, transliterate, extendedIndex, Format.NO_PNG, codeTable,
+                streetTestDestination, streetTestGuidePoint, streetTestMapState,
+                streetTestRoadClass, channel, addSomeIp, false);
+    }
+
     private HudCheckState(Mode mode, boolean running, boolean automatic,
                           int maneuverIndex, int laneIndex, int distanceIndex,
                           int streetIndex, int trafficLightIndex,
@@ -292,6 +305,17 @@ public final class HudCheckState {
                 .put("channel", channel.name()).put("addSomeIp", addSomeIp)
                 .put("denzaOem", denzaOem)
                 .put("extendedCount", extendedCount());
+    }
+
+    org.json.JSONObject checkpointForStableRelease(org.json.JSONObject previous)
+            throws org.json.JSONException {
+        org.json.JSONObject state = checkpoint();
+        // Retain only the two hidden beta choices; all live selections use current values.
+        if (previous != null) {
+            state.put("format", previous.optString("format", Format.NO_PNG.name()))
+                    .put("denzaOem", previous.optBoolean("denzaOem"));
+        }
+        return state;
     }
 
     static HudCheckState restore(org.json.JSONObject state) {

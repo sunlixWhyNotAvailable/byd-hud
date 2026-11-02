@@ -2691,9 +2691,7 @@ private fun OptionsTab(
                         "If the car's native arrow gets stuck or points the wrong way, try Baidu instead of AMap.\nThe change takes effect the next time you start output or a HUD test.",
                         "Если штатная стрелка зависает или показывает неверное направление, попробуйте Baidu вместо AMap.\nИзменение применится при следующем запуске вывода или теста HUD."
                     ),
-                    palette,
-                    verticalPadding = 8.dp,
-                    rowFill = featureMaturityFill(palette, tested = true)
+                    palette
                 ) {
                     Segmented(
                         "AMap",
@@ -2763,9 +2761,7 @@ private fun OptionsTab(
                     copy.vehiclePosition,
                     copy.vehiclePositionHint,
                     snapshot.vehiclePositionEnabled,
-                    palette,
-                    rowFill = featureMaturityFill(palette, tested = true),
-                    verticalPadding = 8.dp
+                    palette
                 ) { enabled ->
                     runAction { activity.composeSetVehiclePositionEnabled(enabled) }
                 }
@@ -3212,8 +3208,7 @@ private fun OptionsTab(
                         "Restores map and lane positions and scales",
                         "Восстанавливает расположение и масштаб карты и полос"),
                     palette,
-                    enabled = mapEditorEnabled,
-                    rowFill = featureMaturityFill(palette)
+                    enabled = mapEditorEnabled
                 ) {
                     HudButton(
                         language.choose("Відновити типові", "Restore defaults", "Восстановить типовые"),
@@ -6789,7 +6784,7 @@ private fun StorageTab(
                     }
                     HudButton(
                         copy.shareConfiguration,
-                        palette.copy(panelAlt = featureMaturityFill(palette).takeUnless { it == Color.Transparent } ?: palette.panelAlt),
+                        palette,
                         primary = false,
                         enabled = !storageActionBusy && !configurationShareBusy,
                         width = 300.dp,
@@ -7888,7 +7883,6 @@ private fun HudCheckTab(
                         onNext = { step(HudCheckState.Field.DISTANCE, 1) })
                     Divider(palette)
                     HudCheckRow(copy.streetText, copy.checkStreetHint, state.effectiveStreet(), palette,
-                        rowFill = featureMaturityFill(palette),
                         onPrevious = { step(HudCheckState.Field.STREET, -1) },
                         onNext = { step(HudCheckState.Field.STREET, 1) },
                         option = {
@@ -8398,17 +8392,6 @@ private fun HudCheckSharedSettings(
     val addSomeIpAllowed = state.channel == HudCheckState.Channel.INSTRUMENT
         || state.channel == HudCheckState.Channel.CLUSTER_DEBUG
         || state.channel == HudCheckState.Channel.AMAP
-    val formatSelectionOffset by animateDpAsState(
-        targetValue = when (state.format) {
-            HudCheckState.Format.NO_PNG -> 0.dp
-            HudCheckState.Format.A -> 84.dp
-            HudCheckState.Format.B -> 228.dp
-            HudCheckState.Format.C -> 372.dp
-            HudCheckState.Format.D -> 516.dp
-        },
-        animationSpec = tween(durationMillis = 140),
-        label = "hudCheckFormatSelection"
-    )
     val channels = listOf(
         HudCheckState.Channel.BASIC,
         HudCheckState.Channel.SOMEIP,
@@ -8428,78 +8411,91 @@ private fun HudCheckSharedSettings(
             .border(1.dp, palette.border, RoundedCornerShape(8.dp))
             .background(palette.panel)
     ) {
-        ActionRow(
-            language.choose("Формат перевірки", "Check format", "Формат проверки"),
-            language.choose(
-                "Формат пакета SOME/IP. Basic — поточний формат виводу",
-                "SOME/IP packet format. Basic is the current output format",
-                "Формат пакета SOME/IP. Basic — текущий формат вывода"
-            ),
-            palette,
-            verticalPadding = 6.dp,
-            enabled = !denza,
-            rowFill = featureMaturityFill(palette)
-        ) {
-            Box(
-                modifier = Modifier.selectableGroup()
-                    .alpha(if (denza) 0.5f else 1f)
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(22.dp))
-                    .border(1.dp, palette.borderStrong, RoundedCornerShape(22.dp))
-                    .background(palette.panelAlt)
-                    .padding(5.dp)
+        if (HudCheckState.experimentalControlsEnabled()) {
+            val formatSelectionOffset by animateDpAsState(
+                targetValue = when (state.format) {
+                    HudCheckState.Format.NO_PNG -> 0.dp
+                    HudCheckState.Format.A -> 84.dp
+                    HudCheckState.Format.B -> 228.dp
+                    HudCheckState.Format.C -> 372.dp
+                    HudCheckState.Format.D -> 516.dp
+                },
+                animationSpec = tween(durationMillis = 140),
+                label = "hudCheckFormatSelection"
+            )
+            ActionRow(
+                language.choose("Формат перевірки", "Check format", "Формат проверки"),
+                language.choose(
+                    "Формат пакета SOME/IP. Basic — поточний формат виводу",
+                    "SOME/IP packet format. Basic is the current output format",
+                    "Формат пакета SOME/IP. Basic — текущий формат вывода"
+                ),
+                palette,
+                verticalPadding = 6.dp,
+                enabled = !denza,
+                rowFill = featureMaturityFill(palette)
             ) {
                 Box(
-                    Modifier.offset(x = formatSelectionOffset)
-                        .width(if (state.format == HudCheckState.Format.NO_PNG) 84.dp else 144.dp)
-                        .height(32.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(palette.accent)
-                )
-                Row {
-                    listOf(
-                        HudCheckState.Format.NO_PNG,
-                        HudCheckState.Format.A,
-                        HudCheckState.Format.B,
-                        HudCheckState.Format.C,
-                        HudCheckState.Format.D
-                    ).forEach { format ->
-                        SegmentedItem(
-                            text = hudCheckFormatLabel(format, language),
-                            active = state.format == format,
-                            palette = palette,
-                            itemWidth = if (format == HudCheckState.Format.NO_PNG) 84.dp else 144.dp,
-                            onClick = { runAction { activity.composeHudCheckSelectFormat(format) } },
-                            enabled = !denza,
-                            fontSize = 12.sp
-                        )
+                    modifier = Modifier.selectableGroup()
+                        .alpha(if (denza) 0.5f else 1f)
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .border(1.dp, palette.borderStrong, RoundedCornerShape(22.dp))
+                        .background(palette.panelAlt)
+                        .padding(5.dp)
+                ) {
+                    Box(
+                        Modifier.offset(x = formatSelectionOffset)
+                            .width(if (state.format == HudCheckState.Format.NO_PNG) 84.dp else 144.dp)
+                            .height(32.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(palette.accent)
+                    )
+                    Row {
+                        listOf(
+                            HudCheckState.Format.NO_PNG,
+                            HudCheckState.Format.A,
+                            HudCheckState.Format.B,
+                            HudCheckState.Format.C,
+                            HudCheckState.Format.D
+                        ).forEach { format ->
+                            SegmentedItem(
+                                text = hudCheckFormatLabel(format, language),
+                                active = state.format == format,
+                                palette = palette,
+                                itemWidth = if (format == HudCheckState.Format.NO_PNG) 84.dp else 144.dp,
+                                onClick = { runAction { activity.composeHudCheckSelectFormat(format) } },
+                                enabled = !denza,
+                                fontSize = 12.sp
+                            )
+                        }
                     }
                 }
             }
+            Divider(palette)
+            val denzaSwitchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
+            val onDenzaOemTest: (Boolean) -> Unit = {
+                runAction { activity.composeHudCheckSetDenzaOem(it) }
+            }
+            ActionRow(
+                "Denza OEM Test",
+                language.choose(
+                    "Штатний запис Denza N9 без змін. Ручні поля не застосовуються; канал обирається нижче",
+                    "Unmodified Denza N9 stock recording. Manual fields do not apply; select the channel below",
+                    "Штатная запись Denza N9 без изменений. Ручные поля не применяются; канал выбирается ниже"
+                ),
+                palette,
+                verticalPadding = 6.dp,
+                toggleChecked = state.denzaOem,
+                onToggle = onDenzaOemTest,
+                switchControl = denzaSwitchControl,
+                rowFill = featureMaturityFill(palette)
+            ) {
+                HudSwitch(state.denzaOem, onDenzaOemTest, palette,
+                    externalControl = denzaSwitchControl)
+            }
+            Divider(palette)
         }
-        Divider(palette)
-        val denzaSwitchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
-        val onDenzaOemTest: (Boolean) -> Unit = {
-            runAction { activity.composeHudCheckSetDenzaOem(it) }
-        }
-        ActionRow(
-            "Denza OEM Test",
-            language.choose(
-                "Штатний запис Denza N9 без змін. Ручні поля не застосовуються; канал обирається нижче",
-                "Unmodified Denza N9 stock recording. Manual fields do not apply; select the channel below",
-                "Штатная запись Denza N9 без изменений. Ручные поля не применяются; канал выбирается ниже"
-            ),
-            palette,
-            verticalPadding = 6.dp,
-            toggleChecked = state.denzaOem,
-            onToggle = onDenzaOemTest,
-            switchControl = denzaSwitchControl,
-            rowFill = featureMaturityFill(palette)
-        ) {
-            HudSwitch(state.denzaOem, onDenzaOemTest, palette,
-                externalControl = denzaSwitchControl)
-        }
-        Divider(palette)
         ActionRow(
             language.choose("Таблиця кодів маневрів", "Maneuver code table", "Таблица кодов манёвров"),
             language.choose(
@@ -8508,9 +8504,7 @@ private fun HudCheckSharedSettings(
                 "Коды манёвров в SOME/IP; не включает канал AMap"
             ),
             palette,
-            verticalPadding = 6.dp,
-            enabled = !denza,
-            rowFill = featureMaturityFill(palette)
+            enabled = !denza
         ) {
             Segmented(
                 left = "BYD / Denza",
@@ -8534,9 +8528,7 @@ private fun HudCheckSharedSettings(
                 "Basic uses the normal test pipeline; other choices select one channel",
                 "Basic — обычный пайплайн теста; другие варианты — отдельный канал"
             ),
-            palette,
-            verticalPadding = 6.dp,
-            rowFill = featureMaturityFill(palette)
+            palette
         ) {
             Box(
                 Modifier.selectableGroup()
@@ -8587,12 +8579,10 @@ private fun HudCheckSharedSettings(
                 "Дополнительный канал для Instrument, ClusterDebug или AMap"
             ),
             palette,
-            verticalPadding = 6.dp,
             enabled = addSomeIpAllowed,
             toggleChecked = state.effectiveAddSomeIp(),
             onToggle = onAddSomeIp,
-            switchControl = addSomeIpSwitchControl,
-            rowFill = featureMaturityFill(palette)
+            switchControl = addSomeIpSwitchControl
         ) {
             HudSwitch(
                 state.effectiveAddSomeIp(),
@@ -8659,7 +8649,7 @@ private fun StreetTestFieldControls(
     val empty = language.choose("Порожнє значення у тесті", "Empty value in the test", "Пустое значение в тесте")
     val unchanged = language.choose("Без перевизначення поточного значення", "Keep the current value", "Без переопределения текущего значения")
     val stock = language.choose("як у штатному записі Шанхая", "as in the stock Shanghai recording", "как в штатной записи Шанхая")
-    Column(Modifier.fillMaxWidth().background(featureMaturityFill(palette))) {
+    Column(Modifier.fillMaxWidth()) {
         SwitchRow(
             title = language.choose("Координати призначення · f25", "Destination coordinates · f25", "Координаты назначения · f25"),
             hint = if (state.streetTestDestination) "121.482646,31.235493" else empty,
@@ -9477,7 +9467,7 @@ private fun SettingRow(
 }
 
 private fun featureMaturityFill(palette: Palette, tested: Boolean = false): Color {
-    if (!BuildConfig.VERSION_NAME.contains("beta", ignoreCase = true)) return Color.Transparent
+    if (!HudCheckState.experimentalControlsEnabled()) return Color.Transparent
     return if (tested) palette.greenSoft else if (palette.dark) Color(0xFF47311F) else Color(0xFFFFEAD6)
 }
 
@@ -9829,8 +9819,7 @@ private fun MapProfileEditorDialog(
                             "Restores X, Y, scale and colors. Press Save to keep the changes.",
                             "Восстанавливает X, Y, масштаб и цвета. Нажмите «Сохранить», чтобы оставить изменения."),
                         palette,
-                        enabled = !saving,
-                        rowFill = featureMaturityFill(palette)
+                        enabled = !saving
                     ) {
                         HudButton(
                             language.choose("Відновити типові", "Restore defaults", "Восстановить типовые"),
@@ -9936,7 +9925,7 @@ private fun MapProfileEditorDialog(
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         colorTitles.forEachIndexed { index, title ->
                             WidgetColorLine(title, colorValues[index], palette, !saving,
-                                rowFill = featureMaturityFill(palette), verticalPadding = 6.dp) {
+                                verticalPadding = 6.dp) {
                                 choosingColor = index
                             }
                         }

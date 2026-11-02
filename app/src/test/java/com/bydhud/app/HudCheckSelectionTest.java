@@ -10,6 +10,37 @@ import org.json.JSONObject;
 import org.junit.Test;
 
 public class HudCheckSelectionTest {
+    @Test public void stableReleaseSuppressesOnlyHiddenBetaChoicesAndRetainsThemOnSave() throws Exception {
+        HudCheckState beta = new HudCheckState().withManeuverBitmap(true).withLaneBitmap(true)
+                .selectFormat(HudCheckState.Format.C)
+                .selectCodeTable(HudCheckState.CodeTable.HUAWEI)
+                .selectChannel(HudCheckState.Channel.AMAP).selectAddSomeIp(true)
+                .selectDenzaOem(true).selectMode(HudCheckState.Mode.EXTENDED).toggleRun();
+        JSONObject saved = new JSONObject(beta.checkpoint().toString());
+        HudCheckState stable = HudCheckState.restore(saved).forStableRelease();
+        assertEquals(beta.selectDenzaOem(false).selectFormat(HudCheckState.Format.NO_PNG), stable);
+        assertFalse(stable.isDenzaOem());
+        assertTrue(stable.effectiveManeuverBitmap());
+        assertTrue(stable.effectiveLaneBitmap());
+        assertSame(stable, stable.forStableRelease());
+        assertTrue(beta.isDenzaOem());
+        assertEquals(HudCheckState.Format.C, beta.format);
+
+        HudCheckState edited = stable.selectCodeTable(HudCheckState.CodeTable.AMAP)
+                .selectChannel(HudCheckState.Channel.INSTRUMENT).selectAddSomeIp(false);
+        assertEquals(HudCheckState.CodeTable.AMAP, edited.codeTable);
+        assertTrue(edited.usesInstrument());
+        assertFalse(edited.usesSomeIp());
+        JSONObject stored = new JSONObject(edited.checkpointForStableRelease(saved).toString());
+        HudCheckState nextBeta = HudCheckState.restore(stored);
+        assertEquals(edited.selectFormat(HudCheckState.Format.C).selectDenzaOem(true), nextBeta);
+        assertEquals(edited, nextBeta.forStableRelease());
+        assertEquals(HudCheckState.Format.NO_PNG.name(), edited.checkpoint().getString("format"));
+        assertFalse(edited.checkpoint().getBoolean("denzaOem"));
+        assertEquals(edited, HudCheckState.restore(edited.checkpointForStableRelease(null)));
+        assertEquals(edited, HudCheckState.restore(edited.checkpointForStableRelease(new JSONObject())));
+    }
+
     @Test public void channelProfilesAndSavedAddSomeIpPreference() {
         HudCheckState basic = new HudCheckState();
         assertEquals(HudCheckState.Channel.BASIC, basic.channel);
