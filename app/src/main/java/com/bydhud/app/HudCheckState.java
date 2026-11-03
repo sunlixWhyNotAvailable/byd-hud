@@ -134,7 +134,8 @@ public final class HudCheckState {
     }
 
     public static boolean experimentalControlsEnabled() {
-        return BuildConfig.VERSION_NAME.contains("-beta.");
+        // This beta branch exposes the deferred controls before its next version bump.
+        return true;
     }
 
     HudCheckState forStableRelease() {

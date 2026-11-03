@@ -8441,7 +8441,7 @@ private fun HudCheckSharedSettings(
                 palette,
                 verticalPadding = 6.dp,
                 enabled = !denza,
-                rowFill = featureMaturityFill(palette)
+                rowFill = palette.redSoft
             ) {
                 Box(
                     modifier = Modifier.selectableGroup()
@@ -8497,7 +8497,7 @@ private fun HudCheckSharedSettings(
                 toggleChecked = state.denzaOem,
                 onToggle = onDenzaOemTest,
                 switchControl = denzaSwitchControl,
-                rowFill = featureMaturityFill(palette)
+                rowFill = palette.redSoft
             ) {
                 HudSwitch(state.denzaOem, onDenzaOemTest, palette,
                     externalControl = denzaSwitchControl)
@@ -9472,11 +9472,6 @@ private fun SettingRow(
         }
         action()
     }
-}
-
-private fun featureMaturityFill(palette: Palette, tested: Boolean = false): Color {
-    if (!HudCheckState.experimentalControlsEnabled()) return Color.Transparent
-    return if (tested) palette.greenSoft else if (palette.dark) Color(0xFF47311F) else Color(0xFFFFEAD6)
 }
 
 private fun localizedColorTitle(slot: HudTextColorSlot, language: Language): String = when (slot) {
