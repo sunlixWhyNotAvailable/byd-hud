@@ -2195,7 +2195,7 @@ private fun Header(
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(copy.title, color = palette.text, fontWeight = FontWeight.Bold, fontSize = 23.sp)
-                Text(copy.language.choose("Підтримати", "Support", "Поддержать"),
+                Text(copy.language.choose("Проєкт і підтримка", "Project and support", "Проект и поддержка"),
                     color = palette.accent, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(RoundedCornerShape(5.dp))
                         .background(if (supportPress.pressed) palette.active else Color.Transparent)
@@ -2249,15 +2249,18 @@ private fun Header(
 
 private const val SUPPORT_JAR_URL = "https://send.monobank.ua/jar/bKFV15i9e"
 private const val SUPPORT_JAR_CARD = "4874 1000 3354 3078"
+private const val SUPPORT_PAYPAL_EMAIL = "opriva1@gmail.com"
 
 @Composable
 private fun SupportDialog(language: Language, palette: Palette, onClose: () -> Unit) {
     val context = LocalContext.current
+    var paypalSelected by rememberSaveable { mutableStateOf(false) }
     val description = language.choose(
-        "Добровільна підтримка розробки та вдосконалення застосунків для автомобілів BYD",
-        "Voluntary support for the development and improvement of apps for BYD cars",
-        "Добровольная поддержка разработки и улучшения приложений для автомобилей BYD")
+        "BYD HUD — безкоштовний проєкт із відкритим вихідним кодом. Ви можете добровільно підтримати його розробку та вдосконалення.",
+        "BYD HUD is a free, open-source project. You can voluntarily support its development and improvement.",
+        "BYD HUD — бесплатный проект с открытым исходным кодом. Вы можете добровольно поддержать его разработку и улучшение.")
     val cardLabel = language.choose("Номер картки Банки", "Jar card number", "Номер карты Банки")
+    val emailLabel = language.choose("Email для переказу через PayPal", "Email for PayPal transfers", "Email для перевода через PayPal")
     val shareLabel = language.choose("Поділитися", "Share", "Поделиться")
     fun openIntent(intent: Intent) {
         try {
@@ -2270,10 +2273,83 @@ private fun SupportDialog(language: Language, palette: Palette, onClose: () -> U
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.width(820.dp).fillMaxHeight(0.9f).clip(RoundedCornerShape(8.dp))
             .background(palette.surface).border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
-            .padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text(language.choose("Підтримати розробку", "Support development", "Поддержать разработку"),
-                color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(22.dp),
+            .padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text(language.choose("Проєкт і підтримка", "Project and support", "Проект и поддержка"),
+                    modifier = Modifier.weight(1f),
+                    color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Row(Modifier.width(280.dp).selectableGroup().clip(RoundedCornerShape(7.dp))
+                    .background(palette.panelAlt).border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                    .padding(2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    listOf("monobank", "PayPal").forEachIndexed { index, label ->
+                        val selected = paypalSelected == (index == 1)
+                        val press = rememberPressFeedback(releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
+                        Box(Modifier.weight(1f).height(36.dp).clip(RoundedCornerShape(5.dp))
+                            .background(pressBackground(if (selected) palette.active else Color.Transparent, palette, press.pressed))
+                            .then(press.modifier)
+                            .selectable(selected = selected, role = Role.Tab,
+                                interactionSource = press.interactionSource, indication = null,
+                                onClick = { paypalSelected = index == 1 }), contentAlignment = Alignment.Center) {
+                            Text(label, color = if (selected) palette.text else palette.muted,
+                                fontSize = 16.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                        }
+                    }
+                }
+            }
+            Text(description, color = palette.text, fontSize = 15.sp)
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(Modifier.clip(RoundedCornerShape(4.dp))
+                    .clickable(role = Role.Button) { openIntent(Intent(Intent.ACTION_VIEW, Uri.parse(PROJECT_REPOSITORY_URL))) }
+                    .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(painterResource(R.drawable.ic_options_open_in_new), contentDescription = null,
+                        tint = palette.accent, modifier = Modifier.size(18.dp))
+                    Text(language.choose("Вихідний код на GitHub", "Source code on GitHub", "Исходный код на GitHub"),
+                        color = palette.accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Row(Modifier.clip(RoundedCornerShape(7.dp)).background(palette.field)
+                        .border(1.dp, palette.border, RoundedCornerShape(7.dp))
+                        .clickable(role = Role.Button, onClickLabel = language.choose("Копіювати посилання на репозиторій",
+                            "Copy repository link", "Копировать ссылку на репозиторий")) {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("BYD HUD", PROJECT_REPOSITORY_URL))
+                            Toast.makeText(context, language.choose("Посилання скопійовано", "Link copied", "Ссылка скопирована"),
+                                Toast.LENGTH_SHORT).show()
+                        }.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val linkColor = palette.yellow
+                    Icon(painterResource(R.drawable.ic_content_copy), contentDescription = null,
+                        tint = linkColor, modifier = Modifier.size(18.dp))
+                    Text(PROJECT_REPOSITORY_URL, color = linkColor, fontSize = 14.sp)
+                }
+            }
+            if (paypalSelected) {
+                Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically)) {
+                    Text(language.choose(
+                        "У PayPal виберіть «Надіслати», вставте цю адресу як одержувача та вкажіть суму переказу.",
+                        "In PayPal, choose Send, paste this email as the recipient and enter the amount.",
+                        "В PayPal выберите «Отправить», вставьте этот адрес как получателя и укажите сумму перевода."),
+                        color = palette.muted, fontSize = 16.sp)
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(palette.field)
+                        .border(1.dp, palette.border, RoundedCornerShape(7.dp))
+                        .clickable(role = Role.Button, onClickLabel = language.choose("Копіювати email", "Copy email", "Копировать email")) {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText(emailLabel, SUPPORT_PAYPAL_EMAIL))
+                            Toast.makeText(context, language.choose("Email скопійовано", "Email copied", "Email скопирован"),
+                                Toast.LENGTH_SHORT).show()
+                        }.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(emailLabel, color = palette.muted, fontSize = 14.sp)
+                        Text(SUPPORT_PAYPAL_EMAIL, color = palette.text, fontFamily = FontFamily.Monospace,
+                            fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                        Text(language.choose("Натисніть, щоб скопіювати", "Tap to copy", "Нажмите, чтобы скопировать"),
+                            color = palette.accent, fontSize = 14.sp)
+                    }
+                }
+            } else Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(22.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Image(painterResource(R.drawable.mono_support_qr),
                     contentDescription = language.choose("QR-код Банки для поповнення",
@@ -2283,7 +2359,6 @@ private fun SupportDialog(language: Language, palette: Palette, onClose: () -> U
                 Column(Modifier.weight(0.58f).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Text("Support BYD app", color = palette.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                    Text(description, color = palette.text, fontSize = 16.sp)
                     Text(language.choose("Відскануйте QR-код телефоном або відкрийте посилання на Банку.",
                         "Scan the QR code with your phone or open the Jar link.",
                         "Отсканируйте QR-код телефоном или откройте ссылку на Банку."),
@@ -2322,13 +2397,15 @@ private fun SupportDialog(language: Language, palette: Palette, onClose: () -> U
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
                 ShareIconLabelButton(shareLabel, palette, enabled = true, primary = true,
                     width = 170.dp, onClick = {
+                        val paymentDetails = if (paypalSelected) "$emailLabel: $SUPPORT_PAYPAL_EMAIL"
+                            else "$SUPPORT_JAR_URL\n\n$cardLabel: $SUPPORT_JAR_CARD"
                         val intent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_SUBJECT, "Support BYD app")
-                            putExtra(Intent.EXTRA_TEXT, "Support BYD app\n\n$description\n\n$SUPPORT_JAR_URL\n\n$cardLabel: $SUPPORT_JAR_CARD")
+                            putExtra(Intent.EXTRA_TEXT, "BYD HUD\n\n$description\n\n$PROJECT_REPOSITORY_URL\n\n$paymentDetails")
                         }
                         openIntent(Intent.createChooser(intent, shareLabel))
                     })
