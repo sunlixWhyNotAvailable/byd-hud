@@ -131,6 +131,7 @@ final class NavigationLogStorage {
         final boolean publicStorage;
         final boolean publicPermission;
         final long checkedMs;
+        final Object fileKey;
 
         CachedDir(
                 File dir,
@@ -141,6 +142,7 @@ final class NavigationLogStorage {
             this.publicStorage = publicStorage;
             this.publicPermission = publicPermission;
             this.checkedMs = checkedMs;
+            this.fileKey = publicStorage ? publicDirectoryKey(dir) : null;
         }
     }
 
@@ -462,8 +464,9 @@ final class NavigationLogStorage {
                 markStorageFileChanged(LogcatRecorder.retentionActiveFile(context));
                 markStorageFileChanged(ShanghaiTestController.retentionActiveDirectory(context));
                 NavigationStorageInventory.Snapshot previous = USAGE.currentSnapshot();
-                boolean due = previous == null || System.nanoTime() - previous.lastFullCompletedNanos
-                        >= FULL_RECONCILIATION_NANOS;
+                boolean due = !HudRuntimeService.isPeriodicMaintenancePaused()
+                        && (previous == null || System.nanoTime() - previous.lastFullCompletedNanos
+                        >= FULL_RECONCILIATION_NANOS);
                 result = USAGE.refresh(roots, force || due);
             }
             if (result.fullScan) {
@@ -476,6 +479,7 @@ final class NavigationLogStorage {
             return result;
         } catch (IOException | InterruptedException | RuntimeException error) {
             USAGE.invalidate();
+            invalidatePublicRootCache();
             throw error;
         }
     }
@@ -874,13 +878,17 @@ final class NavigationLogStorage {
         }
         long started = SystemClock.elapsedRealtime();
         long cpuStarted = SystemClock.currentThreadTimeMillis();
-        List<File> roots = rootFiles(accessibleRootsLocked(request.context));
+        List<File> roots = rootFiles(accessibleRootsLocked(request.context, !request.force));
         NavigationStorageInventory.Snapshot usage = refreshUsage(
                 request.context, roots, request.force, request.reason);
         long visited = usage.visitedFiles;
-        if (usage.totalBytes > request.maxBytes && !usage.fullScan) {
-            usage = refreshUsage(request.context, roots, true, "pre-delete");
+        boolean fullInventory = usage.fullScan;
+        if (usage.totalBytes > request.maxBytes) {
+            roots = rootFiles(accessibleRootsLocked(request.context));
+            // Recheck root identity even after a full scan; unchanged roots need no second full walk.
+            usage = refreshUsage(request.context, roots, !fullInventory, "pre-delete");
             visited += usage.visitedFiles;
+            fullInventory |= usage.fullScan;
         }
         long beforeBytes = usage.totalBytes;
         RetentionStats stats = new RetentionStats(request.context, beforeBytes, request.maxBytes);
@@ -897,7 +905,7 @@ final class NavigationLogStorage {
         NavigationStorageInventory.Snapshot after = beforeBytes > request.maxBytes
                 ? refreshUsage(request.context, roots, false, "post-delete") : usage;
         logRetention(request.context, "retention_end reason=" + request.reason
-                + " mode=" + (usage.fullScan ? "full" : "dirty")
+                + " mode=" + (fullInventory ? "full" : "dirty")
                 + " visitedFiles=" + visited + " filesDeleted=" + stats.deletedFiles
                 + " bytesDeleted=" + stats.deletedBytes + " beforeBytes=" + beforeBytes
                 + " afterBytes=" + after.totalBytes + " maxBytes=" + request.maxBytes
@@ -1262,15 +1270,23 @@ final class NavigationLogStorage {
     }
 
     private static List<StorageRoot> accessibleRootsLocked(Context context) {
+        return accessibleRootsLocked(context, false);
+    }
+
+    private static List<StorageRoot> accessibleRootsLocked(Context context, boolean reuseProbe) {
         File publicRoot = publicRootDir();
         File privateRoot = privateRootDir(context);
         List<StorageRoot> roots = new ArrayList<>();
-        if (!hasPublicWritePermission(context) || !probeExistingWritable(publicRoot)) {
+        boolean publicPermission = hasPublicWritePermission(context);
+        boolean cachedProbe = publicPermission && reuseProbe && hasFreshPublicProbe(publicRoot);
+        if (!publicPermission || (!cachedProbe && !probeExistingWritable(publicRoot))) {
             invalidatePublicRootCache();
             roots.add(new StorageRoot(privateRoot, false, "private"));
             return roots;
         }
-        cachePublicFirstDir("", publicRoot, true, true, SystemClock.elapsedRealtime());
+        if (!cachedProbe) {
+            cachePublicFirstDir("", publicRoot, true, true, SystemClock.elapsedRealtime());
+        }
         roots.add(new StorageRoot(publicRoot, true, "public"));
         if (hasDatedSessions(privateRoot)) {
             roots.add(new StorageRoot(privateRoot, false, "private"));
@@ -1627,7 +1643,8 @@ final class NavigationLogStorage {
                     && cached.dir != null
                     && cached.dir.isDirectory()
                     && cached.publicPermission == publicPermission
-                    && (!cached.publicStorage || cached.dir.canWrite())
+                    && (!cached.publicStorage || (cached.dir.canWrite() && cached.fileKey != null
+                        && cached.fileKey.equals(publicDirectoryKey(cached.dir))))
                     && now - cached.checkedMs < PUBLIC_DIR_CACHE_TTL_MS) {
                 return cached.dir;
             }
@@ -1704,9 +1721,30 @@ final class NavigationLogStorage {
         }
     }
 
-    private static void invalidatePublicRootCache() {
+    static void invalidatePublicRootCache() {
         synchronized (PUBLIC_DIR_CACHE_LOCK) {
             PUBLIC_DIR_CACHE.clear();
+        }
+    }
+
+    private static boolean hasFreshPublicProbe(File root) {
+        synchronized (PUBLIC_DIR_CACHE_LOCK) {
+            CachedDir cached = PUBLIC_DIR_CACHE.get("");
+            return cached != null && cached.publicStorage && cached.publicPermission
+                    && root.equals(cached.dir) && root.isDirectory() && root.canWrite()
+                    && SystemClock.elapsedRealtime() - cached.checkedMs < PUBLIC_DIR_CACHE_TTL_MS
+                    && cached.fileKey != null && cached.fileKey.equals(publicDirectoryKey(root));
+        }
+    }
+
+    private static Object publicDirectoryKey(File dir) {
+        try {
+            java.nio.file.attribute.BasicFileAttributes attributes = java.nio.file.Files.readAttributes(
+                    dir.toPath(), java.nio.file.attribute.BasicFileAttributes.class);
+            return attributes.isDirectory() ? attributes.fileKey() : null;
+        } catch (IOException | RuntimeException error) {
+            logWarn("storage root identity unavailable: " + dir + " cause=" + Log.getStackTraceString(error));
+            return null;
         }
     }
 

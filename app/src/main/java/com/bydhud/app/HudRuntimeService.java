@@ -50,10 +50,13 @@ public final class HudRuntimeService extends Service {
     };
 
     private final Handler heartbeatHandler = new Handler(Looper.getMainLooper());
+    private final HudRuntimeState.PeriodicMaintenance periodicMaintenance =
+            new HudRuntimeState.PeriodicMaintenance();
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
         //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
+            if (runtimeDestroyed || periodicMaintenance.isPaused()) return;
             boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(HudRuntimeService.this);
             HudRuntimeState.markHeartbeat(HudRuntimeService.this,
                     activeWork ? "periodic" : "idle-periodic");
@@ -93,6 +96,11 @@ public final class HudRuntimeService extends Service {
                 vehiclePositionSleeping = true;
             } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
                 vehiclePositionSleeping = false;
+            }
+            if (Intent.ACTION_SCREEN_OFF.equals(action) || Intent.ACTION_SCREEN_ON.equals(action)) {
+                boolean wasPaused = periodicMaintenance.isPaused();
+                periodicMaintenance.onScreen(vehiclePositionSleeping);
+                reconcilePeriodicMaintenance(wasPaused);
             }
             if (Intent.ACTION_SCREEN_OFF.equals(action)) {
                 reconcileVehiclePosition();
@@ -146,6 +154,30 @@ public final class HudRuntimeService extends Service {
     static boolean isVehiclePositionRuntimeSuspended() {
         HudRuntimeService service = activeService;
         return service == null || service.runtimeDestroyed || service.vehiclePositionSleeping;
+    }
+
+    static boolean isPeriodicMaintenancePaused() {
+        HudRuntimeService service = activeService;
+        return service != null && !service.runtimeDestroyed && service.periodicMaintenance.isPaused();
+    }
+
+    // Called on the main thread by the existing power monitor, before its consumers can detach.
+    static void onVehiclePowerChanged(int raw) {
+        HudRuntimeService service = activeService;
+        if (service == null || service.runtimeDestroyed) return;
+        boolean wasPaused = service.periodicMaintenance.isPaused();
+        service.periodicMaintenance.onPower(raw);
+        service.reconcilePeriodicMaintenance(wasPaused);
+    }
+
+    private void reconcilePeriodicMaintenance(boolean wasPaused) {
+        if (wasPaused == periodicMaintenance.isPaused()) return;
+        heartbeatHandler.removeCallbacks(heartbeatRunnable);
+        if (!periodicMaintenance.isPaused()) {
+            HudRuntimeState.markHeartbeat(this, "maintenance-resumed");
+            requestRuntimeUiRefresh(true, "runtime-maintenance-resumed");
+            scheduleHeartbeat();
+        }
     }
 
     static boolean isVehiclePositionPermissionGranted() {
@@ -355,6 +387,8 @@ public final class HudRuntimeService extends Service {
         runtimeDestroyed = false;
         PowerManager powerManager = getSystemService(PowerManager.class);
         vehiclePositionSleeping = powerManager != null && !powerManager.isInteractive();
+        periodicMaintenance.onScreen(vehiclePositionSleeping);
+        periodicMaintenance.onPower(VehiclePowerMonitor.currentPower());
         vehiclePositionController = new VehiclePositionController(this,
                 HudRuntimeService::notifyVehiclePositionListener,
                 HudRuntimeService::onVehiclePositionProviderStateChanged);
@@ -739,7 +773,9 @@ public final class HudRuntimeService extends Service {
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleHeartbeat() {
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
-        heartbeatHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
+        if (!periodicMaintenance.isPaused()) {
+            heartbeatHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
+        }
     }
 
     private void requestInitialUiRefresh(String reason) {
@@ -748,7 +784,7 @@ public final class HudRuntimeService extends Service {
 
     private void requestRuntimeUiRefresh(boolean force, String reason) {
         //The periodic path is local-only; authoritative app scans are UI/event driven.
-        MainActivity.requestRuntimeStatusRefresh(this, false, reason);
+        MainActivity.requestRuntimeStatusRefresh(this, force, reason);
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

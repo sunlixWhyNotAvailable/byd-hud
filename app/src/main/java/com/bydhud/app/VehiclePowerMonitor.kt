@@ -3,6 +3,7 @@ package com.bydhud.app
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 
 /** One OEM read for all interested main-process consumers. */
 internal object VehiclePowerMonitor {
@@ -16,6 +17,8 @@ internal object VehiclePowerMonitor {
     private var pending = false
     private var reading = Reading()
     private val poll = Runnable { read() }
+
+    @JvmStatic fun currentPower(): Int = reading.raw
 
     fun observe(context: Context, owner: String, observer: (Reading) -> Unit) {
         check(Looper.myLooper() == Looper.getMainLooper())
@@ -43,6 +46,10 @@ internal object VehiclePowerMonitor {
             generation++
             main.removeCallbacks(poll)
             reading = Reading()
+            // Preserve OFF only for sleep detachment, independent of receiver delivery order.
+            if (app?.getSystemService(PowerManager::class.java)?.isInteractive != false) {
+                HudRuntimeService.onVehiclePowerChanged(-1)
+            }
         }
     }
 
@@ -88,6 +95,8 @@ internal object VehiclePowerMonitor {
     private fun publish(next: Reading) {
         if (reading == next) return
         reading = next
+        // Passive consumer: never keep OEM polling alive for maintenance alone.
+        HudRuntimeService.onVehiclePowerChanged(next.raw)
         observers.toList().forEach { (owner, observer) ->
             if (observers[owner] === observer) observer(next)
         }

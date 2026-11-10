@@ -20,6 +20,29 @@ final class HudRuntimeState {
     //state remains diagnostic because it cannot prove that this process exists.
     private static final AtomicBoolean SERVICE_PRESENT = new AtomicBoolean(false);
 
+    /** Main-thread inputs; the published pause flag is also read by storage workers. */
+    static final class PeriodicMaintenance {
+        private int vehiclePower = -1;
+        private boolean screenOff;
+        private volatile boolean paused;
+
+        void onPower(int raw) {
+            vehiclePower = raw;
+            paused = screenOff && vehiclePower == 0;
+        }
+
+        void onScreen(boolean off) {
+            // A new wake cycle must not reuse the previous cycle's OFF reading.
+            if (screenOff && !off) vehiclePower = -1;
+            screenOff = off;
+            paused = screenOff && vehiclePower == 0;
+        }
+
+        boolean isPaused() {
+            return paused;
+        }
+    }
+
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudRuntimeState() {
     }
