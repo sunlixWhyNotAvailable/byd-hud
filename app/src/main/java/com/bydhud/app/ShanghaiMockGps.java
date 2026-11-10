@@ -1,12 +1,16 @@
 package com.bydhud.app;
 
 import android.annotation.SuppressLint;
+import android.app.AppOpsManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.location.Criteria;
 import android.location.Location;
 import android.location.LocationManager;
+import android.os.Build;
+import android.os.Process;
 import android.os.SystemClock;
+import android.util.Log;
 
 import java.io.IOException;
 import java.util.Locale;
@@ -16,10 +20,13 @@ import java.util.regex.Pattern;
 /** Serialized, off-main-thread mock GPS ownership and recovery boundary. */
 final class ShanghaiMockGps {
     private static final String PREFS = "shanghai-mock-gps-recovery";
+    private static final String PRIOR_PACKAGE_MODE = "prior_app_op";
+    private static final String PRIOR_UID_MODE = "prior_uid_app_op";
     private static final String GPS = LocationManager.GPS_PROVIDER;
     private static final long OWNERSHIP_CHECK_INTERVAL_MS = 5_000L;
     private static final Pattern APP_OP = Pattern.compile(
-            "(?i)(?:android:)?mock_location\\s*:\\s*(allow|deny|ignore|default)");
+            "(?im)^\\h*(?:(Uid mode):\\h*)?(?:android:)?mock_location\\h*:\\h*(\\w+)\\b");
+    private static final Pattern DEFAULT_APP_OP = Pattern.compile("(?im)^\\h*Default mode:\\h*(\\w+)\\h*$");
     private static final Pattern GPS_HEADER = Pattern.compile(
             "(?i)^(\\s*)gps\\s+provider\\s*(\\[mock])?\\s*:\\s*$");
     private static final Pattern IDENTITY = Pattern.compile(
@@ -89,6 +96,24 @@ final class ShanghaiMockGps {
 
     enum RecoveryAction { REMOVE_OWNED, RESTORE_PERMISSION_ONLY, WAIT_FOR_EVIDENCE }
 
+    static final class AppOpModes {
+        final String packageMode;
+        final String uidMode;
+
+        AppOpModes(String packageMode, String uidMode) {
+            this.packageMode = packageMode;
+            this.uidMode = uidMode;
+        }
+
+        String mode(boolean uidScoped) {
+            return uidScoped ? uidMode : packageMode;
+        }
+
+        @Override public String toString() {
+            return "packageMode=" + packageMode + " uidMode=" + uidMode;
+        }
+    }
+
     private final Context context;
     private final LocationManager locations;
     private final SharedPreferences prefs;
@@ -130,11 +155,7 @@ final class ShanghaiMockGps {
                 return Result.of(Code.UNKNOWN_PROVIDER, "Cannot establish current GPS ownership.");
             }
 
-            String priorMode = readOwnAppOp();
-            if (priorMode == null) {
-                return Result.of(Code.PERMISSION_ERROR, "Cannot read the current mock-location app-op.");
-            }
-            if (!writeRecord(sessionId.trim(), "permission", priorMode)) {
+            if (!writeRecord(sessionId.trim(), "permission")) {
                 return Result.of(Code.PERSISTENCE_ERROR, "Cannot persist mock GPS recovery state.");
             }
             Result permission = ensureAllowed();
@@ -169,9 +190,10 @@ final class ShanghaiMockGps {
             lastInjectedElapsedMs = 0L;
             lastVerifiedMockLocation = after.lastMockLocation;
             firstInjectionPending = true;
-            return Result.of(Code.SUCCESS, "Mock GPS provider created and ownership verified.");
+            return Result.of(Code.SUCCESS, "Mock GPS provider created and ownership verified. "
+                    + permission.detail);
         } catch (Exception error) {
-            return Result.of(Code.PROVIDER_ERROR, describe(error));
+            return Result.of(Code.PROVIDER_ERROR, Log.getStackTraceString(error));
         }
     }
 
@@ -208,16 +230,17 @@ final class ShanghaiMockGps {
             locations.setTestProviderLocation(GPS, location);
             if (verifyReadback) {
                 ProviderState after = inspectProvider();
-                String appOp = readOwnAppOp();
                 if (after.kind != ProviderKind.OWNED_MOCK || !after.active) {
                     return Result.of(after.kind == ProviderKind.UNKNOWN
                                     ? Code.UNKNOWN_PROVIDER : Code.OWNERSHIP_LOST,
                             "GPS mock ownership/active state changed after injection: "
                                     + after.kind + "/" + after.active);
                 }
-                if (!"allow".equals(appOp)) {
+                int effective = effectiveMockAppOpMode();
+                if (effective != AppOpsManager.MODE_ALLOWED) {
                     return Result.of(Code.PERMISSION_ERROR,
-                            "Mock-location app-op changed during route injection.");
+                            "Mock-location app-op changed during route injection: effectiveMode="
+                                    + effective + ".");
                 }
                 if (after.lastMockLocation.isEmpty()
                         || after.lastMockLocation.equals(lastVerifiedMockLocation)) {
@@ -231,7 +254,7 @@ final class ShanghaiMockGps {
             lastInjectedElapsedMs = injectedElapsedMs;
             return Result.of(Code.SUCCESS, "Route point injected.");
         } catch (Exception error) {
-            return Result.of(Code.PROVIDER_ERROR, describe(error));
+            return Result.of(Code.PROVIDER_ERROR, Log.getStackTraceString(error));
         }
     }
 
@@ -247,96 +270,72 @@ final class ShanghaiMockGps {
             return Result.of(Code.PERSISTENCE_ERROR,
                     "Recovery record belongs to a different app installation.");
         }
-        String kind = prefs.getString("kind", "");
-        try {
-            ProviderState state = inspectProvider();
-            RecoveryAction action = recoveryAction(kind, state.kind);
-            if (action == RecoveryAction.WAIT_FOR_EVIDENCE) {
-                return Result.of(Code.UNKNOWN_PROVIDER,
-                        "GPS ownership is unknown; recovery remains pending.");
-            }
-            if (action == RecoveryAction.REMOVE_OWNED) {
-                Result permission = ensureAllowed();
-                if (!permission.success()) return permission;
-                ProviderState immediate = inspectProvider();
-                if (immediate.kind == ProviderKind.UNKNOWN) {
-                    return Result.of(Code.UNKNOWN_PROVIDER,
-                            "Immediate GPS ownership check failed; recovery remains pending.");
-                }
-                if (immediate.kind == ProviderKind.OWNED_MOCK) {
-                    locations.removeTestProvider(GPS);
-                    ProviderState after = inspectProvider();
-                    if (after.kind == ProviderKind.OWNED_MOCK
-                            || after.kind == ProviderKind.UNKNOWN) {
-                        return Result.of(Code.PROVIDER_ERROR,
-                                "Owned GPS mock removal was not verified: " + after.kind);
-                    }
-                }
-            }
-            Result restored = restorePriorAppOp();
-            if (!restored.success()) return restored;
-            if (!clearRecordDurably()) {
-                return Result.of(Code.PERSISTENCE_ERROR,
-                        "Cleanup succeeded but the recovery record could not be cleared.");
-            }
-            return Result.of(state.kind == ProviderKind.REAL
-                            ? Code.NO_ACTIVE_MOCK : Code.SUCCESS,
-                    state.kind == ProviderKind.FOREIGN_MOCK
-                            ? "Foreign GPS mock left untouched; own app-op restored."
-                            : "Owned mock GPS cleanup verified.");
-        } catch (Exception error) {
-            return Result.of(Code.PROVIDER_ERROR, describe(error));
-        }
+        return finishRecovery(removeMock(false));
     }
 
     Result resetAny() {
+        if (hasPendingRecovery() && !recordMatchesInstallation()) {
+            return Result.of(Code.PERSISTENCE_ERROR,
+                    "Pending recovery record belongs to a different app installation.");
+        }
+        if (!hasPendingRecovery() && !writeRecord("manual-" + System.currentTimeMillis(), "manual")) {
+            return Result.of(Code.PERSISTENCE_ERROR, "Cannot persist manual reset recovery state.");
+        }
+        return finishRecovery(removeMock(true));
+    }
+
+    private Result removeMock(boolean anyOwner) {
         try {
-            if (hasPendingRecovery() && !recordMatchesInstallation()) {
-                return Result.of(Code.PERSISTENCE_ERROR,
-                        "Pending recovery record belongs to a different app installation.");
+            ProviderState current = inspectProvider();
+            RecoveryAction action = recoveryAction(prefs.getString("kind", ""), current.kind);
+            if (action == RecoveryAction.WAIT_FOR_EVIDENCE) {
+                return Result.of(Code.UNKNOWN_PROVIDER,
+                        "Cannot establish current GPS ownership; recovery remains pending.");
             }
-            if (!hasPendingRecovery()) {
-                String priorMode = readOwnAppOp();
-                if (priorMode == null) {
-                    return Result.of(Code.PERMISSION_ERROR,
-                            "Cannot read the current mock-location app-op.");
-                }
-                if (!writeRecord("manual-" + System.currentTimeMillis(), "manual", priorMode)) {
-                    return Result.of(Code.PERSISTENCE_ERROR,
-                            "Cannot persist manual reset recovery state.");
-                }
+            if (current.kind == ProviderKind.REAL) {
+                return Result.of(Code.NO_ACTIVE_MOCK, "No active GPS mock was present.");
+            }
+            if (!anyOwner && action != RecoveryAction.REMOVE_OWNED) {
+                return Result.of(Code.SUCCESS, "GPS provider outside the recovery record left untouched.");
             }
             Result permission = ensureAllowed();
             if (!permission.success()) return permission;
-            ProviderState current = inspectProvider();
+            current = inspectProvider();
             if (current.kind == ProviderKind.UNKNOWN) {
                 return Result.of(Code.UNKNOWN_PROVIDER,
-                        "Cannot establish the current GPS provider; reset remains pending.");
+                        "Immediate GPS ownership check failed; recovery remains pending.");
             }
             if (current.kind == ProviderKind.OWNED_MOCK
-                    || current.kind == ProviderKind.FOREIGN_MOCK) {
+                    || (anyOwner && current.kind == ProviderKind.FOREIGN_MOCK)) {
                 locations.removeTestProvider(GPS);
                 ProviderState after = inspectProvider();
-                if (after.kind != ProviderKind.REAL) {
+                if (after.kind == ProviderKind.UNKNOWN || after.kind == ProviderKind.OWNED_MOCK
+                        || (anyOwner && after.kind == ProviderKind.FOREIGN_MOCK)) {
                     return Result.of(after.kind == ProviderKind.UNKNOWN
                                     ? Code.UNKNOWN_PROVIDER : Code.PROVIDER_ERROR,
                             "GPS mock removal was not verified: " + after.kind);
                 }
+                return Result.of(Code.SUCCESS, "GPS mock removal verified.");
             }
-            Result restored = restorePriorAppOp();
-            if (!restored.success()) return restored;
-            if (!clearRecordDurably()) {
-                return Result.of(Code.PERSISTENCE_ERROR,
-                        "Reset succeeded but the recovery record could not be cleared.");
-            }
-            return Result.of(current.kind == ProviderKind.REAL
-                            ? Code.NO_ACTIVE_MOCK : Code.SUCCESS,
-                    current.kind == ProviderKind.REAL
-                            ? "No active GPS mock was present."
-                            : "Current GPS mock removed and own app-op restored.");
+            return Result.of(Code.SUCCESS, "GPS mock removal no longer needed.");
         } catch (Exception error) {
-            return Result.of(Code.PROVIDER_ERROR, describe(error));
+            return Result.of(Code.PROVIDER_ERROR, Log.getStackTraceString(error));
         }
+    }
+
+    private Result finishRecovery(Result removal) {
+        String packageError = restoreAppOp(false);
+        String uidError = restoreAppOp(true);
+        if (!packageError.isEmpty() || !uidError.isEmpty()) {
+            String restoreError = ("App-op restoration failed. " + packageError + " " + uidError).trim();
+            return removal.success() ? Result.of(Code.PERMISSION_ERROR, restoreError)
+                    : Result.of(removal.code, removal.detail + "\n" + restoreError, removal.blockingPackage);
+        }
+        if (!removal.success()) return removal;
+        if (!clearRecordDurably()) {
+            return Result.of(Code.PERSISTENCE_ERROR, "Cleanup succeeded but recovery state could not be cleared.");
+        }
+        return Result.of(removal.code, removal.detail + " App-op state restored.");
     }
 
     boolean hasPendingRecovery() {
@@ -368,12 +367,32 @@ final class ShanghaiMockGps {
                 && GPS.equals(recordedProvider);
     }
 
-    static String parseAppOpMode(String output) {
+    static AppOpModes parseAppOpModes(String output) {
         String safe = output == null ? "" : output;
         Matcher matcher = APP_OP.matcher(safe);
-        if (matcher.find()) return matcher.group(1).toLowerCase(Locale.ROOT);
-        String lower = safe.toLowerCase(Locale.ROOT);
-        return lower.contains("no operations") ? "default" : null;
+        String packageMode = null;
+        String uidMode = null;
+        while (matcher.find()) {
+            String mode = matcher.group(2).toLowerCase(Locale.ROOT);
+            if (!isAppOpMode(mode)) return null;
+            if (matcher.group(1) == null) {
+                if (packageMode != null) return null;
+                packageMode = mode;
+            } else {
+                if (uidMode != null) return null;
+                uidMode = mode;
+            }
+        }
+        if (packageMode != null || uidMode != null) return new AppOpModes(packageMode, uidMode);
+        if (!safe.toLowerCase(Locale.ROOT).contains("no operations")) return null;
+        Matcher fallback = DEFAULT_APP_OP.matcher(safe);
+        String mode = fallback.find() ? fallback.group(1).toLowerCase(Locale.ROOT) : "default";
+        return isAppOpMode(mode) ? new AppOpModes(mode, null) : null;
+    }
+
+    static boolean isAppOpMode(String mode) {
+        return "allow".equals(mode) || "deny".equals(mode) || "ignore".equals(mode)
+                || "default".equals(mode) || "foreground".equals(mode);
     }
 
     static ProviderState parseProviderState(String dump, String ownPackage, int ownUid) {
@@ -435,42 +454,114 @@ final class ShanghaiMockGps {
         return parseProviderState(result.output, packageName, uid);
     }
 
-    private String readOwnAppOp() throws IOException {
+    private AppOpModes readOwnAppOps() throws IOException {
+        requireCallerIdentity();
         LocalAdbBridge.ShellResult result = LocalAdbBridge.readOwnMockLocationAppOp(context);
-        return result != null && result.success() && !result.truncated
-                ? parseAppOpMode(result.output) : null;
+        requireAppOpCommand("GET", result);
+        AppOpModes modes = parseAppOpModes(result.output);
+        if (modes == null) throw new IOException("Unrecognized mock-location app-op GET: " + result.output);
+        return modes;
     }
 
-    private Result ensureAllowed() throws IOException {
-        String current = readOwnAppOp();
-        if (current == null) {
-            return Result.of(Code.PERMISSION_ERROR, "Cannot read mock-location app-op.");
+    private void requireCallerIdentity() {
+        if (Process.myUid() != uid || !packageName.equals(context.getOpPackageName())) {
+            throw new SecurityException("Mock-location caller identity mismatch: callerUid="
+                    + Process.myUid() + " packageUid=" + uid + " package=" + packageName
+                    + " opPackage=" + context.getOpPackageName());
         }
-        if (!"allow".equals(current)) {
-            LocalAdbBridge.ShellResult set =
-                    LocalAdbBridge.setOwnMockLocationAppOp(context, "allow");
-            if (set == null || !set.success() || !"allow".equals(readOwnAppOp())) {
-                return Result.of(Code.PERMISSION_ERROR,
-                        "Mock-location app-op grant was not verified.");
+    }
+
+    @SuppressWarnings("deprecation")
+    private int effectiveMockAppOpMode() {
+        requireCallerIdentity();
+        AppOpsManager appOps = context.getSystemService(AppOpsManager.class);
+        if (appOps == null) throw new IllegalStateException("Mock-location AppOps service is unavailable.");
+        // Use the same AppOps operation as LocationManager's mock-provider calls.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return appOps.noteOpNoThrow(AppOpsManager.OPSTR_MOCK_LOCATION, uid, packageName,
+                    context.getAttributionTag(), null);
+        }
+        return appOps.noteOpNoThrow(AppOpsManager.OPSTR_MOCK_LOCATION, uid, packageName);
+    }
+
+    private Result ensureAllowed() {
+        try {
+            AppOpModes before = readOwnAppOps();
+            int effective = effectiveMockAppOpMode();
+            if (effective == AppOpsManager.MODE_ALLOWED) {
+                return Result.of(Code.SUCCESS, "Mock-location app-op already allowed: " + before);
             }
+            boolean uidScoped = before.uidMode != null;
+            if (uidScoped && (!"default".equals(before.uidMode) || effective != AppOpsManager.MODE_DEFAULT
+                    || uid != 2000 || !"com.android.shell".equals(packageName)
+                    || ShellWorkEntryPoint.currentJob == null)) {
+                return Result.of(Code.PERMISSION_ERROR,
+                        "Mock-location UID policy prevents access: " + before + " effectiveMode=" + effective);
+            }
+            if ("foreground".equals(before.mode(uidScoped))) {
+                return Result.of(Code.PERMISSION_ERROR,
+                        "Mock-location requires foreground access: " + before + " effectiveMode=" + effective);
+            }
+            if ("allow".equals(before.mode(uidScoped))) {
+                return Result.of(Code.PERMISSION_ERROR,
+                        "Mock-location app-op is blocked despite the grant: " + before
+                                + " effectiveMode=" + effective);
+            }
+            String priorKey = uidScoped ? PRIOR_UID_MODE : PRIOR_PACKAGE_MODE;
+            if (!prefs.contains(priorKey) && !prefs.edit().putString(priorKey, before.mode(uidScoped)).commit()) {
+                return Result.of(Code.PERSISTENCE_ERROR, "Cannot persist prior mock-location app-op: " + before);
+            }
+            AppOpModes after = setAppOp("allow", uidScoped);
+            effective = effectiveMockAppOpMode();
+            if (effective != AppOpsManager.MODE_ALLOWED) {
+                return Result.of(Code.PERMISSION_ERROR,
+                        "Mock-location app-op is still blocked: " + after + " effectiveMode=" + effective);
+            }
+            return Result.of(Code.SUCCESS, "Mock-location app-op allowed: " + before + " -> " + after);
+        } catch (Exception error) {
+            return Result.of(Code.PERMISSION_ERROR, Log.getStackTraceString(error));
         }
-        return Result.of(Code.SUCCESS, "Mock-location app-op is allowed.");
     }
 
-    private Result restorePriorAppOp() throws IOException {
-        String prior = prefs.getString("prior_app_op", null);
-        if (prior == null) {
-            return Result.of(Code.PERSISTENCE_ERROR, "Recovery record has no prior app-op.");
+    private AppOpModes setAppOp(String mode, boolean uidScoped) throws IOException {
+        requireCallerIdentity();
+        String scope = uidScoped ? "UID" : "package";
+        LocalAdbBridge.ShellResult set = LocalAdbBridge.setOwnMockLocationAppOp(context, mode, uidScoped);
+        requireAppOpCommand("SET " + scope + " " + mode, set);
+        AppOpModes after;
+        try {
+            after = readOwnAppOps();
+        } catch (IOException error) {
+            throw new IOException("Mock-location SET " + scope + " " + mode + " succeeded. GET failed.", error);
         }
-        LocalAdbBridge.ShellResult set = LocalAdbBridge.setOwnMockLocationAppOp(context, prior);
-        String after = set != null && set.success() ? readOwnAppOp() : null;
-        return prior.equals(after)
-                ? Result.of(Code.SUCCESS, "Prior mock-location app-op restored.")
-                : Result.of(Code.PERMISSION_ERROR,
-                        "Prior mock-location app-op restoration was not verified.");
+        if (!mode.equals(after.mode(uidScoped))) {
+            throw new IOException("Mock-location SET " + scope + " " + mode
+                    + " succeeded but readback was " + after + ".");
+        }
+        return after;
     }
 
-    private boolean writeRecord(String sessionId, String kind, String priorMode) {
+    private static void requireAppOpCommand(String stage, LocalAdbBridge.ShellResult result) throws IOException {
+        if (result == null) throw new IOException("Mock-location " + stage + " returned no command result.");
+        if (!result.success() || result.truncated) {
+            throw new IOException("Mock-location " + stage + " exit=" + result.exitCode
+                    + " status=" + result.status + " truncated=" + result.truncated
+                    + " error=" + result.error + " output=" + result.output);
+        }
+    }
+
+    private String restoreAppOp(boolean uidScoped) {
+        String prior = prefs.getString(uidScoped ? PRIOR_UID_MODE : PRIOR_PACKAGE_MODE, null);
+        if (prior == null) return "";
+        try {
+            setAppOp(prior, uidScoped);
+            return "";
+        } catch (Exception error) {
+            return Log.getStackTraceString(error);
+        }
+    }
+
+    private boolean writeRecord(String sessionId, String kind) {
         return prefs.edit()
                 .putBoolean("cleanup_required", true)
                 .putString("session_id", sessionId)
@@ -479,7 +570,8 @@ final class ShanghaiMockGps {
                 .putInt("uid", uid)
                 .putInt("user_id", userId)
                 .putString("provider", GPS)
-                .putString("prior_app_op", priorMode)
+                .remove(PRIOR_PACKAGE_MODE)
+                .remove(PRIOR_UID_MODE)
                 .commit();
     }
 
@@ -499,7 +591,8 @@ final class ShanghaiMockGps {
         int recordedUid = prefs.getInt("uid", -1);
         int recordedUserId = prefs.getInt("user_id", -1);
         String provider = prefs.getString("provider", "");
-        String priorAppOp = prefs.getString("prior_app_op", "");
+        String priorAppOp = prefs.getString(PRIOR_PACKAGE_MODE, null);
+        String priorUidAppOp = prefs.getString(PRIOR_UID_MODE, null);
         if (prefs.edit().clear().commit()) return true;
         prefs.edit()
                 .putBoolean("cleanup_required", true)
@@ -509,7 +602,8 @@ final class ShanghaiMockGps {
                 .putInt("uid", recordedUid)
                 .putInt("user_id", recordedUserId)
                 .putString("provider", provider)
-                .putString("prior_app_op", priorAppOp)
+                .putString(PRIOR_PACKAGE_MODE, priorAppOp)
+                .putString(PRIOR_UID_MODE, priorUidAppOp)
                 .commit();
         return false;
     }
@@ -520,8 +614,4 @@ final class ShanghaiMockGps {
         return count;
     }
 
-    private static String describe(Exception error) {
-        String message = error.getMessage();
-        return error.getClass().getSimpleName() + (message == null ? "" : ": " + message);
-    }
 }

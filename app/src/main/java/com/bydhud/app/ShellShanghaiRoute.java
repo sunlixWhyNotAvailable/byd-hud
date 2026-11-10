@@ -11,8 +11,7 @@ import java.nio.channels.FileLock;
 final class ShellShanghaiRoute {
     static JSONObject run(ShellWorkContext app, Context system, JSONObject input) throws Exception {
         File ownership = ShellWorkFiles.directory(new File(app.job.getParentFile(), "gps-owner"));
-        Context shell = system.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
-        ShellWorkContext gpsContext = new ShellWorkContext(shell, system, ownership);
+        ShellWorkContext gpsContext = new ShellWorkContext(system, system, ownership);
         try (RandomAccessFile owner = new RandomAccessFile(new File(ownership, "owner.lock"), "rw");
              FileLock lock = owner.getChannel().tryLock()) {
             if (lock == null) throw new IllegalStateException("A Shanghai GPS worker is already active");

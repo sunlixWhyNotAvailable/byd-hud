@@ -744,16 +744,20 @@ final class LocalAdbBridge {
                 64 * 1024);
     }
 
-    static ShellResult setOwnMockLocationAppOp(Context context, String mode) throws IOException {
+    static ShellResult setOwnMockLocationAppOp(Context context, String mode, boolean uidScoped)
+            throws IOException {
         String safeMode = mode == null ? "" : mode.trim().toLowerCase(java.util.Locale.ROOT);
-        if (!("allow".equals(safeMode) || "deny".equals(safeMode)
-                || "ignore".equals(safeMode) || "default".equals(safeMode))) {
+        if (!ShanghaiMockGps.isAppOpMode(safeMode)) {
             throw new SecurityException("Unsupported mock-location app-op mode");
         }
         String packageName = requireOwnPackage(context);
+        if (uidScoped && (android.os.Process.myUid() != 2000
+                || !"com.android.shell".equals(packageName) || ShellWorkEntryPoint.currentJob == null)) {
+            throw new SecurityException("UID mock-location app-op requires the Shanghai shell helper");
+        }
         int userId = android.os.Process.myUid() / 100000;
         return runTrustedRuntimeShellCommand(context,
-                "appops set --user " + userId + " " + packageName
+                "appops set " + (uidScoped ? "--uid " : "") + "--user " + userId + " " + packageName
                         + " android:mock_location " + safeMode,
                 64 * 1024, false);
     }
