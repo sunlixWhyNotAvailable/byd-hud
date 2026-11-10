@@ -2116,28 +2116,30 @@ final class LocalAdbBridge {
             Context appContext,
             String packageName,
             String currentAccessibilityServices) throws IOException, InterruptedException {
-        ShellResult accessibilityDump = connection.shellWithExit("dumpsys accessibility");
-        if (!accessibilityDump.success()) {
-            AppEventLogger.event(appContext, "adb_bridge accessibility_dump_failed "
-                    + accessibilityDump.shortDetail());
+        if (NavAccessibilityService.isConnectedForRuntimeCheck()) {
             return null;
         }
-        NavPermissionRuntimeProbe.Result accessibilityRuntime =
-                NavPermissionRuntimeProbe.parseAccessibilityDumpsys(
-                        appContext.getPackageName(),
-                        accessibilityDump.output);
-        if (accessibilityRuntime.accessibilityRuntimeOk()) {
+        NavPermissionRuntimeProbe.BindingState bindingState =
+                NavPermissionRuntimeProbe.accessibilityBindingState(appContext);
+        if (bindingState == NavPermissionRuntimeProbe.BindingState.UNKNOWN) {
+            AppEventLogger.event(appContext, "adb_bridge accessibility_runtime_check unknown"
+                    + " source=accessibility-manager reason=empty-service-list rebind=skipped");
             return null;
         }
-        AppEventLogger.event(appContext, "adb_bridge accessibility_runtime_rebind start"
-                + " enabled=" + accessibilityRuntime.accessibilityEnabledInDumpsys
-                + " bound=" + accessibilityRuntime.accessibilityBoundInDumpsys
-                + " crashed=" + accessibilityRuntime.accessibilityCrashedInDumpsys);
+        if (bindingState == NavPermissionRuntimeProbe.BindingState.BOUND) {
+            return null;
+        }
         List<String> commands = NavPermissionGrantPlan.accessibilityRuntimeRebindCommands(
                 appContext, packageName, currentAccessibilityServices);
         if (commands.isEmpty()) {
             return Result.failed("Accessibility runtime rebind plan rejected");
         }
+        // A connection may arrive while the system lookup and plan are being prepared.
+        if (NavAccessibilityService.isConnectedForRuntimeCheck()) {
+            return null;
+        }
+        AppEventLogger.event(appContext, "adb_bridge accessibility_runtime_rebind start"
+                + " bound=false source=accessibility-manager");
         for (String command : commands) {
             ShellResult result = connection.shellWithExit(command);
             if (!result.success()) {

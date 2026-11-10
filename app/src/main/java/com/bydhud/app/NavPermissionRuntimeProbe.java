@@ -1,75 +1,43 @@
 package com.bydhud.app;
 
-//checks live permission state so the UI can tell whether capture is actually usable.
+import android.accessibilityservice.AccessibilityServiceInfo;
+import android.content.ComponentName;
+import android.content.Context;
+import android.view.accessibility.AccessibilityManager;
+
+import java.util.List;
 
 final class NavPermissionRuntimeProbe {
-    private static final String[] ACCESSIBILITY_SECTION_LABELS = new String[]{
-            "Bound services:",
-            "Enabled services:",
-            "Binding services:",
-            "Crashed services:"
-    };
+    enum BindingState { BOUND, NOT_BOUND, UNKNOWN }
 
-    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavPermissionRuntimeProbe() {
     }
 
-    //parses source data here so downstream HUD code receives normalized navigation fields.
-    static Result parseAccessibilityDumpsys(String packageName, String dumpsys) {
-        String normalized = packageName == null ? "" : packageName.trim();
-        String service = normalized + "/" + normalized + ".NavAccessibilityService";
-        String shortService = normalized + "/.NavAccessibilityService";
-        String value = dumpsys == null ? "" : dumpsys;
-        boolean enabled = sectionContains(value, "Enabled services:", service, shortService);
-        boolean bound = sectionContains(value, "Bound services:", service, shortService);
-        boolean crashed = sectionContains(value, "Crashed services:", service, shortService);
-        return new Result(enabled, bound, crashed, value.trim());
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static boolean sectionContains(String value, String label,
-            String service, String shortService) {
-        int start = value.indexOf(label);
-        if (start < 0) {
-            return false;
+    static BindingState accessibilityBindingState(Context context) {
+        AccessibilityManager manager = context.getSystemService(AccessibilityManager.class);
+        if (manager == null) {
+            throw new IllegalStateException("AccessibilityManager is unavailable");
         }
-        int end = value.length();
-        for (String candidate : ACCESSIBILITY_SECTION_LABELS) {
-            if (candidate.equals(label)) {
-                continue;
+        List<AccessibilityServiceInfo> services = manager.getEnabledAccessibilityServiceList(
+                AccessibilityServiceInfo.FEEDBACK_ALL_MASK);
+        if (services == null) {
+            throw new IllegalStateException("AccessibilityManager returned a null service list");
+        }
+        // The public API also returns an empty list when its Binder request fails.
+        if (services.isEmpty()) {
+            return BindingState.UNKNOWN;
+        }
+        ComponentName expected = new ComponentName(context, NavAccessibilityService.class);
+        for (AccessibilityServiceInfo service : services) {
+            String id = service == null ? null : service.getId();
+            ComponentName component = id == null ? null : ComponentName.unflattenFromString(id);
+            if (component == null) {
+                throw new IllegalStateException("AccessibilityManager returned an invalid service id: " + id);
             }
-            int next = value.indexOf(candidate, start + label.length());
-            if (next >= 0 && next < end) {
-                end = next;
+            if (expected.equals(component)) {
+                return BindingState.BOUND;
             }
         }
-        String section = value.substring(start, end);
-        return section.contains(service) || section.contains(shortService);
-    }
-
-    //defines the Result module boundary so related behavior stays readable inside one unit.
-    static final class Result {
-        final boolean accessibilityEnabledInDumpsys;
-        final boolean accessibilityBoundInDumpsys;
-        final boolean accessibilityCrashedInDumpsys;
-        final String raw;
-
-        Result(
-                boolean accessibilityEnabledInDumpsys,
-                boolean accessibilityBoundInDumpsys,
-                boolean accessibilityCrashedInDumpsys,
-                String raw) {
-            this.accessibilityEnabledInDumpsys = accessibilityEnabledInDumpsys;
-            this.accessibilityBoundInDumpsys = accessibilityBoundInDumpsys;
-            this.accessibilityCrashedInDumpsys = accessibilityCrashedInDumpsys;
-            this.raw = raw == null ? "" : raw;
-        }
-
-        //keeps this step explicit so callers can rely on one documented behavior boundary.
-        boolean accessibilityRuntimeOk() {
-            return accessibilityEnabledInDumpsys
-                    && accessibilityBoundInDumpsys
-                    && !accessibilityCrashedInDumpsys;
-        }
+        return BindingState.NOT_BOUND;
     }
 }
