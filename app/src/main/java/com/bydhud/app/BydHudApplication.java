@@ -37,6 +37,7 @@ public final class BydHudApplication extends Application {
                 packages,
                 ContextCompat.RECEIVER_EXPORTED);
         navigatorAssetPackageReceiverRegistered = true;
+        StockNavigationLayout.initialize(this);
     }
 
     @Override public void onTerminate() {

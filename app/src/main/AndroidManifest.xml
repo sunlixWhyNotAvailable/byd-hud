@@ -29,6 +29,7 @@
         <package android:name="com.huawei.maps.car.app" />
         <package android:name="com.byd.appstartmanagement" />
         <package android:name="com.byd.launchermap" />
+        <package android:name="com.byd.naviauto" />
         <package android:name="com.waze" />
         <package android:name="com.google.android.apps.maps" />
         <package android:name="app.revanced.android.apps.maps" />

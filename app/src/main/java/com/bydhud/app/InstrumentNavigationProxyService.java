@@ -113,6 +113,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private volatile BodyworkApi bodywork;
     private Object powerDevice;
     private Method powerLevelGetter;
+    private Object layoutSettingDevice;
+    private Method layoutSettingReader;
     private StatisticEtaApi statisticEta;
     private boolean statisticEtaResolved;
     private boolean statisticEtaUnavailableLogged;
@@ -918,6 +920,94 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     @Override
+    public Bundle setNaviautoLayout(long requestGeneration, int requested, long deadlineElapsedMs) {
+        enforceSession(requestGeneration);
+        int callerUid = Binder.getCallingUid();
+        synchronized (operationLock) {
+            long identity = Binder.clearCallingIdentity();
+            List<InstrumentProxyContract.Operation> operations = new ArrayList<>();
+            int srFlag = Integer.MIN_VALUE, before = Integer.MIN_VALUE, observed = Integer.MIN_VALUE;
+            String error = "";
+            String stage = "admission";
+            long deadline = Math.min(deadlineElapsedMs,
+                    SystemClock.elapsedRealtime() + NaviautoLayout.TIMEOUT_MS);
+            try {
+                if (Process.myUid() != 2000) throw new SecurityException("layout requires shell UID");
+                if (outputSuspended || !connected || stopped) {
+                    throw new IllegalStateException("layout output suspended or inactive session");
+                }
+                if (requested != 1 && requested != 2 && requested != 4) {
+                    throw new IllegalArgumentException("naviauto ordinary-meter operation unsupported: " + requested);
+                }
+                if (SystemClock.elapsedRealtime() >= deadline) throw new IllegalStateException("layout request expired");
+                stage = "resolve-api";
+                InstrumentApi api = instrument();
+                if (api == null || api.reader == null || api.writer == null) {
+                    throw new UnsupportedOperationException("Instrument layout API unavailable");
+                }
+                if (layoutSettingDevice == null) {
+                    Class<?> type = Class.forName(SETTING_CLASS);
+                    layoutSettingReader = type.getMethod("get", int[].class, Class.class);
+                    layoutSettingDevice = type.getMethod("getInstance", Context.class)
+                            .invoke(null, new BydPermissionContext(systemContext));
+                }
+                stage = "read-backend";
+                long started = SystemClock.elapsedRealtime();
+                srFlag = readLayoutInt(layoutSettingReader, layoutSettingDevice,
+                        api.writer.intField, NaviautoLayout.READ_SR);
+                operations.add(operation("layout_sr:" + srFlag, 0, started, ""));
+                stage = "read-mode-before";
+                started = SystemClock.elapsedRealtime();
+                before = readLayoutInt(api.reader, api.device, api.writer.intField, NaviautoLayout.READ_MODE);
+                operations.add(operation("layout_before:" + before, 0, started, ""));
+                error = NaviautoLayout.rejection(requested, srFlag, before);
+                if (error.isEmpty()) {
+                    stage = "set-mode";
+                    if (SystemClock.elapsedRealtime() >= deadline) throw new IllegalStateException("layout request expired before write");
+                    InstrumentProxyContract.Operation write = setFeature(NaviautoLayout.SET_MODE, requested, null, true);
+                    operations.add(write);
+                    if (!succeeded(write)) {
+                        error = "naviauto layout SET result=" + write.result + ": " + write.error;
+                    } else {
+                        stage = "readback";
+                        started = SystemClock.elapsedRealtime();
+                        do {
+                            observed = readLayoutInt(api.reader, api.device, api.writer.intField, NaviautoLayout.READ_MODE);
+                            if (observed == requested || !NaviautoLayout.validMode(observed)) break;
+                            long remaining = deadline - SystemClock.elapsedRealtime();
+                            if (remaining <= 0L) break;
+                            Thread.sleep(Math.min(50L, remaining));
+                        } while (SystemClock.elapsedRealtime() < deadline);
+                        error = observed == requested ? "" : "naviauto layout SET accepted, readback unconfirmed: requested="
+                                + requested + " observed=" + observed;
+                        operations.add(operation("layout_readback:" + observed,
+                                error.isEmpty() ? 0 : -1, started, error));
+                    }
+                }
+            } catch (Exception | LinkageError failure) {
+                if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+                error = FailureDiagnostics.format(failure, "naviauto-layout", stage);
+                Log.w(TAG, error);
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+            String detail = "requested=" + requested + " srFlag=" + srFlag + " before=" + before
+                    + " observed=" + observed + " stage=" + stage + " callerUid=" + callerUid
+                    + " helperUid=" + Process.myUid() + " helperUser=" + (Process.myUid() / 100000)
+                    + " contextPackage=" + systemContext.getPackageName();
+            Log.i(TAG, "naviauto_layout " + detail + " error=" + error);
+            return InstrumentProxyContract.operationResult(operations, error, false, "", detail);
+        }
+    }
+
+    private static int readLayoutInt(Method getter, Object device, Field intField, int fid)
+            throws ReflectiveOperationException {
+        Object event = getter.invoke(device, new int[]{fid}, Integer.TYPE);
+        if (event == null) throw new IllegalStateException("layout getter returned null: " + fid);
+        return intField.getInt(event);
+    }
+
+    @Override
     public Bundle nativeSpeedOperation(long requestGeneration, int operation, int value) {
         enforceSession(requestGeneration);
         if (!NativeSpeedLimitEngine.validOperation(operation, value)) {
@@ -1575,6 +1665,11 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
 
     private InstrumentProxyContract.Operation setFeature(
             int featureId, int intValue, byte[] bytes) {
+        return setFeature(featureId, intValue, bytes, false);
+    }
+
+    private InstrumentProxyContract.Operation setFeature(
+            int featureId, int intValue, byte[] bytes, boolean fullFailure) {
         long startedAt = SystemClock.elapsedRealtime();
         String name = "instrument_fid:" + featureId;
         InstrumentApi current = instrument();
@@ -1593,7 +1688,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             return operation(name, resultCode(result), startedAt,
                     success(result) ? "" : "call returned failure");
         } catch (Throwable error) {
-            return operation(name, -1, startedAt, describe(error));
+            return operation(name, -1, startedAt, fullFailure
+                    ? FailureDiagnostics.format(error, name, "set") : describe(error));
         }
     }
 

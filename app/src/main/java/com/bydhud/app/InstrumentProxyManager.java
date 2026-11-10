@@ -1308,6 +1308,52 @@ final class InstrumentProxyManager {
         });
     }
 
+    // Called on the dashboard worker; uses the existing authenticated helper and call queue.
+    Result setNaviautoLayout(int operation, BooleanSupplier current) throws InterruptedException {
+        if (operation != 1 && operation != 2 && operation != 4) {
+            return Result.unavailable("naviauto ordinary-meter operation unsupported: " + operation);
+        }
+        ensureStarted("naviauto-layout");
+        long expectedGeneration;
+        while (true) {
+            if (!current.getAsBoolean()) return Result.unavailable("naviauto layout request cancelled");
+            synchronized (lock) {
+                long remaining = startupDeadlineAtMs - SystemClock.elapsedRealtime();
+                if (state == State.STARTING && remaining > 0L) {
+                    lock.wait(Math.min(remaining, 100L));
+                    continue;
+                }
+                if (state != State.READY || proxy == null || proxyBinder == null
+                        || !proxyBinder.isBinderAlive()) {
+                    return Result.unavailable("naviauto layout helper unavailable: " + state + " stage=" + startStage);
+                }
+                expectedGeneration = generation;
+                break;
+            }
+        }
+        long deadline = SystemClock.elapsedRealtime() + NaviautoLayout.TIMEOUT_MS;
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<Result> reply = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicBoolean waiting = new java.util.concurrent.atomic.AtomicBoolean(true);
+        try {
+            submitCall("naviauto_layout", result -> { reply.set(result); done.countDown(); },
+                    (remote, requestGeneration) -> {
+                        if (!waiting.get() || requestGeneration != expectedGeneration
+                                || !current.getAsBoolean() || SystemClock.elapsedRealtime() >= deadline) {
+                            return InstrumentProxyContract.operationResult(Collections.emptyList(),
+                                    "naviauto layout cancelled before dispatch");
+                        }
+                        return remote.setNaviautoLayout(requestGeneration, operation, deadline);
+                    });
+            long remaining = deadline - SystemClock.elapsedRealtime();
+            if (remaining <= 0L || !done.await(remaining, TimeUnit.MILLISECONDS)) {
+                return Result.unavailable("naviauto layout outcome unconfirmed after "
+                        + NaviautoLayout.TIMEOUT_MS + "ms");
+            }
+            return reply.get();
+        } finally { waiting.set(false); }
+    }
+
     private void executeAllowedCall(
             String operation, ResultCallback callback, RemoteCall remoteCall) {
         IInstrumentNavigationProxy current;
@@ -1327,7 +1373,8 @@ final class InstrumentProxyManager {
                 outputReady = clusterDebugOutputReady;
             } else {
                 outputReady = navigationOutputReady || operation.startsWith("native_speed:")
-                        || ("vehicle_power".equals(operation) && state == State.READY);
+                        || (("vehicle_power".equals(operation) || "naviauto_layout".equals(operation))
+                            && state == State.READY);
             }
         }
         if (!outputReady) {
@@ -1359,7 +1406,9 @@ final class InstrumentProxyManager {
         try {
             result = Result.from(remoteCall.invoke(current, currentGeneration));
         } catch (RemoteException | RuntimeException error) {
-            result = Result.unavailable("vehicle_power".equals(operation)
+            result = Result.unavailable("naviauto_layout".equals(operation)
+                    ? FailureDiagnostics.format(error, operation, "IPC")
+                    : "vehicle_power".equals(operation)
                     ? "vehicle_power IPC: " + Log.getStackTraceString(error)
                     : isClusterDebugOperation(operation)
                             ? describeClusterDebugFailure(operation, error) : describe(error));

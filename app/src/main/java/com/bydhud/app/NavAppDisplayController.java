@@ -710,7 +710,7 @@ final class NavAppDisplayController {
     }
 
     private String dispatchAutomaticTbt(int operation, BooleanSupplier stillCurrent) {
-        String failure = StockMapProtocol30011.dispatch(context, operation, stillCurrent);
+        String failure = StockNavigationLayout.dispatch(context, operation, stillCurrent);
         return failure.isEmpty()
                 ? ""
                 : "automatic TBT type " + operation + " failed: " + failure;
@@ -812,7 +812,7 @@ final class NavAppDisplayController {
     }
 
     private String sendWidgetProtocolOperation(long token, int operation, String label) {
-        String failure = StockMapProtocol30011.dispatch(
+        String failure = StockNavigationLayout.dispatch(
                 context, operation, () -> isWidgetOperationCurrent(token));
         return failure.isEmpty() ? "" : label + " failed: " + failure;
     }
@@ -1477,7 +1477,7 @@ final class NavAppDisplayController {
             return isCurrent(current) ? "" : "layout command cancelled: stale request";
         }
         if (!DashboardLayoutPolicy.isAutoContainerCommand(command)) {
-            String failure = StockMapProtocol30011.dispatch(
+            String failure = StockNavigationLayout.dispatch(
                     context, command, current);
             return failure.isEmpty() ? "" : "layout command failed: " + failure;
         }

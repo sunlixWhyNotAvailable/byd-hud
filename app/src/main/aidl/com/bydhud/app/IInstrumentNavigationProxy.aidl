@@ -36,4 +36,5 @@ interface IInstrumentNavigationProxy {
             int dayPeriod);
     Bundle retireExportArtifacts(long generation, String requestJson);
     Bundle readVehiclePower(long generation);
+    Bundle setNaviautoLayout(long generation, int operation, long deadlineElapsedMs);
 }

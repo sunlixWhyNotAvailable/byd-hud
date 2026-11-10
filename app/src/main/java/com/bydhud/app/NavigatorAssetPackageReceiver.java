@@ -15,5 +15,6 @@ public final class NavigatorAssetPackageReceiver extends BroadcastReceiver {
             NavigatorAssetManager.onCatalogPackageChanged(context, packageName);
         }
         NavHudLiveSender.onNavigatorPackageChanged(packageName);
+        StockNavigationLayout.onPackageChanged(context, packageName);
     }
 }

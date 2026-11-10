@@ -878,14 +878,14 @@ final class VehicleTbtPublisher {
     private void dispatchDashboard(
             String owner, long generation, Trace trace, Runnable completion) {
         long currentRouteToken = routeToken;
-        record(trace, "dashboard_30011", "request", "type=2",
+        record(trace, "dashboard_layout", "request", "type=2",
                 ints(2), 0, 0L, "");
         long startedAt = System.nanoTime();
         NavAppDisplayController.get(context).requestAutomaticTbt(
                 () -> isCurrentRoute(owner, generation, currentRouteToken),
                 result -> {
                     try {
-                        record(trace, "dashboard_30011", "dispatch", "type=2",
+                        record(trace, "dashboard_layout", "dispatch", "type=2",
                                 ints(2), result.isEmpty() ? 0 : -1, elapsedMs(startedAt), result);
                         log("tbt_dashboard operation=2 result=" + safe(result));
                     } finally {
