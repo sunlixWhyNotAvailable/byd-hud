@@ -33,7 +33,6 @@ final class ShanghaiDiagnostics {
     private volatile ShanghaiEventJournal someIpJournal;
     private volatile ShanghaiSomeIpClient someIp;
     private volatile JSONObject shellCoverage;
-    private long shellCoverageModified = -1;
 
     ShanghaiDiagnostics(android.content.Context context, File directory, String storageDay) {
         if (context == null || directory == null) throw new IllegalArgumentException("context and directory are required");
@@ -97,14 +96,11 @@ final class ShanghaiDiagnostics {
             if (!bound) record("someip_unavailable", "bind failed or timed out");
             else record("someip_subscriptions", someIp.subscriptionResults().toString());
             if (stopRequested.get()) return;
-            refreshShellCoverage();
-
             ready = true;
             state = hasLiveChannel() ? State.CAPTURING : State.PARTIAL;
             record("diagnostics_ready", coverage().toString());
             while (!stopRequested.get()) {
                 someIp.restoreConnection(stopRequested::get);
-                refreshShellCoverage();
                 if (!internalWritersHealthy()) {
                     failure = "Diagnostic journal writer failed";
                     state = State.FAILED;
@@ -123,7 +119,6 @@ final class ShanghaiDiagnostics {
             try {
                 ready = true;
                 closeChannels();
-                refreshShellCoverage();
                 if (state != State.FAILED) state = State.STOPPED;
                 ShanghaiSessionJournal journal = sessionJournal;
                 if (journal != null) {
@@ -181,24 +176,14 @@ final class ShanghaiDiagnostics {
 
     private boolean shellStreamLive(String name) {
         JSONObject current = shellCoverage;
-        JSONObject stream = current == null ? null : current.optJSONObject(name);
+        if (current == null || current.optBoolean("interrupted") || current.optBoolean("finalized")) return false;
+        JSONObject stream = current.optJSONObject(name);
         return stream != null && "streaming".equals(stream.optString("status"))
                 && ("adas".equals(name) ? stream.optBoolean("ready") : stream.optLong("bytes") >= 24L);
     }
 
-    private void refreshShellCoverage() {
-        File root = directory.getName().startsWith("reattach-") ? directory.getParentFile() : directory;
-        File file = new File(root, "shell-runtime/diagnostic-coverage.json");
-        long modified = file.isFile() ? file.lastModified() : 0;
-        if (modified == shellCoverageModified) return;
-        shellCoverageModified = modified;
-        try {
-            shellCoverage = file.isFile() ? new JSONObject(new String(
-                    java.nio.file.Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8)) : null;
-        } catch (Exception error) {
-            shellCoverage = ShanghaiJson.object("readError", error.toString(), "path", file.getPath());
-            shellCoverageModified = -1;
-        }
+    void updateShellCoverage(JSONObject snapshot) {
+        if (snapshot != null) shellCoverage = snapshot;
     }
 
     private boolean internalWritersHealthy() {
@@ -225,7 +210,7 @@ final class ShanghaiDiagnostics {
                 "someIpCleanup", currentSomeIp == null
                         ? JSONObject.NULL : currentSomeIp.cleanupResult(),
                 "adb", shellCoverage == null ? JSONObject.NULL : ShanghaiJson.copy(shellCoverage),
-                "adbSource", "shell-runtime/diagnostic-coverage.json",
+                "adbSource", "trusted-shell-work-state",
                 "sessionEventsPersisted", events == null ? 0 : events.writtenCount(),
                 "sessionEventsDropped", events == null ? pendingCount() : events.droppedCount(),
                 "physicalHudVerified", false,

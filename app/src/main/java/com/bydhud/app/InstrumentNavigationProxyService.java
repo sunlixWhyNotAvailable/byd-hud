@@ -1503,11 +1503,14 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         try (java.io.RandomAccessFile owner = new java.io.RandomAccessFile(new File(control, "owner.lock"), "rw");
              java.nio.channels.FileLock lock = owner.getChannel().tryLock()) {
             if (lock == null || isTerminalWorkState(readWorkState(control).optString("state"))) return;
+            org.json.JSONObject result = new org.json.JSONObject().put("ok", false)
+                    .put("cleanupPending", "shanghai".equals(request.optString("type")))
+                    .put("error", "Shell worker exited before returning a result; operation was not replayed");
+            if ("shanghai".equals(request.optString("type")))
+                ShellShanghaiRoute.retainCoverage(control, result);
             writeWorkState(control, new org.json.JSONObject().put("id", request.optString("id"))
                     .put("state", "INTERRUPTED")
-                    .put("result", new org.json.JSONObject().put("ok", false)
-                            .put("cleanupPending", "shanghai".equals(request.optString("type")))
-                            .put("error", "Shell worker exited before returning a result; operation was not replayed")));
+                    .put("result", result));
         } catch (java.nio.channels.OverlappingFileLockException anotherStatusRead) {
             // Another status reader owns the interruption decision.
         }

@@ -2,15 +2,55 @@ package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
 import java.io.File;
 import java.io.IOException;
+import org.json.JSONObject;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 public final class ShellWorkFilesTest {
     @Rule public final TemporaryFolder files = new TemporaryFolder();
+
+    @Test public void retainedShanghaiCoverageSurvivesReopenAndIsPublishedOnlyOnce() throws Exception {
+        File control = files.newFolder("control");
+        JSONObject coverage = new JSONObject().put("adas", new JSONObject()
+                .put("bytes", 8192L).put("droppedBytes", 17L).put("error", "stream read failed"));
+        File stateFile = new File(control, "state.json");
+        ShellWorkFiles.write(stateFile, new JSONObject().put("progress",
+                new JSONObject().put("diagnosticCoverage", coverage)));
+        JSONObject result = new JSONObject().put("error", "worker exited");
+        ShellShanghaiRoute.retainCoverage(control, result);
+        ShellWorkFiles.write(stateFile, new JSONObject().put("state", "INTERRUPTED").put("result", result));
+
+        JSONObject reopened = ShellWorkFiles.read(stateFile);
+        assertEquals("worker exited", reopened.getJSONObject("result").getString("error"));
+        JSONObject snapshot = ShellShanghaiRoute.coverageFromState(reopened);
+        assertTrue(snapshot.getBoolean("interrupted"));
+        assertFalse(snapshot.optBoolean("finalized"));
+        assertEquals(8192L, snapshot.getJSONObject("adas").getLong("bytes"));
+        assertEquals(17L, snapshot.getJSONObject("adas").getLong("droppedBytes"));
+        assertEquals("stream read failed", snapshot.getJSONObject("adas").getString("error"));
+        JSONObject laterResult = new JSONObject().put("error", "later finalization failure");
+        ShellShanghaiRoute.retainCoverage(control, laterResult);
+        assertEquals(8192L, laterResult.getJSONObject("diagnosticCoverage").getJSONObject("adas").getLong("bytes"));
+        assertEquals("later finalization failure", laterResult.getString("error"));
+        JSONObject stoppedBeforeResult = ShellShanghaiRoute.coverageFromState(new JSONObject()
+                .put("state", "INTERRUPTED").put("result", new JSONObject()
+                        .put("diagnosticCoverage", new JSONObject().put("finalized", true))));
+        assertTrue(stoppedBeforeResult.getBoolean("interrupted"));
+        assertTrue(stoppedBeforeResult.getBoolean("finalized"));
+
+        File evidence = files.newFolder("evidence");
+        ShellShanghaiRoute.writeCoverage(evidence, snapshot);
+        File published = new File(evidence, "shell-runtime/diagnostic-coverage.json");
+        String retained = ShellWorkFiles.read(published).toString();
+        ShellShanghaiRoute.writeCoverage(evidence, new JSONObject().put("finalized", true));
+        assertEquals(retained, ShellWorkFiles.read(published).toString());
+    }
 
     @Test public void shanghaiEvidenceAcceptsBothRootsButRejectsOtherSessionsAndEscapes() throws Exception {
         File publicRoot = files.newFolder("Documents", "BYD-HUD");

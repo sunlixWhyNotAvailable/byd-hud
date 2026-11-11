@@ -229,6 +229,8 @@ public final class ShellWorkEntryPoint {
 
     private static void writeState(File control, String state, JSONObject result, JSONObject progress)
             throws IOException, org.json.JSONException {
+        if (request != null && "shanghai".equals(request.optString("type")))
+            ShellShanghaiRoute.retainCoverage(control, result);
         InstrumentNavigationProxyService.writeWorkState(control, new JSONObject()
                 .put("id", request == null ? "" : request.optString("id"))
                 .put("state", state).put("progress", progress).put("result", result));

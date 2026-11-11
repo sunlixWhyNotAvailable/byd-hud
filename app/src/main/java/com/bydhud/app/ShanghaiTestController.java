@@ -191,6 +191,7 @@ final class ShanghaiTestController {
                             || !run.id.equals(expected.optString("id")))
                         throw new IOException("Saved Shanghai operation identity changed");
                     shellState = ShellWorkClient.state(context, run.job);
+                    publishTerminalCoverage(value, shellState);
                     if ("UNCERTAIN".equals(shellState.optString("state")))
                         throw uncertainShellState(run.id, shellState);
                     if (ShellWorkClient.terminal(shellState.optString("state"))
@@ -405,14 +406,20 @@ final class ShanghaiTestController {
             JSONObject state = ShellWorkClient.state(context, job);
             if ("UNCERTAIN".equals(state.optString("state")))
                 throw uncertainShellState(value.optString("id"), state);
-            if (ShellWorkClient.terminal(state.optString("state"))) return true;
+            if (ShellWorkClient.terminal(state.optString("state"))) {
+                publishTerminalCoverage(value, state);
+                return true;
+            }
             ShellWorkClient.cancel(context, job);
             long deadline = SystemClock.elapsedRealtime() + 10_000L;
             while (SystemClock.elapsedRealtime() < deadline) {
                 JSONObject currentState = ShellWorkClient.state(context, job);
                 if ("UNCERTAIN".equals(currentState.optString("state")))
                     throw uncertainShellState(value.optString("id"), currentState);
-                if (ShellWorkClient.terminal(currentState.optString("state"))) return true;
+                if (ShellWorkClient.terminal(currentState.optString("state"))) {
+                    publishTerminalCoverage(value, currentState);
+                    return true;
+                }
                 Thread.sleep(50L);
             }
             return false;
@@ -422,6 +429,21 @@ final class ShanghaiTestController {
             AppEventLogger.event(context, "shanghai_saved_shell_recovery_unavailable "
                     + FailureDiagnostics.format(error, "shanghai-recovery", "cancel-saved-work"));
             return false;
+        }
+    }
+
+    private void publishTerminalCoverage(JSONObject saved, JSONObject state) {
+        if (!ShellWorkClient.terminal(state.optString("state"))) return;
+        JSONObject coverage = ShellShanghaiRoute.coverageFromState(state);
+        if (coverage == null) return;
+        try {
+            String directory = saved.optString("directory");
+            if (directory.isEmpty()) throw new IOException("Shanghai evidence directory is missing");
+            ShellShanghaiRoute.writeCoverage(new File(directory), coverage);
+        } catch (IOException error) {
+            // Evidence publication must not block recovery of the owned mock GPS.
+            AppEventLogger.event(context, "shanghai_coverage_export_failed id=" + saved.optString("id")
+                    + " " + FailureDiagnostics.format(error, "shanghai-recovery", "publish-coverage"));
         }
     }
 
@@ -523,6 +545,8 @@ final class ShanghaiTestController {
         try {
             if (run.cancelled) { finish(run); return; }
             JSONObject status = ShellWorkClient.state(context, run.job);
+            if (run.diagnostics != null)
+                run.diagnostics.updateShellCoverage(ShellShanghaiRoute.coverageFromState(status));
             if ("UNCERTAIN".equals(status.optString("state")))
                 throw uncertainShellState(run.id, status);
             JSONObject progress = status.optJSONObject("progress");
@@ -557,6 +581,8 @@ final class ShanghaiTestController {
             boolean terminalStateConfirmed = false;
             try {
                 JSONObject state = ShellWorkClient.state(context, run.job);
+                JSONObject coverage = ShellShanghaiRoute.coverageFromState(state);
+                if (run.diagnostics != null) run.diagnostics.updateShellCoverage(coverage);
                 if ("UNCERTAIN".equals(state.optString("state")))
                     throw uncertainShellState(run.id, state);
                 if (!ShellWorkClient.terminal(state.optString("state"))) {
@@ -593,6 +619,8 @@ final class ShanghaiTestController {
                             + "reset-any fallback: " + reset.code + ": " + reset.detail;
                     if (!reset.success()) run.cleanupFailed = true;
                 }
+                try { ShellShanghaiRoute.writeCoverage(run.directory, coverage); }
+                catch (IOException error) { noteFailure(run, "Diagnostic coverage", describe(error)); }
                 run.finishing = true;
                 publish(run, ShanghaiTestState.Phase.FINISHING, "");
                 finalizeCapture(run);

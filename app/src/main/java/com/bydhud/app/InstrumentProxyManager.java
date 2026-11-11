@@ -1992,9 +1992,31 @@ final class InstrumentProxyManager {
     }
 
     Bundle workState(String id) throws IOException {
-        IInstrumentNavigationProxy current = awaitShellProxy("independent-work-state");
-        long currentGeneration;
-        synchronized (lock) { currentGeneration = generation; }
+        IInstrumentNavigationProxy ready;
+        long readyGeneration;
+        synchronized (lock) {
+            ready = state == State.READY && proxyBinder != null && proxyBinder.isBinderAlive() ? proxy : null;
+            readyGeneration = generation;
+            if (ready != null && !shanghaiSuspended) {
+                if (HudPrefs.isUserShutdownActive(context)) {
+                    runtimeActive = false;
+                    outputRetry.setActive(false);
+                } else {
+                    runtimeActive = true;
+                    schedulePingLocked(ready, readyGeneration);
+                }
+            }
+        }
+        if (ready == null) {
+            ready = awaitShellProxy("independent-work-state");
+            synchronized (lock) {
+                if (ready != proxy || state != State.READY)
+                    throw new IOException("Trusted shell runtime changed before work-state read");
+                readyGeneration = generation;
+            }
+        }
+        IInstrumentNavigationProxy current = ready;
+        long currentGeneration = readyGeneration;
         return shellCall("state:" + operationId(id), shellReads, SHELL_READ_TIMEOUT_MS,
                 "work-state", id, () -> current.workState(currentGeneration, id), null);
     }

@@ -33,7 +33,7 @@ final class ShellShanghaiRoute {
                     tokenFromSessionId(input.getString("id")));
             boolean completed = false;
             long origin = 0;
-            long lastCoverageWriteMs = Long.MIN_VALUE;
+            JSONObject finalCoverage = null;
             int elapsed = 0;
             String failure = "";
             ShanghaiMockGps.Result gpsFailure = null;
@@ -43,8 +43,8 @@ final class ShellShanghaiRoute {
                 try {
                     diagnostics.start();
                     diagnostics.resolveReadiness(5_000);
-                    writeCoverage(shellEvidence, diagnostics);
-                    lastCoverageWriteMs = SystemClock.elapsedRealtime();
+                    ShellWorkEntryPoint.progress(new JSONObject().put("phase", "DIAGNOSTICS_READY")
+                            .put("diagnosticCoverage", diagnostics.coverageJson()));
                     ShanghaiRoute route = ShanghaiRoute.load(app);
                     ShanghaiMockGps.Result begun = gps.begin(input.getString("id"));
                     journal.record("mock_begin", begun.code + ": " + begun.detail);
@@ -64,12 +64,8 @@ final class ShellShanghaiRoute {
                         }
                         if (origin == 0) origin = gps.lastInjectedElapsedMs();
                         ShellWorkEntryPoint.progress(new JSONObject().put("phase", elapsed < 15 ? "PREPARING" : "DRIVING")
-                                .put("elapsed", elapsed).put("origin", origin));
-                        long coverageNow = SystemClock.elapsedRealtime();
-                        if (coverageNow - lastCoverageWriteMs >= 1_000L) {
-                            writeCoverage(shellEvidence, diagnostics);
-                            lastCoverageWriteMs = coverageNow;
-                        }
+                                .put("elapsed", elapsed).put("origin", origin)
+                                .put("diagnosticCoverage", diagnostics.coverageJson()));
                         if (elapsed == ShanghaiRoute.DURATION_SECONDS) { completed = true; break; }
                         long now = SystemClock.elapsedRealtime();
                         long next = origin + ((now - origin) / 1000 + 1) * 1000;
@@ -92,7 +88,16 @@ final class ShellShanghaiRoute {
                     journal.record("mock_cleanup", cleanup.code + ": " + cleanup.detail);
                     try { Thread.sleep(5_000); } catch (InterruptedException ignored) { Thread.interrupted(); }
                     diagnostics.close();
-                    writeCoverage(shellEvidence, diagnostics);
+                    finalCoverage = diagnostics.coverageJson().put("finalized", true);
+                    try {
+                        ShellWorkEntryPoint.progress(new JSONObject().put("phase", "CAPTURE_STOPPED")
+                                .put("elapsed", elapsed).put("origin", origin)
+                                .put("diagnosticCoverage", finalCoverage));
+                    } catch (Exception error) {
+                        String detail = FailureDiagnostics.format(error, "shanghai", "finalize-coverage");
+                        journal.record("coverage_failure", detail);
+                        failure = failure.isEmpty() ? detail : failure + "\n" + detail;
+                    }
                 }
             }
             return new JSONObject().put("completed", completed).put("elapsed", elapsed).put("origin", origin)
@@ -100,6 +105,7 @@ final class ShellShanghaiRoute {
                     .put("failureCode", gpsFailure == null ? "" : gpsFailure.code.name())
                     .put("blockingPackage", gpsFailure == null ? "" : gpsFailure.blockingPackage)
                     .put("resetAny", resetAnyRequested)
+                    .put("diagnosticCoverage", finalCoverage)
                     .put("cleanupPending", !cleanup.success() || gps.hasPendingRecovery());
         }
     }
@@ -113,11 +119,41 @@ final class ShellShanghaiRoute {
         return token.toString();
     }
 
-    private static void writeCoverage(File directory, ShanghaiDiagnosticAdb diagnostics)
-            throws java.io.IOException {
-        File file = new File(directory, "diagnostic-coverage.json");
+    static void retainCoverage(File control, JSONObject result) {
+        if (result.has("diagnosticCoverage")) return;
         try {
-            ShellWorkFiles.write(file, diagnostics.coverageJson());
+            JSONObject coverage = coverageFromState(ShellWorkFiles.read(new File(control, "state.json")));
+            if (coverage != null) ShanghaiJson.put(result, "diagnosticCoverage", coverage);
+        } catch (Exception error) {
+            ShanghaiJson.put(result, "diagnosticCoverageRecoveryError",
+                    FailureDiagnostics.format(error, "shanghai", "retain-coverage"));
+        }
+    }
+
+    static JSONObject coverageFromState(JSONObject state) {
+        JSONObject result = state.optJSONObject("result");
+        JSONObject coverage = result == null ? null : result.optJSONObject("diagnosticCoverage");
+        if (coverage == null) {
+            JSONObject progress = state.optJSONObject("progress");
+            coverage = progress == null ? null : progress.optJSONObject("diagnosticCoverage");
+        }
+        if (coverage == null) return null;
+        JSONObject snapshot = ShanghaiJson.copy(coverage);
+        ShanghaiJson.put(snapshot, "workerState", state.optString("state"));
+        if ("INTERRUPTED".equals(state.optString("state"))
+                || (ShellWorkClient.terminal(state.optString("state")) && !snapshot.optBoolean("finalized")))
+            ShanghaiJson.put(snapshot, "interrupted", true);
+        return snapshot;
+    }
+
+    static void writeCoverage(File directory, JSONObject coverage)
+            throws java.io.IOException {
+        if (coverage == null) return;
+        File file = new File(directory, "shell-runtime/diagnostic-coverage.json");
+        // Terminal evidence is immutable; live snapshots stay in private work progress.
+        if (file.isFile()) return;
+        try {
+            ShellWorkFiles.write(file, coverage);
         } finally {
             NavigationLogStorage.markStorageFileChanged(file);
         }
