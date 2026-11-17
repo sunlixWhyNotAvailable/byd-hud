@@ -888,7 +888,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var storageSortOldestFirst by rememberSaveable { mutableStateOf(false) }
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageSelectionRevision by rememberSaveable { mutableIntStateOf(0) }
-    var handledStorageShareLaunchId by rememberSaveable { mutableStateOf(0L) }
+    var handledStorageShareLaunchId by remember { mutableStateOf(0L) }
     var handledSentryOperationIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var handledStorageSaveOperationIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var pendingStorageDeleteDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
@@ -1484,9 +1484,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                             false,
                             "activity-resume-patch"
                         )
-                        RuntimeTab.Apps -> activity.composeRequestPatchUiStateRefresh(
-                            "activity-resume-apps"
-                        )
+                        RuntimeTab.Apps,
                         RuntimeTab.Options,
                         RuntimeTab.HudCheck -> Unit
                     }
@@ -1522,16 +1520,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                             || it.state == NavigatorAssetManager.UNINSTALL_REQUESTED
             }
             val patchWasBusy = snapshot.patchOperations.any { it.busy }
-            val assetCacheMissing = snapshot.navigatorAssets.isEmpty()
             val now = SystemClock.elapsedRealtime()
             if (now - lastBackgroundRequestAt >= FOREGROUND_UI_REFRESH_REQUEST_MS) {
                 activity.composeRequestRuntimeUiStateRefresh(false, "foreground-periodic")
-                if (assetCacheMissing) {
-                    activity.composeRequestPatchUiStateRefresh(
-                        false,
-                        "foreground-asset-bootstrap"
-                    )
-                }
                 lastBackgroundRequestAt = now
             }
             if (assetStateChanging || patchWasBusy) {
@@ -2262,12 +2253,30 @@ private fun SupportDialog(language: Language, palette: Palette, onClose: () -> U
     val cardLabel = language.choose("Номер картки Банки", "Jar card number", "Номер карты Банки")
     val emailLabel = language.choose("Email для переказу через PayPal", "Email for PayPal transfers", "Email для перевода через PayPal")
     val shareLabel = language.choose("Поділитися", "Share", "Поделиться")
+    val supportTitle = language.choose("Підтримати BYD HUD", "Support BYD HUD", "Поддержать BYD HUD")
+    fun actionFailure(stage: String, error: RuntimeException, unavailable: Boolean = false) {
+        AppEventLogger.event(context, FailureDiagnostics.format(error, "support", stage))
+        val message = if (unavailable) language.choose("Немає застосунку для цієї дії",
+            "No app can handle this action", "Нет приложения для этого действия")
+        else language.choose("Не вдалося виконати дію", "Could not complete this action", "Не удалось выполнить действие")
+        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+    }
+    fun copyText(label: String, value: String, confirmation: String) {
+        try {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+            Toast.makeText(context, confirmation, Toast.LENGTH_SHORT).show()
+        } catch (error: RuntimeException) {
+            actionFailure("clipboard", error)
+        }
+    }
     fun openIntent(intent: Intent) {
         try {
             context.startActivity(intent)
-        } catch (_: ActivityNotFoundException) {
-            Toast.makeText(context, language.choose("Немає застосунку для цієї дії",
-                "No app can handle this action", "Нет приложения для этого действия"), Toast.LENGTH_SHORT).show()
+        } catch (error: ActivityNotFoundException) {
+            actionFailure("open", error, unavailable = true)
+        } catch (error: RuntimeException) {
+            actionFailure("open", error)
         }
     }
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -2313,10 +2322,8 @@ private fun SupportDialog(language: Language, palette: Palette, onClose: () -> U
                         .border(1.dp, palette.border, RoundedCornerShape(7.dp))
                         .clickable(role = Role.Button, onClickLabel = language.choose("Копіювати посилання на репозиторій",
                             "Copy repository link", "Копировать ссылку на репозиторий")) {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("BYD HUD", PROJECT_REPOSITORY_URL))
-                            Toast.makeText(context, language.choose("Посилання скопійовано", "Link copied", "Ссылка скопирована"),
-                                Toast.LENGTH_SHORT).show()
+                            copyText("BYD HUD", PROJECT_REPOSITORY_URL,
+                                language.choose("Посилання скопійовано", "Link copied", "Ссылка скопирована"))
                         }.padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2337,10 +2344,8 @@ private fun SupportDialog(language: Language, palette: Palette, onClose: () -> U
                     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(palette.field)
                         .border(1.dp, palette.border, RoundedCornerShape(7.dp))
                         .clickable(role = Role.Button, onClickLabel = language.choose("Копіювати email", "Copy email", "Копировать email")) {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText(emailLabel, SUPPORT_PAYPAL_EMAIL))
-                            Toast.makeText(context, language.choose("Email скопійовано", "Email copied", "Email скопирован"),
-                                Toast.LENGTH_SHORT).show()
+                            copyText(emailLabel, SUPPORT_PAYPAL_EMAIL,
+                                language.choose("Email скопійовано", "Email copied", "Email скопирован"))
                         }.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(emailLabel, color = palette.muted, fontSize = 14.sp)
                         Text(SUPPORT_PAYPAL_EMAIL, color = palette.text, fontFamily = FontFamily.Monospace,
@@ -2358,7 +2363,7 @@ private fun SupportDialog(language: Language, palette: Palette, onClose: () -> U
                     modifier = Modifier.weight(0.42f).fillMaxHeight())
                 Column(Modifier.weight(0.58f).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Text("Support BYD app", color = palette.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Text(supportTitle, color = palette.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                     Text(language.choose("Відскануйте QR-код телефоном або відкрийте посилання на Банку.",
                         "Scan the QR code with your phone or open the Jar link.",
                         "Отсканируйте QR-код телефоном или откройте ссылку на Банку."),
@@ -2374,20 +2379,16 @@ private fun SupportDialog(language: Language, palette: Palette, onClose: () -> U
                             modifier = Modifier.clip(RoundedCornerShape(4.dp))
                                 .clickable(role = Role.Button, onClickLabel = language.choose("Копіювати посилання",
                                     "Copy link", "Копировать ссылку")) {
-                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clipboard.setPrimaryClip(ClipData.newPlainText("Support BYD app", SUPPORT_JAR_URL))
-                                    Toast.makeText(context, language.choose("Посилання скопійовано",
-                                        "Link copied", "Ссылка скопирована"), Toast.LENGTH_SHORT).show()
+                                    copyText(supportTitle, SUPPORT_JAR_URL, language.choose("Посилання скопійовано",
+                                        "Link copied", "Ссылка скопирована"))
                                 }.padding(horizontal = 6.dp, vertical = 10.dp))
                     }
                     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(palette.field)
                         .border(1.dp, palette.border, RoundedCornerShape(7.dp))
                         .clickable(role = Role.Button, onClickLabel = language.choose("Копіювати номер картки",
                             "Copy card number", "Копировать номер карты")) {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText(cardLabel, SUPPORT_JAR_CARD))
-                            Toast.makeText(context, language.choose("Номер картки скопійовано",
-                                "Card number copied", "Номер карты скопирован"), Toast.LENGTH_SHORT).show()
+                            copyText(cardLabel, SUPPORT_JAR_CARD, language.choose("Номер картки скопійовано",
+                                "Card number copied", "Номер карты скопирован"))
                         }.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Text(cardLabel, color = palette.muted, fontSize = 13.sp)
                         Text(SUPPORT_JAR_CARD, color = palette.text, fontFamily = FontFamily.Monospace,
@@ -2404,7 +2405,7 @@ private fun SupportDialog(language: Language, palette: Palette, onClose: () -> U
                             else "$SUPPORT_JAR_URL\n\n$cardLabel: $SUPPORT_JAR_CARD"
                         val intent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "Support BYD app")
+                            putExtra(Intent.EXTRA_SUBJECT, supportTitle)
                             putExtra(Intent.EXTRA_TEXT, "BYD HUD\n\n$description\n\n$PROJECT_REPOSITORY_URL\n\n$paymentDetails")
                         }
                         openIntent(Intent.createChooser(intent, shareLabel))
@@ -5319,6 +5320,8 @@ private fun OperationProgressStack(
                 StorageLogSharePhase.UPLOADING -> shareCopy.uploading
                 StorageLogSharePhase.SENT -> shareCopy.success
                 StorageLogSharePhase.FAILED -> shareCopy.failure
+                StorageLogSharePhase.DELIVERY_UNCONFIRMED -> language.choose(
+                    "Доставку не підтверджено", "Delivery not confirmed", "Доставка не подтверждена")
                 StorageLogSharePhase.CANCELLING -> language.choose("Зупинення", "Stopping", "Остановка")
                 StorageLogSharePhase.CANCELLED -> language.choose("Скасовано", "Cancelled", "Отменено")
                 StorageLogSharePhase.WAITING_FOR_DESTINATION -> language.choose(
@@ -5644,7 +5647,7 @@ private fun storageLogShareBusy(phase: StorageLogSharePhase): Boolean = when (ph
     StorageLogSharePhase.CANCELLING, StorageLogSharePhase.WAITING_FOR_DESTINATION,
     StorageLogSharePhase.SAVING_DOCUMENT -> true
     StorageLogSharePhase.WAITING_FOR_SHARE, StorageLogSharePhase.READY, StorageLogSharePhase.OVERSIZED, StorageLogSharePhase.SENT,
-    StorageLogSharePhase.FAILED, StorageLogSharePhase.CANCELLED,
+    StorageLogSharePhase.FAILED, StorageLogSharePhase.DELIVERY_UNCONFIRMED, StorageLogSharePhase.CANCELLED,
     StorageLogSharePhase.SAVE_RESULT -> false
 }
 
@@ -5655,7 +5658,7 @@ private fun storageLogSharePreparationBusy(phase: StorageLogSharePhase): Boolean
     StorageLogSharePhase.OVERSIZED -> true
     StorageLogSharePhase.WAITING_FOR_SHARE, StorageLogSharePhase.READY,
     StorageLogSharePhase.UPLOADING, StorageLogSharePhase.SENT,
-    StorageLogSharePhase.FAILED, StorageLogSharePhase.CANCELLED,
+    StorageLogSharePhase.FAILED, StorageLogSharePhase.DELIVERY_UNCONFIRMED, StorageLogSharePhase.CANCELLED,
     StorageLogSharePhase.SAVE_RESULT -> false
 }
 

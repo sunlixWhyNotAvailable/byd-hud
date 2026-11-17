@@ -1302,7 +1302,8 @@ final class NavigatorPatchPipeline {
                         ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.PATCHABLE;
             } catch (IOException error) {
                 reportStageFailure(context, "AUDIO_INSPECTION", error);
-                audioState = NavigatorPatchStore.UNSUPPORTED;
+                audioState = error instanceof NavigatorHudProfile.InputMismatch
+                        ? NavigatorPatchStore.UNSUPPORTED : NavigatorPatchStore.FAILED;
             }
         }
         return withExtras(result, audioState, routeExport);

@@ -37,7 +37,7 @@ final class ShellShanghaiRoute {
             int elapsed = 0;
             String failure = "";
             ShanghaiMockGps.Result gpsFailure = null;
-            ShanghaiMockGps.Result cleanup;
+            ShanghaiMockGps.Result cleanup = null;
             boolean resetAnyRequested = false;
             try (ShanghaiSessionJournal journal = new ShanghaiSessionJournal(new File(shellEvidence, "route.jsonl"))) {
                 try {
@@ -76,38 +76,64 @@ final class ShellShanghaiRoute {
                     // Explicit Stop cancels the route; ordinary application death never interrupts this thread.
                 } catch (Exception error) {
                     failure = android.util.Log.getStackTraceString(error);
-                    journal.record("failure", failure);
+                    try { journal.record("failure", failure); }
+                    catch (Exception journalFailure) {
+                        error.addSuppressed(journalFailure);
+                        failure = android.util.Log.getStackTraceString(error);
+                    }
                 }
                 finally {
                     Thread.interrupted();
-                    File resetAny = ShellWorkEntryPoint.currentControl == null ? null
-                            : new File(ShellWorkEntryPoint.currentControl, "reset-any");
-                    resetAnyRequested = resetAny != null && resetAny.isFile();
-                    cleanup = resetAnyRequested
-                            ? gps.resetAny() : gps.cleanupOwned();
-                    journal.record("mock_cleanup", cleanup.code + ": " + cleanup.detail);
-                    try { Thread.sleep(5_000); } catch (InterruptedException ignored) { Thread.interrupted(); }
-                    diagnostics.close();
-                    finalCoverage = diagnostics.coverageJson().put("finalized", true);
                     try {
+                        File resetAny = ShellWorkEntryPoint.currentControl == null ? null
+                                : new File(ShellWorkEntryPoint.currentControl, "reset-any");
+                        resetAnyRequested = resetAny != null && resetAny.isFile();
+                        cleanup = resetAnyRequested ? gps.resetAny() : gps.cleanupOwned();
+                    } catch (Exception error) {
+                        failure = appendFailure(failure, error, "gps-cleanup");
+                    }
+                    try {
+                        journal.record("mock_cleanup", cleanup == null ? "cleanup unconfirmed"
+                                : cleanup.code + ": " + cleanup.detail);
+                    } catch (Exception error) {
+                        failure = appendFailure(failure, error, "cleanup-journal");
+                    }
+                    try { Thread.sleep(5_000); } catch (InterruptedException ignored) { Thread.interrupted(); }
+                    boolean diagnosticsClosed = false;
+                    try { diagnostics.close(); diagnosticsClosed = true; }
+                    catch (Exception error) {
+                        failure = appendFailure(failure, error, "diagnostics-close");
+                    }
+                    try {
+                        finalCoverage = diagnostics.coverageJson().put("finalized", diagnosticsClosed);
                         ShellWorkEntryPoint.progress(new JSONObject().put("phase", "CAPTURE_STOPPED")
                                 .put("elapsed", elapsed).put("origin", origin)
                                 .put("diagnosticCoverage", finalCoverage));
                     } catch (Exception error) {
-                        String detail = FailureDiagnostics.format(error, "shanghai", "finalize-coverage");
-                        journal.record("coverage_failure", detail);
-                        failure = failure.isEmpty() ? detail : failure + "\n" + detail;
+                        failure = appendFailure(failure, error, "finalize-coverage");
                     }
                 }
+            } catch (Exception error) {
+                failure = appendFailure(failure, error, "route-journal");
             }
+            boolean cleanupPending = true;
+            try { cleanupPending = cleanup == null || !cleanup.success() || gps.hasPendingRecovery(); }
+            catch (Exception error) { failure = appendFailure(failure, error, "cleanup-readback"); }
             return new JSONObject().put("completed", completed).put("elapsed", elapsed).put("origin", origin)
-                    .put("failure", failure).put("cleanup", cleanup.code + ": " + cleanup.detail)
+                    .put("failure", failure).put("cleanup", cleanup == null ? "cleanup unconfirmed"
+                            : cleanup.code + ": " + cleanup.detail)
                     .put("failureCode", gpsFailure == null ? "" : gpsFailure.code.name())
                     .put("blockingPackage", gpsFailure == null ? "" : gpsFailure.blockingPackage)
                     .put("resetAny", resetAnyRequested)
                     .put("diagnosticCoverage", finalCoverage)
-                    .put("cleanupPending", !cleanup.success() || gps.hasPendingRecovery());
+                    .put("cleanupPending", cleanupPending);
         }
+    }
+
+    private static String appendFailure(String primary, Exception error, String stage) {
+        String detail = FailureDiagnostics.format(error, "shanghai", stage);
+        android.util.Log.e("BydHudShanghai", stage, error);
+        return primary.isEmpty() ? detail : primary + "\nCleanup: " + detail;
     }
 
     static String tokenFromSessionId(String id) throws java.security.NoSuchAlgorithmException {

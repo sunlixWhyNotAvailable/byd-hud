@@ -34,10 +34,42 @@ final class ShanghaiTestController {
     private ShanghaiMockGps gps;
     private volatile Run current;
     private boolean recoveryQueued;
+    private long recoveryUnavailableSince = -1L;
+    private long recoveryAttemptRevision;
+    private volatile Runnable waitingForShell;
+    private volatile long waitingShellRevision;
     private final List<Runnable> stopCompletions = new ArrayList<>();
     private final List<Runnable> recoveryCompletions = new ArrayList<>();
 
-    private ShanghaiTestController(Context context) { this.context = context.getApplicationContext(); }
+    private ShanghaiTestController(Context context) {
+        this.context = context.getApplicationContext();
+        InstrumentProxyManager.get(this.context).addShellRecoveryListener(this::resumeWaitingRecovery);
+    }
+
+    private void resumeWaitingRecovery() {
+        if (waitingForShell == null) return;
+        worker.execute(() -> {
+            Runnable pending = waitingForShell;
+            if (pending == null || InstrumentProxyManager.get(context).shellRecoveryRevision() == waitingShellRevision) return;
+            waitingForShell = null;
+            recoveryUnavailableSince = -1L;
+            AppEventLogger.event(context, "shanghai reconciliation resumed replay=false");
+            pending.run();
+        });
+    }
+
+    private void deferUntilShellRecovery(Runnable retry) {
+        long now = SystemClock.elapsedRealtime();
+        if (recoveryUnavailableSince < 0L) recoveryUnavailableSince = now;
+        if (now - recoveryUnavailableSince < START_TIMEOUT_MS) {
+            worker.schedule(retry, 1, TimeUnit.SECONDS);
+            return;
+        }
+        waitingShellRevision = recoveryAttemptRevision;
+        waitingForShell = retry;
+        AppEventLogger.event(context, "shanghai reconciliation suspended; identity and cleanup retained");
+        resumeWaitingRecovery();
+    }
 
     static synchronized ShanghaiTestController get(Context context) {
         if (instance == null) instance = new ShanghaiTestController(context);
@@ -175,6 +207,7 @@ final class ShanghaiTestController {
     }
 
     private void recoverOwnedOnWorker(String reason) {
+        recoveryAttemptRevision = InstrumentProxyManager.get(context).shellRecoveryRevision();
         String saved = ShellRuntimeSession.prefs(context).getString("shanghai_work", "");
         if (!saved.isEmpty() && ShellRuntimeSession.mayRestore(context)) {
             try {
@@ -219,6 +252,9 @@ final class ShanghaiTestController {
             } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
                 deferUnknownRecovery(reason, unknown, "reattach");
                 return;
+            } catch (InstrumentProxyManager.ShellWorkNotDispatchedException unavailable) {
+                deferUnknownRecovery(reason, unavailable, "reattach");
+                return;
             } catch (Exception error) {
                 AppEventLogger.event(context, "shanghai_reattach_failed "
                         + FailureDiagnostics.format(error, "shanghai-recovery", "reattach"));
@@ -260,7 +296,7 @@ final class ShanghaiTestController {
                         cached = recoveryPending("Previous GPS cleanup did not complete successfully.");
                         return;
                     }
-                    ShellRuntimeSession.prefs(context).edit().remove("shanghai_work").commit();
+                    clearRecoveryRecord();
                     saved = "";
                 } else {
                     String cleanupId = "cleanup-" + value.getString("id");
@@ -278,7 +314,7 @@ final class ShanghaiTestController {
                                     + result.optString("cleanup"));
                             return;
                         }
-                        ShellRuntimeSession.prefs(context).edit().remove("shanghai_work").commit();
+                        clearRecoveryRecord();
                         saved = "";
                     } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
                         shellUnresolved = true;
@@ -300,7 +336,8 @@ final class ShanghaiTestController {
                     ShanghaiTestState.CaptureStatus.NOT_STARTED, pending, "", "");
             AppEventLogger.event(context, "shanghai_recovery reason=" + reason + " result=" + result.code
                     + " detail=" + result.detail);
-        } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
+        } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException
+                | InstrumentProxyManager.ShellWorkNotDispatchedException unknown) {
             shellUnresolved = true;
             recoveryDeferred = true;
             deferUnknownRecovery(reason, unknown, "state-or-cancel");
@@ -325,15 +362,16 @@ final class ShanghaiTestController {
     }
 
     private void deferUnknownRecovery(String reason,
-            InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown, String stage) {
+            Exception unknown, String stage) {
         cached = recoveryPending("Previous shell operation result is unknown.");
         AppEventLogger.event(context, "shanghai_recovery_unknown "
                 + FailureDiagnostics.format(unknown, "shanghai-recovery", stage));
         notifyUi();
-        worker.schedule(() -> recoverOwnedOnWorker(reason), 1, TimeUnit.SECONDS);
+        deferUntilShellRecovery(() -> recoverOwnedOnWorker(reason));
     }
 
     private void deferRecoveryCheck(String reason, String detail) {
+        recoveryUnavailableSince = -1L;
         cached = recoveryPending(detail);
         notifyUi();
         worker.schedule(() -> recoverOwnedOnWorker(reason), 1, TimeUnit.SECONDS);
@@ -360,6 +398,8 @@ final class ShanghaiTestController {
     }
 
     private void finishRecoveryQueue() {
+        recoveryUnavailableSince = -1L;
+        waitingForShell = null;
         synchronized (this) { recoveryQueued = false; }
         notifyUi();
         completeRecoveryCallbacks();
@@ -525,11 +565,19 @@ final class ShanghaiTestController {
     }
 
     private void checkpoint(Run run) throws Exception {
-        ShellRuntimeSession.prefs(context).edit().putString("shanghai_work", new JSONObject()
+        if (!ShellRuntimeSession.prefs(context).edit().putString("shanghai_work", new JSONObject()
                 .put("id", run.id).put("reset", run.resetOnly).put("job", run.job == null ? "" : run.job.getPath())
                 .put("directory", run.directory == null ? "" : run.directory.getPath())
                 .put("day", run.day).put("started", run.startedWallMs)
-                .put("logcatOwned", run.logcat != null && run.logcat.startedByShanghai).toString()).commit();
+                .put("logcatOwned", run.logcat != null && run.logcat.startedByShanghai).toString()).commit()) {
+            throw new IOException("Shanghai recovery identity persistence was not confirmed");
+        }
+    }
+
+    private void clearRecoveryRecord() throws IOException {
+        if (!ShellRuntimeSession.prefs(context).edit().remove("shanghai_work").commit()) {
+            throw new IOException("Shanghai recovery record removal was not confirmed");
+        }
     }
 
     private void reconcileWorker(Run run) throws IOException {
@@ -577,6 +625,7 @@ final class ShanghaiTestController {
 
     private void finish(Run run) {
         if (current != run || run.finishing) return;
+        recoveryAttemptRevision = InstrumentProxyManager.get(context).shellRecoveryRevision();
         if (run.job != null) {
             boolean terminalStateConfirmed = false;
             try {
@@ -591,10 +640,22 @@ final class ShanghaiTestController {
                         run.cancelRequested = ShellWorkClient.cancel(context, run.job, run.resetAny
                                 && "RUNNING".equals(state.optString("state")));
                     }
-                    worker.schedule(() -> finish(run), 100, TimeUnit.MILLISECONDS);
+                    if ("REGISTERED".equals(state.optString("state"))) {
+                        deferUntilShellRecovery(() -> finish(run));
+                    } else {
+                        recoveryUnavailableSince = -1L;
+                        worker.schedule(() -> finish(run), 100, TimeUnit.MILLISECONDS);
+                    }
                     return;
                 }
                 terminalStateConfirmed = true;
+                recoveryUnavailableSince = -1L;
+                if ("SHELL_OUTCOME_UNKNOWN".equals(run.failureCode)
+                        && ("Shell operation result is unknown".equals(run.failure)
+                        || "Shell operation status is unavailable".equals(run.failure))) {
+                    run.failure = "";
+                    run.failureCode = "";
+                }
                 JSONObject result = state.optJSONObject("result");
                 if (result == null) result = new JSONObject();
                 run.completed = result.optBoolean("completed");
@@ -632,7 +693,7 @@ final class ShanghaiTestController {
                         FailureDiagnostics.format(unknown, "shanghai", "completion"));
                 cached = recoveryPending("Shanghai shell operation result is not confirmed.");
                 notifyUi();
-                worker.schedule(() -> finish(run), 1, TimeUnit.SECONDS);
+                deferUntilShellRecovery(() -> finish(run));
                 return;
             } catch (Exception error) {
                 if (!terminalStateConfirmed) {
@@ -642,7 +703,7 @@ final class ShanghaiTestController {
                             FailureDiagnostics.format(error, "shanghai", "status-or-control"));
                     cached = recoveryPending("Shanghai shell operation status is not confirmed.");
                     notifyUi();
-                    worker.schedule(() -> finish(run), 1, TimeUnit.SECONDS);
+                    deferUntilShellRecovery(() -> finish(run));
                     return;
                 }
                 noteFailure(run, "Worker completion", describe(error)); run.cleanupFailed = true;
@@ -713,6 +774,14 @@ final class ShanghaiTestController {
                 record(run, "summary_error", describe(error));
             }
             boolean pending = run.cleanupFailed || gps().hasPendingRecovery();
+            if (!pending) {
+                try { clearRecoveryRecord(); }
+                catch (IOException error) {
+                    run.cleanupFailed = true;
+                    pending = true;
+                    noteFailure(run, "Recovery checkpoint", describe(error));
+                }
+            }
             ShanghaiTestState.Phase phase = pending || !run.failure.isEmpty() ? ShanghaiTestState.Phase.ERROR
                     : run.completed ? ShanghaiTestState.Phase.COMPLETED : ShanghaiTestState.Phase.STOPPED;
             String detail = !run.failure.isEmpty() ? ShanghaiTestState.failureDetail(
@@ -730,7 +799,6 @@ final class ShanghaiTestController {
                 catch (RuntimeException error) { record(run, "service_stop_error", describe(error)); }
                 NavigationLogStorage.markStorageFileChanged(run.directory);
                 current = null;
-                if (!run.cleanupFailed) ShellRuntimeSession.prefs(context).edit().remove("shanghai_work").commit();
             }
             notifyUi();
             MainActivity.requestStorageRefreshAfterMutation(context, "shanghai-finished");

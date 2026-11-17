@@ -91,7 +91,8 @@ final class ShellWorkExports {
             if (prepareRetryable != null) awaitFailure.addSuppressed(prepareRetryable);
             throw awaitFailure;
         }
-        return new SentryLogUploader.Result(result.getBoolean("sent"), result.optString("event"), result.optString("detail"));
+        return new SentryLogUploader.Result(result.getBoolean("sent"), result.optString("event"),
+                result.optString("detail"), result.optBoolean("deliveryUnconfirmed"));
     }
 
     /** Requests cancellation and returns only a state read from the trusted shell worker. */

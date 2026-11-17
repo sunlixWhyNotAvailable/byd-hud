@@ -123,17 +123,23 @@ final class LogShareZip {
         } catch (IOException error) {
             return new SelectionSummary(false, 0, 0, 0L, error.getMessage());
         }
-        boolean locked = false;
+        boolean pinned = false;
         try {
             List<String> omissions = new ArrayList<>();
             Map<String, byte[]> incidents = RuntimeIncidentRecorder.snapshot(context, days, omissions);
-            locked = awaitStorageLock();
-            if (!locked) return new SelectionSummary(false, days.size(), 0, 0L,
+            List<NavigationLogStorage.StorageRoot> roots = NavigationLogStorage.accessibleRoots(context);
+            if (!awaitStorageLock()) return new SelectionSummary(false, days.size(), 0, 0L,
                     "storage busy; retry export when the current operation completes");
+            try {
+                NavigationLogStorage.pinExportDays(days);
+                pinned = true;
+            } finally { NavigationLogStorage.unlockTopologyWrite(); }
             NavigatorPatchReportStore.CachedSummary reports =
                     NavigatorPatchReportStore.cachedSummary();
-            List<SnapshotFile> files = snapshotFiles(
-                    context.getApplicationContext(), days, reports.days);
+            List<SnapshotFile> files;
+            NavigationLogStorage.lockTopologyRead();
+            try { files = snapshotFiles(roots, days, reports.days); }
+            finally { NavigationLogStorage.unlockTopologyRead(); }
             addIncidentSources(files, incidents);
             long bytes = 0L;
             for (SnapshotFile file : files) {
@@ -155,7 +161,7 @@ final class LogShareZip {
             Thread.currentThread().interrupt();
             return new SelectionSummary(false, days.size(), 0, 0L, "cancelled");
         } finally {
-            if (locked) NavigationLogStorage.unlockTopologyWrite();
+            if (pinned) NavigationLogStorage.unpinExportDays(days);
         }
     }
 
@@ -180,25 +186,35 @@ final class LogShareZip {
                 boolean checkpoint = WazeCaptureDebugWriter.get().awaitCheckpoint(WRITER_CHECKPOINT_TIMEOUT_MS);
                 org.json.JSONArray sources = new org.json.JSONArray();
                 List<String> omissions = new ArrayList<>();
+                List<NavigationLogStorage.StorageRoot> roots = NavigationLogStorage.accessibleRoots(context);
                 if (!awaitStorageLock()) throw new IOException("storage busy: existing files preserved");
                 try {
                     NavigationLogStorage.pinExportDays(days);
                     pinned = true;
-                    for (SnapshotFile file : snapshotFiles(context, days, reportDays)) {
-                        JSONObject source = new JSONObject().put("path", file.file.getCanonicalPath())
-                                .put("entry", file.entryName).put("length", file.length);
-                        if (file.file.getName().endsWith(".json")) {
-                            File frozen = new File(ShellWorkFiles.directory(new File(job, "metadata")), sources.length() + ".json");
+                } finally { NavigationLogStorage.unlockTopologyWrite(); }
+                // Pins prevent removal/rotation; the read gate permits ordinary journal appends.
+                List<SnapshotFile> files;
+                NavigationLogStorage.lockTopologyRead();
+                try { files = snapshotFiles(roots, days, reportDays); }
+                finally { NavigationLogStorage.unlockTopologyRead(); }
+                for (SnapshotFile file : files) {
+                    JSONObject source = new JSONObject().put("path", file.file.getCanonicalPath())
+                            .put("entry", file.entryName).put("length", file.length);
+                    if (file.file.getName().endsWith(".json")) {
+                        File frozen = new File(ShellWorkFiles.directory(new File(job, "metadata")), sources.length() + ".json");
+                        if (!awaitStorageLock()) throw new IOException("storage busy: metadata snapshot unavailable");
+                        try {
+                            long length = file.file.length();
                             Files.copy(file.file.toPath(), frozen.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                            if (frozen.length() != file.length) {
+                            if (frozen.length() != length) {
                                 Files.deleteIfExists(frozen.toPath());
                                 throw new IOException("Mutable metadata changed during snapshot");
                             }
-                            source.put("path", frozen.getPath()).put("length", frozen.length());
-                        }
-                        sources.put(source);
+                        } finally { NavigationLogStorage.unlockTopologyWrite(); }
+                        source.put("path", frozen.getPath()).put("length", frozen.length());
                     }
-                } finally { NavigationLogStorage.unlockTopologyWrite(); }
+                    sources.put(source);
+                }
                 JSONObject health = freezeIncidentSources(context, days, job, sources, omissions);
                 JSONObject input = new JSONObject()
                         .put("sources", sources).put("reports", reports).put("health", health)
@@ -530,15 +546,8 @@ final class LogShareZip {
         return days;
     }
 
-    private static List<SnapshotFile> snapshotFiles(Context context, List<String> days)
-            throws IOException {
-        return snapshotFiles(context, days, NavigatorPatchReportStore.reportDays(context));
-    }
-
-    private static List<SnapshotFile> snapshotFiles(Context context, List<String> days,
-            Map<String, Long> reportDays) throws IOException {
-        List<NavigationLogStorage.StorageRoot> roots =
-                NavigationLogStorage.accessibleRoots(context);
+    private static List<SnapshotFile> snapshotFiles(List<NavigationLogStorage.StorageRoot> roots,
+            List<String> days, Map<String, Long> reportDays) throws IOException {
         rejectDuplicateRoots(roots);
         List<SnapshotFile> files = new ArrayList<>();
         Set<String> canonicalFiles = new HashSet<>();

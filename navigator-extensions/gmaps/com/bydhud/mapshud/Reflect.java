@@ -1,9 +1,35 @@
 package com.bydhud.mapshud;
 
 import java.lang.reflect.*;
+import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** Reflection stays behind the exact APK hash/ABI checks in the build. */
 final class Reflect {
+    private static final ConcurrentHashMap<CallKey, Method> METHODS = new ConcurrentHashMap<>();
+
+    private static final class CallKey {
+        final Class<?> owner;
+        final String name;
+        final Class<?>[] arguments;
+
+        CallKey(Class<?> owner, String name, Object[] args) {
+            this.owner = owner;
+            this.name = name;
+            arguments = new Class<?>[args.length];
+            for (int i = 0; i < args.length; i++) arguments[i] = args[i] == null ? null : args[i].getClass();
+        }
+
+        @Override public boolean equals(Object other) {
+            if (!(other instanceof CallKey)) return false;
+            CallKey key = (CallKey) other;
+            return owner == key.owner && name.equals(key.name) && Arrays.equals(arguments, key.arguments);
+        }
+
+        @Override public int hashCode() {
+            return 31 * (31 * owner.hashCode() + name.hashCode()) + Arrays.hashCode(arguments);
+        }
+    }
     static Class<?> type(String name) throws Exception {
         return Class.forName(name, true, Reflect.class.getClassLoader());
     }
@@ -31,16 +57,27 @@ final class Reflect {
     }
     static Object call(Object owner, String name, Object... args) throws Exception {
         Class<?> cls=owner instanceof Class ? (Class<?>)owner : owner.getClass();
-        for(Class<?> c=cls;c!=null;c=c.getSuperclass()) for(Method m:c.getDeclaredMethods()) {
-            if(m.getName().equals(name) && matches(m.getParameterTypes(),args)) {
-                m.setAccessible(true); return m.invoke(owner instanceof Class ? null : owner,args);
+        CallKey key = new CallKey(cls, name, args);
+        Method method = METHODS.get(key);
+        if (method == null) {
+            search: for(Class<?> c=cls;c!=null;c=c.getSuperclass()) for(Method m:c.getDeclaredMethods()) {
+                if(m.getName().equals(name) && matches(m.getParameterTypes(),args)) {
+                    m.setAccessible(true);
+                    Method previous = METHODS.putIfAbsent(key, m);
+                    method = previous == null ? m : previous;
+                    break search;
+                }
             }
         }
-        throw new NoSuchMethodException(cls.getName()+"."+name+"/"+args.length);
+        if (method == null) throw new NoSuchMethodException(cls.getName()+"."+name+"/"+args.length);
+        try { return method.invoke(owner instanceof Class ? null : owner, args); }
+        catch (InvocationTargetException error) { throw original(error); }
     }
     static Object make(String name, Object... args) throws Exception {
         for(Constructor<?> c:type(name).getDeclaredConstructors()) if(matches(c.getParameterTypes(),args)) {
-            c.setAccessible(true); return c.newInstance(args);
+            c.setAccessible(true);
+            try { return c.newInstance(args); }
+            catch (InvocationTargetException error) { throw original(error); }
         }
         throw new NoSuchMethodException(name+".<init>/"+args.length);
     }
@@ -61,5 +98,15 @@ final class Reflect {
     static Throwable root(Throwable e) {
         while(e instanceof InvocationTargetException && e.getCause()!=null && e.getSuppressed().length==0) e=e.getCause();
         return e;
+    }
+    private static Exception original(InvocationTargetException error) {
+        Throwable cause = error.getCause();
+        if (cause == null) return error;
+        for (Throwable suppressed : error.getSuppressed()) {
+            if (suppressed != cause) cause.addSuppressed(suppressed);
+        }
+        if (cause instanceof Error) throw (Error) cause;
+        if (cause instanceof Exception) return (Exception) cause;
+        return new ReflectiveOperationException("navigator invocation failed", cause);
     }
 }

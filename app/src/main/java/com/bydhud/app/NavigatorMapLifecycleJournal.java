@@ -12,51 +12,95 @@ final class NavigatorMapLifecycleJournal {
     private static final String PREFS = "navigator_map_lifecycle_journal";
     private static final java.util.concurrent.ExecutorService WRITER =
             java.util.concurrent.Executors.newSingleThreadExecutor(r -> new Thread(r, "MapJournalCollector"));
-    private static final java.util.Map<String, Pending> LEGACY = new java.util.HashMap<>();
+    private static final java.util.Map<String, Pending> PENDING = new java.util.HashMap<>();
+    static final long LEGACY_WAIT_MS = 3_000L;
 
     private static final class Pending {
         final String session;
-        boolean busy;
+        java.util.concurrent.CountDownLatch completion;
         Result saved = new Result(false, 0L, 0L, 0);
+        String error = "";
         Pending(String session) { this.session = session; }
     }
 
     /** Old producers retry the unacknowledged batch; poll returns only an already durable cursor. */
     static Result acceptLater(Context context, String owner, String session, JSONArray fragments,
             long through, long partial, int chunk, Store store) {
-        if (!safeOwner(owner) || !safeSession(session)) return new Result(false, 0L, 0L, 0);
-        synchronized (LEGACY) {
-            Pending pending = LEGACY.get(owner);
+        return collect(context, owner, session, fragments, through, partial, chunk, store, 0L);
+    }
+
+    static Result collect(Context context, String owner, String session, JSONArray fragments,
+            long through, long partial, int chunk, Store store, long waitMs) {
+        if (!safeOwner(owner) || !safeSession(session) || context == null || store == null
+                || fragments == null || through < 0L || partial < 0L || chunk < 0) {
+            return new Result(false, 0L, 0L, 0, "invalid journal request");
+        }
+        if (fragments.length() == 0) return new Result(false, 0L, 0L, 0);
+        Pending current;
+        java.util.concurrent.CountDownLatch completion;
+        synchronized (PENDING) {
+            Pending pending = PENDING.get(owner);
             if (pending == null || !pending.session.equals(session)) {
-                if (pending != null && pending.busy) return new Result(false, 0L, 0L, 0);
+                if (pending != null && pending.completion != null) {
+                    return new Result(false, 0L, 0L, 0, "", true);
+                }
                 pending = new Pending(session);
-                LEGACY.put(owner, pending);
+                PENDING.put(owner, pending);
             }
-            Pending current = pending;
-            Result saved = current.saved;
-            if (!current.busy) {
-                current.busy = true;
+            current = pending;
+            Result saved = bounded(current, through, partial, chunk);
+            if (saved.accepted && saved.ackSequence == through
+                    && saved.ackChunkSequence == partial && saved.ackChunkIndex == chunk) return saved;
+            if (current.completion == null) {
+                java.util.concurrent.CountDownLatch writing = new java.util.concurrent.CountDownLatch(1);
+                current.completion = writing;
                 WRITER.execute(() -> {
                     try {
                         Result result = accept(context, owner, session, fragments, through, partial, chunk, store);
-                        boolean changedError;
-                        synchronized (LEGACY) {
-                            changedError = !result.error.isEmpty() && !result.error.equals(current.saved.error);
-                            current.saved = result;
+                        synchronized (PENDING) {
+                            if (result.accepted) current.saved = result;
+                            current.error = result.error.isEmpty() && !result.accepted
+                                    ? "journal batch has no contiguous valid prefix" : result.error;
                         }
-                        if (changedError) AppEventLogger.event(context,
-                                "navigator_map_capture legacy_journal_error owner=" + owner
-                                        + " producerSession=" + session + " cause=" + result.error);
                     } catch (RuntimeException error) {
                         android.util.Log.e("BydHudMapCapture", "collector journal persistence", error);
-                    } finally { synchronized (LEGACY) { current.busy = false; } }
+                        synchronized (PENDING) {
+                            current.error = FailureDiagnostics.format(error, owner, "journal-persistence");
+                        }
+                    } finally {
+                        synchronized (PENDING) { current.completion = null; }
+                        writing.countDown();
+                    }
                 });
             }
-            long complete = Math.min(saved.ackSequence, through);
-            boolean samePartial = partial > complete && partial == saved.ackChunkSequence;
-            return new Result(saved.accepted, complete, samePartial ? partial : 0L,
-                    samePartial ? Math.min(chunk, saved.ackChunkIndex) : 0, saved.error);
+            completion = current.completion;
         }
+        if (waitMs > 0L && completion != null) {
+            try {
+                completion.await(Math.min(waitMs, LEGACY_WAIT_MS), java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                return new Result(false, 0L, 0L, 0,
+                        FailureDiagnostics.format(error, owner, "journal-wait"), true);
+            }
+        }
+        synchronized (PENDING) {
+            Result result = bounded(current, through, partial, chunk);
+            if (waitMs > 0L && !result.accepted && result.pending && result.error.isEmpty()) {
+                return new Result(false, 0L, 0L, 0,
+                        "journal durable ACK unconfirmed after " + LEGACY_WAIT_MS + "ms; write retained", true);
+            }
+            return result;
+        }
+    }
+
+    private static Result bounded(Pending current, long through, long partial, int chunk) {
+        Result saved = current.saved;
+        long complete = Math.min(saved.ackSequence, through);
+        boolean samePartial = partial > complete && partial == saved.ackChunkSequence;
+        return new Result(saved.accepted, complete, samePartial ? partial : 0L,
+                samePartial ? Math.min(chunk, saved.ackChunkIndex) : 0,
+                current.error, current.completion != null);
     }
 
     interface Store {
@@ -109,17 +153,24 @@ final class NavigatorMapLifecycleJournal {
         final long ackChunkSequence;
         final int ackChunkIndex;
         final String error;
+        final boolean pending;
 
         Result(boolean accepted, long ackSequence, long ackChunkSequence, int ackChunkIndex) {
             this(accepted, ackSequence, ackChunkSequence, ackChunkIndex, "");
         }
 
         Result(boolean accepted, long ackSequence, long ackChunkSequence, int ackChunkIndex, String error) {
+            this(accepted, ackSequence, ackChunkSequence, ackChunkIndex, error, false);
+        }
+
+        Result(boolean accepted, long ackSequence, long ackChunkSequence, int ackChunkIndex,
+                String error, boolean pending) {
             this.accepted = accepted;
             this.ackSequence = ackSequence;
             this.ackChunkSequence = ackChunkSequence;
             this.ackChunkIndex = ackChunkIndex;
             this.error = error;
+            this.pending = pending;
         }
     }
 

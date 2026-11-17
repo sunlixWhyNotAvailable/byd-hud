@@ -12,7 +12,7 @@ import java.util.concurrent.Executors
 
 enum class StorageLogSharePhase {
     WAITING_FOR_WRITES, COPYING, ARCHIVING, OVERSIZED, WAITING_FOR_SHARE, READY,
-    UPLOADING, SENT, FAILED, CANCELLING, CANCELLED,
+    UPLOADING, SENT, FAILED, DELIVERY_UNCONFIRMED, CANCELLING, CANCELLED,
     WAITING_FOR_DESTINATION, SAVING_DOCUMENT, SAVE_RESULT
 }
 
@@ -251,7 +251,7 @@ object StorageLogShareWorkflow {
                 val input = ShellWorkClient.expected(app, job).getJSONObject("input")
                 val result = ShellWorkExports.upload(app, File(input.getString("archive")),
                     submittedDays, control.operationId, report!!)
-                finish(control.operationId, if (result.ok) StorageLogSharePhase.SENT else StorageLogSharePhase.FAILED,
+                finish(control.operationId, uploadPhase(result),
                     result.detail, result.eventId)
                 return
             }
@@ -884,12 +884,18 @@ object StorageLogShareWorkflow {
         }
         if (!finish(
                 control.operationId,
-                if (upload.ok) StorageLogSharePhase.SENT else StorageLogSharePhase.FAILED,
+                uploadPhase(upload),
                 upload.detail,
                 upload.eventId
             )) return false
         MainActivity.refreshAfterStorageShare(app, "sentry-share")
         return true
+    }
+
+    private fun uploadPhase(upload: SentryLogUploader.Result): StorageLogSharePhase = when {
+        upload.ok -> StorageLogSharePhase.SENT
+        upload.unconfirmed -> StorageLogSharePhase.DELIVERY_UNCONFIRMED
+        else -> StorageLogSharePhase.FAILED
     }
 
     @Synchronized

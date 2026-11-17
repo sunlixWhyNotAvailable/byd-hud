@@ -29,6 +29,7 @@ final class NavCaptureStore {
     private static final SimpleDateFormat LOCAL_TS_FORMAT =
             new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US);
     static final long MAX_LOG_BYTES = 2L * 1024L * 1024L;
+    private static final Object ARTIFACT_LOCK = new Object();
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavCaptureStore() {
@@ -151,13 +152,20 @@ final class NavCaptureStore {
         while (index < lines.size()) {
             final int start = index;
             BatchAppend append = NavigationLogStorage.withReadLock(() -> {
+                File directory;
+                try { directory = NavigationLogStorage.logsDir(context, targetDay); }
+                catch (RuntimeException error) {
+                    NavigationLogStorage.invalidatePublicRootCache();
+                    WazeCaptureDebugWriter.recordWriteFailure("append target: " + Log.getStackTraceString(error));
+                    Log.e(TAG, "append target failed", error);
+                    return new BatchAppend(null, start + 1, false);
+                }
                 // Images acquire topology before this monitor; rotation must happen after both are released.
                 synchronized (NavCaptureStore.class) {
                     int next = start;
                     File target = null;
                     try {
-                        target = new File(
-                                NavigationLogStorage.logsDir(context, targetDay), fileName);
+                        target = new File(directory, fileName);
                         long projectedLength = target.isFile() ? target.length() : 0L;
                         List<String> chunk = new ArrayList<>();
                         while (next < lines.size()) {
@@ -169,7 +177,8 @@ final class NavCaptureStore {
                         JournalTextBatch.append(target, chunk);
                         return new BatchAppend(target, next, true);
                     } catch (IOException | RuntimeException error) {
-                        WazeCaptureDebugWriter.recordWriteFailure("append: " + error);
+                        NavigationLogStorage.invalidatePublicRootCache();
+                        WazeCaptureDebugWriter.recordWriteFailure("append: " + Log.getStackTraceString(error));
                         Log.e(TAG, "append failed "
                                 + (target == null ? fileName : target.getAbsolutePath()), error);
                         return new BatchAppend(target, Math.max(start + 1, next), false);
@@ -222,7 +231,7 @@ final class NavCaptureStore {
         return safeKind + "-" + hash + ".png";
     }
 
-    static synchronized String writeDirectArtifactFileIfAbsent(
+    static String writeDirectArtifactFileIfAbsent(
             File dir, String fileName, byte[] bytes) {
         if (dir == null || fileName == null
                 || !fileName.matches("[A-Za-z0-9_-]+-[0-9a-f]{64}\\.png")
@@ -234,21 +243,15 @@ final class NavCaptureStore {
             return "";
         }
         File file = new File(dir, fileName);
-        if (file.isFile()) {
-            return fileName;
-        }
         try {
-            if (!file.createNewFile()) {
-                return file.isFile() ? fileName : "";
-            }
-            try (FileOutputStream out = new FileOutputStream(file)) {
-                out.write(bytes);
+            synchronized (ARTIFACT_LOCK) {
+                AtomicArtifactFile.publish(file, bytes);
             }
             WazeCaptureDebugWriter.recordWriteSuccess();
             return fileName;
-        } catch (IOException e) {
-            WazeCaptureDebugWriter.recordWriteFailure("artifact: " + e);
-            file.delete();
+        } catch (IOException | RuntimeException e) {
+            NavigationLogStorage.invalidatePublicRootCache();
+            WazeCaptureDebugWriter.recordWriteFailure("artifact: " + Log.getStackTraceString(e));
             Log.e(TAG, "direct artifact failed " + file.getAbsolutePath(), e);
             return "";
         } finally {

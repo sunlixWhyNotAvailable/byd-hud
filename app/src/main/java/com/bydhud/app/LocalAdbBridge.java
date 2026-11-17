@@ -1512,8 +1512,7 @@ final class LocalAdbBridge {
             Log.w(TAG, "ADB permission grant failed at " + stage, e);
             AppEventLogger.event(appContext, FailureDiagnostics.format(
                     e, "adb_permission_grant", stage));
-            String detail = FailureDiagnostics.formatBounded(
-                    e, "adb_permission_grant", stage, 2048);
+            String detail = FailureDiagnostics.summary(e, stage);
             if (e instanceof AdbConnectException) {
                 return Result.adbUnavailable(
                         "ADB bridge could not be reached. Check that debugging is enabled. "
@@ -1528,8 +1527,7 @@ final class LocalAdbBridge {
             Log.e(TAG, "ADB grant failed", e);
             AppEventLogger.event(appContext, FailureDiagnostics.format(
                     e, "adb_permission_grant", stage));
-            return Result.failed(FailureDiagnostics.formatBounded(
-                    e, "adb_permission_grant", stage, 2048));
+            return Result.failed(FailureDiagnostics.summary(e, stage));
         } finally {
             if (connection != null) {
                 connection.close();
@@ -2100,14 +2098,17 @@ final class LocalAdbBridge {
                     return result;
                 } catch (IOException retry) {
                     closeRuntimeConnectionLocked(appContext, "retry_io_exception");
+                    retry.addSuppressed(e);
                     throw retry;
                 } catch (Exception retry) {
                     closeRuntimeConnectionLocked(appContext, "retry_exception");
+                    retry.addSuppressed(e);
                     throw new IOException("ADB runtime command failed after retry: "
                             + retry.getClass().getSimpleName() + ": " + retry.getMessage(),
                             retry);
                 }
             } catch (Exception e) {
+                closeRuntimeConnectionLocked(appContext, "exception");
                 throw new IOException("ADB runtime command failed: "
                         + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
             }

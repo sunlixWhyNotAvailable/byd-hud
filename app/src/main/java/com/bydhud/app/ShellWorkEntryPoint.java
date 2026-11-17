@@ -162,7 +162,8 @@ public final class ShellWorkEntryPoint {
                 SentryLogUploader.Result result = SentryLogUploader.upload(context, archive,
                         strings(input.getJSONArray("days")), input.getString("operation"),
                         new SentryLogReport(input.optString("comment", ""), input.getString("title")));
-                return new JSONObject().put("sent", result.ok).put("event", result.eventId).put("detail", result.detail);
+                return new JSONObject().put("sent", result.ok).put("event", result.eventId)
+                        .put("detail", result.detail).put("deliveryUnconfirmed", result.unconfirmed);
             }
             case "shanghai": return ShellShanghaiRoute.run(context, system, input);
             default: throw new IOException("Unknown shell operation");

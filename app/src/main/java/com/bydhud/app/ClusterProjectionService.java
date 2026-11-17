@@ -70,6 +70,8 @@ public final class ClusterProjectionService extends Service
     private static final ConcurrentHashMap<Long, BooleanSupplier>
             TRANSFER_CURRENTS = new ConcurrentHashMap<>();
     private static ClusterProjectionService instance;
+    private static final ConcurrentHashMap<Object, Runnable> PENDING_RESOURCE_RELEASES = new ConcurrentHashMap<>();
+    private static boolean resourceReleaseInProgress;
 
     private final Object lock = new Object();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -736,6 +738,7 @@ public final class ClusterProjectionService extends Service
             return;
         }
         Thread worker = new Thread(() -> {
+            try {
             NavAppDisplayController controller = NavAppDisplayController.get(this);
             long intentGeneration = controller.projectionGenerationForPackage(targetPackage);
             BooleanSupplier requestCurrent = () -> transferCurrent(transferToken)
@@ -757,6 +760,7 @@ public final class ClusterProjectionService extends Service
                 return;
             }
             mainHandler.post(() -> {
+                try {
                 if (!isReturnOwnerCurrent(targetPackage, returnGeneration, returnOwnerToken)
                         || !shouldRetainAfterReturn(targetPackage, returnGeneration)) {
                     completeTransfer(transferToken, returned);
@@ -774,9 +778,16 @@ public final class ClusterProjectionService extends Service
                     controller.recordProjectionOutputFailure(targetPackage, blackFailure);
                 }
                 completeTransfer(transferToken, returned);
+                } catch (RuntimeException error) {
+                    projectionWorkFailed(targetPackage, transferToken, "return-main-completion", error);
+                }
             });
+            } catch (RuntimeException error) {
+                projectionWorkFailed(targetPackage, transferToken, "return-main", error);
+            }
         }, "BydHudClusterProjectionReturn");
-        worker.start();
+        try { worker.start(); }
+        catch (RuntimeException error) { projectionWorkFailed(targetPackage, transferToken, "return-worker-start", error); }
     }
 
     private boolean isReturnMoveCurrent(
@@ -819,7 +830,21 @@ public final class ClusterProjectionService extends Service
     private static void completeTransfer(long token, NavAppDisplayState state) {
         Consumer<NavAppDisplayState> completion = TRANSFER_COMPLETIONS.remove(token);
         TRANSFER_CURRENTS.remove(token);
-        if (completion != null) completion.accept(state);
+        if (completion != null) {
+            try { completion.accept(state); }
+            catch (RuntimeException error) { Log.e(TAG, "projection transfer completion token=" + token, error); }
+        }
+    }
+
+    private void projectionWorkFailed(String packageName, long transferToken, String stage, RuntimeException error) {
+        String detail = FailureDiagnostics.format(error, packageName, stage);
+        log(detail);
+        NavAppDisplayController controller = NavAppDisplayController.get(this);
+        try { controller.recordProjectionOutputFailure(packageName, detail); }
+        catch (RuntimeException reportingError) {
+            log(FailureDiagnostics.format(reportingError, packageName, stage + "-report-failure"));
+        }
+        finally { completeTransfer(transferToken, controller.lastState(packageName)); }
     }
 
     private static boolean transferCurrent(long token) {
@@ -1038,6 +1063,8 @@ public final class ClusterProjectionService extends Service
         try {
             manager.addView(root, params);
         } catch (RuntimeException e) {
+            retainViewForRelease(manager, root);
+            releaseRetainedProjectionResources();
             synchronized (lock) {
                 if (overlayRoot == root) {
                     overlayWindowManager = null;
@@ -1048,9 +1075,7 @@ public final class ClusterProjectionService extends Service
                     projectionContentVisible = false;
                 }
             }
-            log("overlay add failed display=" + targetDisplayId
-                    + " mode=surface_view"
-                    + " " + e.getClass().getSimpleName() + " " + safe(e.getMessage()));
+            log(FailureDiagnostics.format(e, "projection-overlay", "add display=" + targetDisplayId));
             return;
         }
         log("overlay added mode=surface_view display=" + targetDisplayId
@@ -1087,25 +1112,31 @@ public final class ClusterProjectionService extends Service
             expectedOwnerToken = projectionOwnerToken;
             expectedPackage = projectedPackage;
         }
-        DisplayManager displayManager =
-                (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
-        if (displayManager == null) {
-            log("projection failed: no DisplayManager");
-            return;
-        }
-        VirtualDisplay created = displayManager.createVirtualDisplay(
+        VirtualDisplay created = null;
+        int displayId;
+        try {
+            if (!releaseRetainedProjectionResources()) throw new IllegalStateException("Previous projection resource cleanup is pending");
+            DisplayManager displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+            if (displayManager == null) throw new IllegalStateException("DisplayManager unavailable");
+            created = displayManager.createVirtualDisplay(
                 VIRTUAL_DISPLAY_NAME,
                 bufferWidth,
                 bufferHeight,
                 VIRTUAL_DENSITY,
                 surface,
                 VIRTUAL_DISPLAY_FLAGS);
-        if (created == null || created.getDisplay() == null || !created.getDisplay().isValid()) {
-            if (created != null) created.release();
-            log("projection failed: createVirtualDisplay unavailable");
+            if (created == null || created.getDisplay() == null || !created.getDisplay().isValid()) {
+                throw new IllegalStateException("createVirtualDisplay returned no valid display");
+            }
+            displayId = created.getDisplay().getDisplayId();
+        } catch (RuntimeException error) {
+            if (created != null) retainDisplayForRelease(created);
+            long transferToken;
+            synchronized (lock) { transferToken = pendingTransferToken; pendingTransferToken = 0L; }
+            try { projectionWorkFailed(expectedPackage, transferToken, "create-virtual-display", error); }
+            finally { releaseProjection("create-virtual-display-failed"); }
             return;
         }
-        int displayId = created.getDisplay().getDisplayId();
         boolean accepted;
         synchronized (lock) {
             accepted = projectionRequested
@@ -1123,7 +1154,8 @@ public final class ClusterProjectionService extends Service
             }
         }
         if (!accepted) {
-            created.release();
+            retainDisplayForRelease(created);
+            releaseRetainedProjectionResources();
             log("projection_resource_allocation_discarded state=stale package="
                     + safe(expectedPackage));
             return;
@@ -1750,6 +1782,7 @@ public final class ClusterProjectionService extends Service
         BooleanSupplier recoveryCurrent = () -> isResizeRecoveryCurrent(
                 packageName, expectedProjectionGeneration, expectedOwnerToken);
         Thread worker = new Thread(() -> {
+            try {
             NavAppDisplayController controller = NavAppDisplayController.get(this);
             long intentGeneration = controller.projectionGenerationForPackage(packageName);
             NavAppDisplayState returned = controller.moveTaskToDisplayBlocking(
@@ -1758,6 +1791,7 @@ public final class ClusterProjectionService extends Service
                             "cluster-projection profile-resize-recovery " + reason,
                             recoveryCurrent);
             mainHandler.post(() -> {
+                try {
                 boolean current;
                 synchronized (lock) {
                     current = ProjectionLifecyclePolicy.matchesInvalidRecoveryOwner(
@@ -1802,9 +1836,21 @@ public final class ClusterProjectionService extends Service
                 }
                 releaseProjection("profile-resize-recovery");
                 requestProjection(packageName, dashboardMode, "profile-resize-recovery:" + reason);
+                } catch (RuntimeException error) {
+                    synchronized (lock) { projectionRecoveryInProgress = false; }
+                    projectionWorkFailed(packageName, 0L, "resize-recovery-completion", error);
+                }
             });
+            } catch (RuntimeException error) {
+                synchronized (lock) { projectionRecoveryInProgress = false; }
+                projectionWorkFailed(packageName, 0L, "resize-recovery", error);
+            }
         }, "BydHudClusterProjectionResizeRecovery");
-        worker.start();
+        try { worker.start(); }
+        catch (RuntimeException error) {
+            synchronized (lock) { projectionRecoveryInProgress = false; }
+            projectionWorkFailed(packageName, 0L, "resize-worker-start", error);
+        }
     }
 
     private boolean isResizeRecoveryCurrent(
@@ -1845,6 +1891,7 @@ public final class ClusterProjectionService extends Service
         }
         Thread worker = new Thread(
                 () -> {
+                    try {
                     String staleReason = transferCurrent(transferToken)
                             ? staleMoveReason(packageName, displayId, moveGeneration, moveOwnerToken)
                             : "transfer request changed";
@@ -1897,9 +1944,15 @@ public final class ClusterProjectionService extends Service
                                 moveOwnerToken,
                                 reason));
                     }
+                    } catch (RuntimeException error) {
+                        projectionWorkFailed(packageName, transferToken, "move-to-display", error);
+                        mainHandler.post(() -> restoreBlackIdleAfterFailedMove(
+                                packageName, displayId, moveDisplayGeneration, moveGeneration, moveOwnerToken, reason));
+                    }
                 },
                 "BydHudClusterProjectionMove");
-        worker.start();
+        try { worker.start(); }
+        catch (RuntimeException error) { projectionWorkFailed(packageName, transferToken, "move-worker-start", error); }
     }
 
     private void restoreBlackIdleAfterFailedMove(
@@ -1909,6 +1962,7 @@ public final class ClusterProjectionService extends Service
             int moveGeneration,
             long moveOwnerToken,
             String reason) {
+        try {
         synchronized (lock) {
             int currentDisplayId = virtualDisplay == null || virtualDisplay.getDisplay() == null
                     ? NavAppDisplayState.DISPLAY_UNKNOWN
@@ -1938,6 +1992,9 @@ public final class ClusterProjectionService extends Service
                 "move-failed " + safe(reason));
         if (!failure.isEmpty()) {
             NavAppDisplayController.get(this).recordProjectionOutputFailure(packageName, failure);
+        }
+        } catch (RuntimeException error) {
+            projectionWorkFailed(packageName, 0L, "restore-black-idle", error);
         }
     }
 
@@ -2052,7 +2109,7 @@ public final class ClusterProjectionService extends Service
     }
 
     private boolean hasAllocatedResourcesLocked() {
-        return overlayRoot != null
+        return !PENDING_RESOURCE_RELEASES.isEmpty() || overlayRoot != null
                 || overlaySurfaceView != null
                 || blackWindowView != null
                 || projectionSurface != null
@@ -2502,6 +2559,11 @@ public final class ClusterProjectionService extends Service
             manager = overlayWindowManager;
             blackView = blackWindowView;
             blackManager = blackWindowManager;
+            if (display != null) retainDisplayForRelease(display);
+            if (blackManager != null && blackView != null)
+                retainViewForRelease(blackManager, blackView);
+            if (manager != null && overlayView != null)
+                retainViewForRelease(manager, overlayView);
             blackWindowView = null;
             blackWindowManager = null;
             blackWindowVisible = false;
@@ -2533,26 +2595,40 @@ public final class ClusterProjectionService extends Service
             projectionContentVisible = false;
             surfaceGeneration++;
         }
-        if (blackManager != null && blackView != null) {
-            try {
-                blackManager.removeViewImmediate(blackView);
-            } catch (RuntimeException e) {
-                log("projection_black remove_failed " + e.getClass().getSimpleName()
-                        + " reason=full-release");
+        boolean released = releaseRetainedProjectionResources();
+        log("projection_full_release mode=surface_view reason=" + reason + " confirmed=" + released
+                + " pendingResources=" + PENDING_RESOURCE_RELEASES.size());
+    }
+
+    private static void retainDisplayForRelease(VirtualDisplay display) {
+        PENDING_RESOURCE_RELEASES.putIfAbsent(display, display::release);
+    }
+
+    private static void retainViewForRelease(WindowManager manager, View view) {
+        PENDING_RESOURCE_RELEASES.putIfAbsent(view, () -> {
+            if (view.getParent() != null) manager.removeViewImmediate(view);
+        });
+    }
+
+    private boolean releaseRetainedProjectionResources() {
+        synchronized (PENDING_RESOURCE_RELEASES) {
+            // Removing the SurfaceView can synchronously re-enter through surfaceDestroyed.
+            if (resourceReleaseInProgress) return false;
+            resourceReleaseInProgress = true;
+        }
+        try {
+            for (java.util.Map.Entry<Object, Runnable> entry : PENDING_RESOURCE_RELEASES.entrySet()) {
+                try {
+                    entry.getValue().run();
+                    PENDING_RESOURCE_RELEASES.remove(entry.getKey(), entry.getValue());
+                } catch (RuntimeException error) {
+                    log(FailureDiagnostics.format(error, "projection-cleanup", entry.getKey().getClass().getSimpleName()));
+                }
             }
+            return PENDING_RESOURCE_RELEASES.isEmpty();
+        } finally {
+            synchronized (PENDING_RESOURCE_RELEASES) { resourceReleaseInProgress = false; }
         }
-        if (display != null) {
-            display.release();
-        }
-        if (manager != null && overlayView != null) {
-            try {
-                manager.removeView(overlayView);
-            } catch (RuntimeException e) {
-                log("overlay remove failed " + e.getClass().getSimpleName()
-                        + " " + safe(e.getMessage()));
-            }
-        }
-        log("projection_full_release mode=surface_view reason=" + reason);
     }
 
     //copies the current surface metadata without transferring ownership to the caller.

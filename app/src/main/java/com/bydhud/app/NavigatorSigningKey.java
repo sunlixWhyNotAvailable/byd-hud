@@ -25,7 +25,7 @@ final class NavigatorSigningKey {
     private NavigatorSigningKey() {
     }
 
-    static com.android.apksig.ApkSigner.SignerConfig signerConfig() throws Exception {
+    static synchronized com.android.apksig.ApkSigner.SignerConfig signerConfig() throws Exception {
         KeyStore store = store();
         ensure(store);
         PrivateKey key = (PrivateKey) store.getKey(ALIAS, null);
@@ -34,7 +34,7 @@ final class NavigatorSigningKey {
                 "BYD HUD navigator patcher", key, Collections.singletonList(certificate)).build();
     }
 
-    static String localCertificateSha256() throws Exception {
+    static synchronized String localCertificateSha256() throws Exception {
         if (ShellWorkEntryPoint.request != null) return ShellWorkEntryPoint.request.getJSONObject("input").getString("certificate");
         KeyStore store = store();
         ensure(store);
@@ -72,7 +72,7 @@ final class NavigatorSigningKey {
         }
     }
 
-    static boolean certificateMatchesLocalIfPresent(String certificateSha256) {
+    static synchronized boolean certificateMatchesLocalIfPresent(String certificateSha256) {
         try {
             if (ShellWorkEntryPoint.request != null) return localCertificateSha256().equals(certificateSha256);
             KeyStore store = store();

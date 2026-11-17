@@ -411,7 +411,7 @@ final class NavigationLogStorage {
         if (context == null) {
             return Collections.emptyList();
         }
-        return withWriteLock(() -> Collections.unmodifiableList(
+        return withReadLock(() -> Collections.unmodifiableList(
                 new ArrayList<>(accessibleRootsLocked(context.getApplicationContext()))));
     }
 
@@ -1636,19 +1636,16 @@ final class NavigationLogStorage {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static File publicFirstDir(Context context, String childDir) {
         long now = SystemClock.elapsedRealtime();
-        boolean publicPermission = hasPublicWritePermission(context);
         synchronized (PUBLIC_DIR_CACHE_LOCK) {
             CachedDir cached = PUBLIC_DIR_CACHE.get(childDir);
             if (cached != null
                     && cached.dir != null
-                    && cached.dir.isDirectory()
-                    && cached.publicPermission == publicPermission
-                    && (!cached.publicStorage || (cached.dir.canWrite() && cached.fileKey != null
-                        && cached.fileKey.equals(publicDirectoryKey(cached.dir))))
+                    && (!cached.publicStorage || (cached.publicPermission && cached.fileKey != null))
                     && now - cached.checkedMs < PUBLIC_DIR_CACHE_TTL_MS) {
                 return cached.dir;
             }
         }
+        boolean publicPermission = hasPublicWritePermission(context);
         File publicRoot = publicRootDir();
         File publicDir = childDir.isEmpty() ? publicRoot : new File(publicRoot, childDir);
         if (publicPermission && ensureWritable(publicDir)) {
@@ -1671,10 +1668,9 @@ final class NavigationLogStorage {
             boolean publicStorage,
             boolean publicPermission,
             long checkedMs) {
+        CachedDir next = new CachedDir(dir, publicStorage, publicPermission, checkedMs);
         synchronized (PUBLIC_DIR_CACHE_LOCK) {
-            CachedDir previous = PUBLIC_DIR_CACHE.put(
-                    childDir,
-                    new CachedDir(dir, publicStorage, publicPermission, checkedMs));
+            CachedDir previous = PUBLIC_DIR_CACHE.put(childDir, next);
             String previousPath = previous == null || previous.dir == null
                     ? ""
                     : previous.dir.getAbsolutePath();

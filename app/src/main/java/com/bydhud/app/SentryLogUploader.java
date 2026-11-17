@@ -3,10 +3,12 @@ package com.bydhud.app;
 import android.content.Context;
 
 import java.io.File;
+import java.nio.file.Files;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipFile;
 
 import io.sentry.Attachment;
@@ -23,16 +25,23 @@ import io.sentry.util.HintUtils;
 // Sends only an explicitly selected diagnostic archive; no automatic telemetry is enabled.
 final class SentryLogUploader {
     static final long MAX_ZIP_BYTES = 39_000_000L;
+    private static final long CONFIRMATION_TIMEOUT_MS = 120_000L;
 
     static final class Result {
         final boolean ok;
         final String eventId;
         final String detail;
+        final boolean unconfirmed;
 
         Result(boolean ok, String eventId, String detail) {
+            this(ok, eventId, detail, false);
+        }
+
+        Result(boolean ok, String eventId, String detail, boolean unconfirmed) {
             this.ok = ok;
             this.eventId = eventId == null ? "" : eventId;
             this.detail = detail == null ? "" : detail;
+            this.unconfirmed = unconfirmed;
         }
     }
 
@@ -51,8 +60,8 @@ final class SentryLogUploader {
             return success;
         }
 
-        void await() throws InterruptedException {
-            completion.await();
+        boolean await() throws InterruptedException {
+            return completion.await(CONFIRMATION_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -88,6 +97,7 @@ final class SentryLogUploader {
             return new Result(false, "", validation);
         }
         SentryClient client = null;
+        String submittedEventId = "";
         try {
             SentryOptions options = buildOptions(BuildConfig.SENTRY_DSN);
             client = new SentryClient(options);
@@ -96,29 +106,36 @@ final class SentryLogUploader {
                     messageText, uploadType, selectedDays, uploadId, userComment);
 
             Hint hint = new Hint();
+            // The SDK sends asynchronously; it must not retain a path deleted after a timeout.
             hint.addAttachment(new Attachment(
-                    archive.getAbsolutePath(), archive.getName(), "application/zip"));
+                    Files.readAllBytes(archive.toPath()), archive.getName(), "application/zip"));
             SubmissionResultTracker submissionResult = new SubmissionResultTracker();
             HintUtils.setTypeCheckHint(hint, submissionResult);
             SentryId eventId = client.captureEvent(event, hint);
             if (SentryId.EMPTY_ID.equals(eventId)) {
                 return new Result(false, "", "Sentry did not accept the upload");
             }
-            submissionResult.await();
+            submittedEventId = eventId.toString();
+            if (!submissionResult.await()) {
+                return new Result(false, submittedEventId,
+                        "Delivery not confirmed within " + CONFIRMATION_TIMEOUT_MS + "ms", true);
+            }
             if (!submissionResult.isSuccess()) {
                 return new Result(false, "", "Sentry did not deliver the upload");
             }
             return new Result(true, eventId.toString(), "uploaded");
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            return new Result(false, "", "Upload interrupted");
-        } catch (Throwable error) {
-            return new Result(false, "", error.getClass().getSimpleName() + ": "
-                    + String.valueOf(error.getMessage()));
+            return new Result(false, submittedEventId,
+                    FailureDiagnostics.format(error, uploadId, "upload-wait"), !submittedEventId.isEmpty());
+        } catch (Exception error) {
+            return new Result(false, submittedEventId,
+                    FailureDiagnostics.format(error, uploadId, "upload"), !submittedEventId.isEmpty());
         } finally {
             try {
                 if (client != null) client.close(false);
-            } catch (Throwable ignored) {
+            } catch (RuntimeException cleanup) {
+                android.util.Log.e("BydHudSentry", "upload transport cleanup id=" + uploadId, cleanup);
             }
             LogShareZip.deleteArtifact(archive);
         }
@@ -135,6 +152,8 @@ final class SentryLogUploader {
         options.setEnableAutoSessionTracking(false);
         options.setEnableShutdownHook(false);
         options.setMaxAttachmentSize(MAX_ZIP_BYTES);
+        options.setShutdownTimeoutMillis(2_000L);
+        options.setFlushTimeoutMillis(2_000L);
         options.getIntegrations().clear();
         options.setBeforeSend((event, hint) ->
                 "true".equals(event.getTag("bydhud_manual_upload")) ? event : null);

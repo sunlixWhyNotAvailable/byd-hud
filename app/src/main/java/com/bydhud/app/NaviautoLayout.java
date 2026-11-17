@@ -6,6 +6,9 @@ final class NaviautoLayout {
     static final int READ_MODE = 0x40C03032;
     static final int READ_SR = 0x40C0B022;
     static final long TIMEOUT_MS = 3_000L;
+    // Readback must leave time to return its detailed result before the Binder watchdog.
+    static final long RESPONSE_TIMEOUT_MS = 4_000L;
+    static final long WATCHDOG_TIMEOUT_MS = 5_000L;
 
     private NaviautoLayout() { }
 

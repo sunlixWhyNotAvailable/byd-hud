@@ -28,6 +28,8 @@ public final class LifecycleJournalTransport {
     private static volatile int unacknowledgedBatchCount;
     private static volatile String storageFault = "";
     private static long overflowCount;
+    private static final RepeatedFailure transferFailures = new RepeatedFailure();
+    private static final RepeatedFailure storageFailures = new RepeatedFailure();
     // Owned exclusively by DISK; restored sequences and ACK cursors remain durable.
     private static LifecycleJournalSpool spool;
 
@@ -115,6 +117,10 @@ public final class LifecycleJournalTransport {
         store.batch(false); // Retry already enqueued failed writes without a collector or a new event.
         storagePending = store.pendingEventCount();
         storageFault = store.writeFault();
+        if (storageFault.isEmpty()) {
+            String recovered = storageFailures.recovered();
+            if (recovered != null) Log.i("BydHudMapCapture", "persist " + recovered);
+        }
     }
 
     private static Bundle batch() throws Exception {
@@ -128,6 +134,7 @@ public final class LifecycleJournalTransport {
         data.putString("captureSession", captureSession);
         data.putString("lifecycleOwner", app.getPackageName());
         data.putString("lifecycleSessionId", store.sessionId());
+        data.putBoolean("journalAcceptsPending", true);
         data.putString("lifecycleEvents", batch.events.toString());
         data.putLong("lifecycleCursorSequence", batch.completeThrough);
         data.putLong("lifecycleChunkSequence", batch.partialSequence);
@@ -166,9 +173,15 @@ public final class LifecycleJournalTransport {
             }
             String collectorError = reply.getString("journalError", "");
             if (!collectorError.isEmpty()) throw new IllegalStateException("collector: " + collectorError);
-            if (unacknowledgedBatchCount > 0 && !reply.getBoolean("journalAccepted", false))
+            boolean pending = reply.getBoolean("journalPending", false);
+            if (pending && (!app.getPackageName().equals(reply.getString("journalOwner"))
+                    || !sent.getString("lifecycleSessionId").equals(reply.getString("journalSessionId"))))
+                throw new IllegalStateException("journal pending owner/session mismatch");
+            if (unacknowledgedBatchCount > 0 && !reply.getBoolean("journalAccepted", false) && !pending)
                 throw new IllegalStateException("collector returned no durable ACK for a nonempty batch; cause unavailable");
             fault = "";
+            String recovered = transferFailures.recovered();
+            if (recovered != null) Log.i("BydHudMapCapture", "transfer " + recovered);
         } catch (Exception error) {
             if (error instanceof InterruptedException) Thread.currentThread().interrupt();
             failure("transfer", error);
@@ -190,7 +203,8 @@ public final class LifecycleJournalTransport {
 
     private static void failure(String stage, Throwable error) {
         String message = stage + ": " + Log.getStackTraceString(error);
-        if (!message.equals(fault)) Log.e("BydHudMapCapture", stage, error);
+        String diagnostic = ("transfer".equals(stage) ? transferFailures : storageFailures).record(message);
+        if (diagnostic != null) Log.e("BydHudMapCapture", diagnostic);
         fault = message;
     }
 }

@@ -19,6 +19,13 @@ final class FailureDiagnostics {
 
     private FailureDiagnostics() { }
 
+    static String summary(Throwable failure, String stage) {
+        String value = (stage == null ? "" : stage + ": ")
+                + (failure == null ? "cause unknown" : failure.toString());
+        value = redact(value).replace('\n', ' ').replace('\r', ' ');
+        return value.length() > 256 ? value.substring(0, 253) + "..." : value;
+    }
+
     static String format(Throwable failure, String operation, String stage) {
         StringWriter text = new StringWriter();
         PrintWriter writer = new PrintWriter(text);

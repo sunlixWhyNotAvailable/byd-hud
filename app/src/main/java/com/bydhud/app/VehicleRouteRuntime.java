@@ -227,6 +227,20 @@ final class VehicleRouteRuntime {
     }
 
     private void refresh() {
+        try { refreshOnWorker(); }
+        catch (RuntimeException error) {
+            synchronized (lock) {
+                result = HudSpatialGeometry.Result.off();
+                resultOwner = inputOwner;
+                fallback = null;
+                resetResolver = true;
+            }
+            worker.removeCallbacks(expire);
+            AppEventLogger.event(context, FailureDiagnostics.format(error, "route-geometry", "refresh"));
+        }
+    }
+
+    private void refreshOnWorker() {
         String owner = NavCapturePrefs.getHudPackage(context);
         final long token;
         final String frameOwner;

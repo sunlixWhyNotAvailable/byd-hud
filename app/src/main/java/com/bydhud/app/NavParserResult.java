@@ -57,7 +57,7 @@ class NavParserResult {
 
     //normalizes log-only source labels so new parser diagnostics stay machine-greppable.
     private static String safeSource(String value) {
-        String clean = value == null ? "" : value.trim().toLowerCase();
+        String clean = value == null ? "" : value.trim().toLowerCase(java.util.Locale.ROOT);
         if ("accessibility".equals(clean)
                 || "cue".equals(clean)
                 || "fixed".equals(clean)

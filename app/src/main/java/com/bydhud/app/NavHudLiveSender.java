@@ -325,10 +325,17 @@ final class NavHudLiveSender {
                 } else if (state.optBoolean("mapLive")) {
                     startMapLive(context);
                 } else if (state.has("check")) {
-                    HudCheckState restored = HudCheckState.restore(state.getJSONObject("check"));
+                    JSONObject savedCheck = state.getJSONObject("check");
+                    HudCheckState restored = HudCheckState.restore(savedCheck);
+                    String savedMode = savedCheck.optString("mode", HudCheckState.Mode.BASIC.name());
+                    if (!restored.mode.name().equals(savedMode)) {
+                        log("runtime output restore unknown check mode=" + savedMode + "; stopped Basic selected");
+                    }
                     updateHudCheck(previous -> restored, "shell-session-recovery");
                 }
-            } catch (Exception error) { log("runtime output restore failed " + error.getClass().getSimpleName()); }
+            } catch (Exception error) {
+                log(FailureDiagnostics.format(error, "output-session", "restore"));
+            }
         });
     }
 
@@ -3985,6 +3992,14 @@ final class NavHudLiveSender {
                 && gmapsDirectStateProducerEpoch == producerEpoch
                 && gmapsDirectStateRouteGeneration == routeGeneration;
         boolean sameSession = gmapsDirectStateSessionGeneration == sessionGeneration;
+        if (!unchangedInactive) {
+            if (inactiveHeartbeatCount > 0L) {
+                log("gmaps route inactive_heartbeat_summary count=" + inactiveHeartbeatCount
+                        + " session=" + gmapsDirectStateSessionGeneration + " reason=state-change");
+            }
+            inactiveHeartbeatCount = 0L;
+            lastInactiveHeartbeatLogMs = SystemClock.elapsedRealtime();
+        }
         gmapsDirectStateSessionGeneration = sessionGeneration;
         gmapsDirectStateProducerEpoch = producerEpoch;
         gmapsDirectStateRouteGeneration = routeGeneration;
@@ -5517,12 +5532,14 @@ final class NavHudLiveSender {
         }
         cancelPendingTbtTeardownRetry();
         Thread worker = new Thread(() -> {
+            try {
             NavAppTaskScanner.TeardownEvidence first =
                     NavAppTaskScanner.confirmTeardown(context, normalized);
             SystemClock.sleep(500L);
             NavAppTaskScanner.TeardownEvidence second =
                     NavAppTaskScanner.confirmTeardown(context, normalized);
             handler.post(() -> {
+                try {
                 log("tbt teardown evidence package=" + normalized
                         + " first=" + first.reason
                         + " second=" + second.reason);
@@ -5538,10 +5555,26 @@ final class NavHudLiveSender {
                         first.positive(), second.positive())) {
                     scheduleTbtTeardownRetry(normalized, lifecycleToken);
                 }
+                } catch (RuntimeException error) {
+                    reportTbtTeardownFailure(normalized, lifecycleToken, error);
+                }
             });
+            } catch (RuntimeException error) {
+                reportTbtTeardownFailure(normalized, lifecycleToken, error);
+            }
         }, "BydHudTbtTeardown");
         worker.setDaemon(true);
-        worker.start();
+        try { worker.start(); }
+        catch (RuntimeException error) { reportTbtTeardownFailure(normalized, lifecycleToken, error); }
+    }
+
+    private void reportTbtTeardownFailure(String packageName, long lifecycleToken, RuntimeException error) {
+        log(FailureDiagnostics.format(error, packageName, "tbt-teardown"));
+        handler.post(() -> {
+            if (lifecycleToken == tbtLifecycleToken && !tbtPublisher.isRouteActive()) {
+                scheduleTbtTeardownRetry(packageName, lifecycleToken);
+            }
+        });
     }
 
     private long advanceTbtLifecycleToken() {

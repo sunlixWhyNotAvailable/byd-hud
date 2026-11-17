@@ -1025,9 +1025,10 @@ final class NavAppDisplayController {
             BooleanSupplier requestCurrent,
             long shutdownToken,
             NavAppDisplayState admittedState) {
+        DenzaTransferDiagnostics.Request diagnostic = null;
+        try {
         final int layoutCommand = DashboardLayoutPolicy.layoutCommand(
                 dashboardMode, formatMethod);
-        DenzaTransferDiagnostics.Request diagnostic = null;
         if (!HudPrefs.isUserShutdownActive(context) && !isShutdownReturnReason(reason)) {
             try {
                 DenzaTransferDiagnostics.CaptureTarget target =
@@ -1050,7 +1051,6 @@ final class NavAppDisplayController {
                 log(packageName, FailureDiagnostics.format(error, "denza-diagnostic", "start"));
             }
         }
-        try {
             if (!isShutdownReturnCurrent(shutdownToken)) return;
             if (packageName.isEmpty()) {
                 remember(new NavAppDisplayState(
@@ -1351,7 +1351,7 @@ final class NavAppDisplayController {
                                     ? "independent dashboard projection confirmed; surface handoff failed"
                                     : "independent dashboard projection confirmed",
                             layoutFailure)));
-        } catch (SecurityException e) {
+        } catch (RuntimeException e) {
             remember(new NavAppDisplayState(
                     packageName,
                     -1,

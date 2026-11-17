@@ -22,6 +22,9 @@ import java.util.Set;
 
 // Serializes every HUD producer through one SOME/IP owner.
 final class HudOutputCoordinator {
+    private final com.bydhud.mapcapture.RepeatedFailure transportFailures = new com.bydhud.mapcapture.RepeatedFailure();
+    private final com.bydhud.mapcapture.RepeatedFailure protocolFailures = new com.bydhud.mapcapture.RepeatedFailure();
+    private final com.bydhud.mapcapture.RepeatedFailure finalClearFailures = new com.bydhud.mapcapture.RepeatedFailure();
     enum Source {
         NONE,
         DIRECT,
@@ -2423,8 +2426,7 @@ final class HudOutputCoordinator {
                 }
                 serviceStarted = true;
             } catch (RemoteException | RuntimeException error) {
-                log("final clear start failed reason=" + reason
-                        + " error=" + safe(error.getMessage()));
+                logFailureEpisode(finalClearFailures.record(FailureDiagnostics.format(error, "final-clear", "start-service")));
                 worker.postDelayed(
                         () -> beginFinalStop(previous, reason, stopGeneration, frame,
                                 endDetectedAtMs),
@@ -2436,6 +2438,7 @@ final class HudOutputCoordinator {
                 "final " + previous + " frame=" + frame + " reason=" + reason,
                 previous, "final_clear");
         if (clearedAtMs >= 0L) {
+            logFailureEpisode(finalClearFailures.recovered());
             pendingFinalClearSucceeded = true;
             releaseFinalClearCompletionOnce();
         }
@@ -2787,7 +2790,7 @@ final class HudOutputCoordinator {
         worker.removeCallbacks(transportRecovery);
         worker.removeCallbacks(protocolRetry);
         client.unbind();
-        log(FailureDiagnostics.format(error, "hud-transport", reason));
+        logFailureEpisode(transportFailures.record(FailureDiagnostics.format(error, "hud-transport", reason)));
         if (manualMapLiveSession != 0L) {
             log("map_live transport_failure session=" + manualMapLiveSession
                     + " reason=" + safe(reason)
@@ -2811,7 +2814,7 @@ final class HudOutputCoordinator {
 
     private void handleProtocolException(String reason, RuntimeException error) {
         sendFailures++;
-        log(FailureDiagnostics.format(error, "hud-protocol", reason));
+        logFailureEpisode(protocolFailures.record(FailureDiagnostics.format(error, "hud-protocol", reason)));
         handleProtocolFailure(reason + " error=" + error.getClass().getSimpleName()
                 + ":" + safe(error.getMessage()));
     }
@@ -2841,10 +2844,14 @@ final class HudOutputCoordinator {
     }
 
     private void recordPayloadSuccess() {
+        logFailureEpisode(transportFailures.recovered());
+        logFailureEpisode(protocolFailures.recovered());
         protocolFailureCount = 0;
         protocolRetryScheduled = false;
         worker.removeCallbacks(protocolRetry);
     }
+
+    private void logFailureEpisode(String detail) { if (detail != null) log(detail); }
 
     static boolean isStartReadyResult(int result) {
         return result == RESULT_OK || result == RESULT_ALREADY_STARTED;

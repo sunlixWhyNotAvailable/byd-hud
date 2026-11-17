@@ -85,6 +85,9 @@ final class InstrumentProxyManager {
     private final ExecutorService shellControls = newShellCallExecutor("BydHudShellControl");
     private final ExecutorService shellBulk = newShellCallExecutor("BydHudShellBulk");
     private final Map<String, Future<?>> pendingShellCalls = new ConcurrentHashMap<>();
+    private final Object shellRecoveryLock = new Object();
+    private long shellRecoveryRevision;
+    private final CopyOnWriteArrayList<Runnable> shellRecoveryListeners = new CopyOnWriteArrayList<>();
     private ExecutorService calls;
     private long callEpoch;
     private long navigationOutputGeneration;
@@ -606,6 +609,45 @@ final class InstrumentProxyManager {
 
     void addUnavailableListener(UnavailableListener listener) {
         if (listener != null) unavailableListeners.addIfAbsent(listener);
+    }
+
+    long shellRecoveryRevision() {
+        synchronized (shellRecoveryLock) { return shellRecoveryRevision; }
+    }
+
+    void awaitShellRecovery(long observedRevision) throws InterruptedException {
+        synchronized (shellRecoveryLock) {
+            while (shellRecoveryRevision == observedRevision) shellRecoveryLock.wait();
+        }
+    }
+
+    void addShellRecoveryListener(Runnable listener) {
+        if (listener != null) shellRecoveryListeners.addIfAbsent(listener);
+    }
+
+    private void signalShellRecovery() {
+        synchronized (shellRecoveryLock) {
+            shellRecoveryRevision++;
+            shellRecoveryLock.notifyAll();
+        }
+        for (Runnable listener : shellRecoveryListeners) {
+            try { listener.run(); }
+            catch (RuntimeException error) {
+                log(FailureDiagnostics.format(error, "shell-recovery", "listener"));
+            }
+        }
+    }
+
+    private final class RetainedShellCall<T> extends FutureTask<T> {
+        private volatile boolean unconfirmed;
+        RetainedShellCall(Callable<T> call) { super(call); }
+        void markUnconfirmed() {
+            unconfirmed = true;
+            if (isDone()) signalShellRecovery();
+        }
+        @Override protected void done() {
+            if (unconfirmed) signalShellRecovery();
+        }
     }
 
     /** Invalidates queued status/guidance work and completes after prior calls drain. */
@@ -1332,6 +1374,7 @@ final class InstrumentProxyManager {
             }
         }
         long deadline = SystemClock.elapsedRealtime() + NaviautoLayout.TIMEOUT_MS;
+        long responseDeadline = deadline + NaviautoLayout.RESPONSE_TIMEOUT_MS - NaviautoLayout.TIMEOUT_MS;
         java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
         java.util.concurrent.atomic.AtomicReference<Result> reply = new java.util.concurrent.atomic.AtomicReference<>();
         java.util.concurrent.atomic.AtomicBoolean waiting = new java.util.concurrent.atomic.AtomicBoolean(true);
@@ -1345,10 +1388,10 @@ final class InstrumentProxyManager {
                         }
                         return remote.setNaviautoLayout(requestGeneration, operation, deadline);
                     });
-            long remaining = deadline - SystemClock.elapsedRealtime();
+            long remaining = responseDeadline - SystemClock.elapsedRealtime();
             if (remaining <= 0L || !done.await(remaining, TimeUnit.MILLISECONDS)) {
                 return Result.unavailable("naviauto layout outcome unconfirmed after "
-                        + NaviautoLayout.TIMEOUT_MS + "ms");
+                        + NaviautoLayout.RESPONSE_TIMEOUT_MS + "ms");
             }
             return reply.get();
         } finally { waiting.set(false); }
@@ -1401,7 +1444,8 @@ final class InstrumentProxyManager {
         worker.schedule(
                 () -> handleCallTimeout(operationId, currentGeneration,
                         currentBinder, epoch, operation),
-                CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                "naviauto_layout".equals(operation) ? NaviautoLayout.WATCHDOG_TIMEOUT_MS : CALL_TIMEOUT_MS,
+                TimeUnit.MILLISECONDS);
         Result result;
         try {
             result = Result.from(remoteCall.invoke(current, currentGeneration));
@@ -1956,6 +2000,7 @@ final class InstrumentProxyManager {
         worker.execute(() -> clearStartupDiagnostic(connectedIdentity));
         LogcatRecorder.recoverShellCapture(context);
         if (outputReady || clusterDebugReady) notifyReadyListeners();
+        signalShellRecovery();
     }
 
     Bundle registerWork(String id, String type, java.io.File artifact, JSONObject request,
@@ -2081,8 +2126,9 @@ final class InstrumentProxyManager {
             }
             if (state == State.READY && proxy != null && proxyBinder != null && proxyBinder.isBinderAlive())
                 return proxy;
-            throw new IOException("Trusted shell runtime unavailable: " + state.name().toLowerCase(java.util.Locale.ROOT)
-                    + " stage=" + startStage);
+            throw new ShellWorkNotDispatchedException(reason, "unknown",
+                    new IOException("Trusted shell runtime unavailable: " + state.name().toLowerCase(java.util.Locale.ROOT)
+                            + " stage=" + startStage));
         }
     }
 
@@ -2163,7 +2209,7 @@ final class InstrumentProxyManager {
             reused = future != null;
             if (future == null) {
                 pruneCompletedShellCalls(key);
-                FutureTask<T> candidate = new FutureTask<>(call);
+                FutureTask<T> candidate = new RetainedShellCall<>(call);
                 try {
                     executor.execute(candidate);
                     future = candidate;
@@ -2180,6 +2226,8 @@ final class InstrumentProxyManager {
             pendingShellCalls.remove(key, future);
             return result;
         } catch (TimeoutException error) {
+            if (future instanceof InstrumentProxyManager.RetainedShellCall)
+                ((RetainedShellCall<?>) future).markUnconfirmed();
             log("shell call timeout " + FailureDiagnostics.format(error, operation, "binder-wait")
                     + " id=" + operationId(id) + " outcome=unknown replay=false");
             // Keep the Future so a same-ID retry joins this exact Binder call instead of resending it.
@@ -2187,6 +2235,8 @@ final class InstrumentProxyManager {
                     "response wait exceeded " + timeoutMs + " ms; the Binder call was not cancelled",
                     true, error);
         } catch (InterruptedException error) {
+            if (future instanceof InstrumentProxyManager.RetainedShellCall)
+                ((RetainedShellCall<?>) future).markUnconfirmed();
             Thread.currentThread().interrupt();
             log("shell call interrupted " + FailureDiagnostics.format(error, operation, "binder-wait")
                     + " id=" + operationId(id) + " outcome=unknown replay=false");

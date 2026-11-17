@@ -41,6 +41,7 @@ final class ShellWorkClient {
             return ArchiveDocumentSave.isPendingLogSave(saved.optString("id"));
         if ("SAVE_RESULT".equals(phase)) return false;
         return !phase.isEmpty() && !"READY".equals(phase) && !"SENT".equals(phase)
+                && !"DELIVERY_UNCONFIRMED".equals(phase)
                 && !"FAILED".equals(phase) && !"CANCELLED".equals(phase);
     }
 
@@ -366,7 +367,7 @@ final class ShellWorkClient {
                     .put("result", jsonObject(result, "result_json"))
                     .put("signRequest", jsonObject(result, "sign_request_json"));
             String phase = value.getJSONObject("progress").optString("phase");
-            if (!phase.isEmpty()) expected.put("stage", phase);
+            if (!phase.isEmpty()) expected.put("progressPhase", phase);
             if (terminal(value.optString("state"))) {
                 expected.put("stage", value.optString("state"));
                 if ("SUCCEEDED".equals(value.optString("state")))
@@ -392,6 +393,17 @@ final class ShellWorkClient {
         boolean cleanupOnly = "shanghai".equals(expected.optString("type"))
                 && input != null && "cleanup".equals(input.optString("action"));
         String previousStage = expected.optString("stage");
+        if (terminal(previousStage) || "RUNNING".equals(previousStage)) return;
+        if (!"REGISTERED".equals(previousStage) && !previousStage.startsWith("LAUNCH_")
+                && !previousStage.startsWith("CANCEL_")) {
+            // Older versions overwrote dispatch state with progress; it cannot authorize a launch.
+            JSONObject observed = state(context, artifactJob);
+            if (!terminal(observed.optString("state")) && !"RUNNING".equals(observed.optString("state"))) {
+                recordLaunchFailure(context, expected,
+                        new IOException("Legacy dispatch stage is ambiguous: " + previousStage), "LAUNCH_UNKNOWN");
+            }
+            return;
+        }
         if ("LAUNCH_FAILED".equals(previousStage)) {
             JSONObject observed = state(context, artifactJob);
             String status = observed.optString("state");
@@ -453,6 +465,7 @@ final class ShellWorkClient {
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
             throw new IOException("Shell job cannot wait on UI thread");
         JSONObject expected = expected(context, artifact);
+        Reconciliation reconciliation = new Reconciliation(context, expected.optString("id"));
         if (!expected.optBoolean("registrationComplete", true)
                 || "REGISTERING".equals(expected.optString("stage"))
                 || "REGISTER_UNKNOWN".equals(expected.optString("stage"))
@@ -461,12 +474,14 @@ final class ShellWorkClient {
                 if (Thread.currentThread().isInterrupted())
                     throw new java.io.InterruptedIOException("Shell registration remains pending; artifacts retained");
                 try {
+                    reconciliation.beforeCall();
                     prepare(context, expected.getString("type"), expected.getString("id"),
                             expected.getJSONObject("input"));
+                    reconciliation.healthy();
                     break;
                 } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
                     if (!"register-work".equals(unknown.operation)) throw unknown;
-                    try { Thread.sleep(100); }
+                    try { reconciliation.retry(unknown); }
                     catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
                         unknown.addSuppressed(interrupted);
@@ -476,7 +491,7 @@ final class ShellWorkClient {
                                 unknown.retainedCall, unknown);
                     }
                 } catch (InstrumentProxyManager.ShellWorkNotDispatchedException busy) {
-                    try { Thread.sleep(100); }
+                    try { reconciliation.retry(busy); }
                     catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
                         java.io.InterruptedIOException failure = new java.io.InterruptedIOException(
@@ -494,38 +509,44 @@ final class ShellWorkClient {
         try {
             while (true) {
                 try {
+                    reconciliation.beforeCall();
                     launch(context, artifact);
+                    reconciliation.healthy();
                     break;
                 } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
                     if ("launch-work".equals(unknown.operation)) break;
                     if (!"work-state".equals(unknown.operation)
                             || Thread.currentThread().isInterrupted()) throw unknown;
-                    Thread.sleep(100);
+                    reconciliation.retry(unknown);
                 } catch (InstrumentProxyManager.ShellWorkNotDispatchedException busy) {
-                    Thread.sleep(100);
+                    reconciliation.retry(busy);
                 }
             }
             while (true) {
                 if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
                 JSONObject current;
-                try { current = state(context, artifact); }
+                try {
+                    reconciliation.beforeCall();
+                    current = state(context, artifact);
+                }
                 catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
                     if (!"work-state".equals(unknown.operation)
                             || Thread.currentThread().isInterrupted()) throw unknown;
-                    Thread.sleep(100);
+                    reconciliation.retry(unknown);
                     continue;
                 } catch (InstrumentProxyManager.ShellWorkNotDispatchedException busy) {
-                    Thread.sleep(100);
+                    reconciliation.retry(busy);
                     continue;
                 }
                 if ("UNCERTAIN".equals(current.optString("state"))) {
                     JSONObject result = current.optJSONObject("result");
                     String detail = result == null ? "unknown"
                             : result.optString("diagnostic", result.optString("error", "unknown"));
-                    throw new InstrumentProxyManager.ShellWorkOutcomeUnknownException(
+                    reconciliation.retry(new InstrumentProxyManager.ShellWorkOutcomeUnknownException(
                             "worker-result", expected.optString("id"),
                             "helper persisted UNCERTAIN state: " + detail, false,
-                            new IOException(detail));
+                            new IOException(detail)));
+                    continue;
                 }
                 JSONObject sign = current.optJSONObject("signRequest");
                 if (sign != null && !sign.optString("id").isEmpty()) serviceSigning(context, artifact, sign);
@@ -534,12 +555,13 @@ final class ShellWorkClient {
                 if (progress != null && !serialized.equals(lastProgress)) progress.accept(phase);
                 lastProgress = serialized;
                 String status = current.optString("state");
+                if (!"REGISTERED".equals(status)) reconciliation.healthy();
                 if ("SUCCEEDED".equals(status)) return current.getJSONObject("result");
                 if ("FAILED".equals(status) || "CANCELLED".equals(status)
                         || "INTERRUPTED".equals(status)) {
                     JSONObject result = current.optJSONObject("result");
-                    IOException failure = new IOException(result == null ? "Shell work " + status.toLowerCase()
-                            : result.optString("error", "Shell work " + status.toLowerCase()));
+                    IOException failure = new IOException(result == null ? "Shell work " + status.toLowerCase(java.util.Locale.ROOT)
+                            : result.optString("error", "Shell work " + status.toLowerCase(java.util.Locale.ROOT)));
                     if (result != null && !result.optString("diagnostic").isEmpty())
                         failure.addSuppressed(new IOException(result.optString("diagnostic")));
                     throw failure;
@@ -547,8 +569,21 @@ final class ShellWorkClient {
                 if (!registeredRetrySent && android.os.SystemClock.elapsedRealtime() - start > 15_000
                         && "REGISTERED".equals(status)) {
                     // A registered operation can be relaunched once. Started work is never replayed.
-                    launch(context, artifact, true);
-                    registeredRetrySent = true;
+                    try {
+                        reconciliation.beforeCall();
+                        launch(context, artifact, true);
+                        registeredRetrySent = true;
+                    } catch (InstrumentProxyManager.ShellWorkOutcomeUnknownException unknown) {
+                        // Reconcile the persisted launch stage; never resend an uncertain mutation.
+                        registeredRetrySent = "launch-work".equals(unknown.operation);
+                        reconciliation.retry(unknown);
+                    } catch (InstrumentProxyManager.ShellWorkNotDispatchedException busy) {
+                        reconciliation.retry(busy);
+                    }
+                } else if (registeredRetrySent && "REGISTERED".equals(status)) {
+                    reconciliation.retry(new InstrumentProxyManager.ShellWorkOutcomeUnknownException(
+                            "worker-start", expected.optString("id"),
+                            "registered worker has not reported starting; original launch retained", false, null));
                 }
                 Thread.sleep(100);
             }
@@ -593,6 +628,36 @@ final class ShellWorkClient {
                     "cancel-await", expected.optString("id"),
                     "cancellation was not confirmed within 10 seconds; artifacts were retained",
                     false, interrupted);
+        }
+    }
+
+    private static final class Reconciliation {
+        private static final long ACTIVE_WAIT_MS = 45_000L;
+        final Context context;
+        final String id;
+        final InstrumentProxyManager manager;
+        long unavailableSince = -1L;
+        long revision;
+        Reconciliation(Context context, String id) {
+            this.context = context;
+            this.id = id;
+            manager = InstrumentProxyManager.get(context);
+        }
+        void beforeCall() { revision = manager.shellRecoveryRevision(); }
+        void healthy() { unavailableSince = -1L; }
+        void retry(Exception failure) throws InterruptedException {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (unavailableSince < 0L) unavailableSince = now;
+            if (now - unavailableSince < ACTIVE_WAIT_MS) {
+                Thread.sleep(100L);
+                return;
+            }
+            AppEventLogger.event(context, "shell reconciliation suspended id=" + id + " "
+                    + FailureDiagnostics.format(failure, id, "await-reconnect"));
+            manager.awaitShellRecovery(revision);
+            unavailableSince = -1L;
+            AppEventLogger.event(context, "shell reconciliation resumed id=" + id + " replay=false");
         }
     }
 

@@ -320,6 +320,13 @@ public final class HudCheckState {
     }
 
     static HudCheckState restore(org.json.JSONObject state) {
+        Mode mode = Mode.BASIC;
+        boolean running = state.optBoolean("running");
+        try {
+            mode = Mode.valueOf(state.optString("mode", Mode.BASIC.name()));
+        } catch (IllegalArgumentException unknownMode) {
+            running = false;
+        }
         int extended = state.optInt("extended");
         // Older checkpoints include the removed segment/summary probes at indices 23 and 24.
         if (state.optInt("extendedCount", 54) == 54 && extended >= 23) {
@@ -343,8 +350,8 @@ public final class HudCheckState {
         } catch (IllegalArgumentException ignored) {
             // Keep older or unknown checkpoints on the ordinary Basic pipeline.
         }
-        return new HudCheckState(Mode.valueOf(state.optString("mode", "BASIC")),
-                state.optBoolean("running"), state.optBoolean("automatic", true),
+        return new HudCheckState(mode,
+                running, state.optBoolean("automatic", true),
                 state.optInt("maneuver"), state.optInt("lane"), state.optInt("distance"),
                 state.optInt("street"), state.optInt("light"), state.optBoolean("maneuverBitmap"),
                 state.optBoolean("laneBitmap"), state.optBoolean("transliterate"), extended,

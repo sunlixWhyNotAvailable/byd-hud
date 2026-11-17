@@ -360,8 +360,8 @@ final class LifecycleJournalSpool {
                     stored.partialChunk = chunk;
                 }
             });
-            boolean hasPending = recovery.maximumEventSequence > stored.complete;
-            if (hasPending && stored.session != null && !stored.session.isEmpty()) {
+            // Journal identity belongs to the durable spool, not the Android process.
+            if (stored.session != null && !stored.session.isEmpty()) {
                 sessionId = stored.session;
                 sequence = Math.max(recovery.maximumEventSequence, stored.sequence);
                 acknowledgedSequence = stored.complete;

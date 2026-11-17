@@ -73,8 +73,8 @@ final class BootCleanupGate {
             try {
                 runnable.run();
             } catch (RuntimeException error) {
-                AppEventLogger.event(appContext, "boot_cleanup consumer_failed type="
-                        + error.getClass().getSimpleName());
+                AppEventLogger.event(appContext,
+                        FailureDiagnostics.format(error, "boot-cleanup", "consumer"));
             }
         }, completion));
     }

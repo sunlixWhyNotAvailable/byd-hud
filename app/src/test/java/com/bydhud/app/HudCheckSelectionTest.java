@@ -10,6 +10,18 @@ import org.json.JSONObject;
 import org.junit.Test;
 
 public class HudCheckSelectionTest {
+    @Test public void unknownModeStopsOutputWithoutLosingOtherSelections() throws Exception {
+        HudCheckState original = new HudCheckState().selectMode(HudCheckState.Mode.EXTENDED)
+                .selectChannel(HudCheckState.Channel.INSTRUMENT).selectAddSomeIp(true)
+                .withManeuverBitmap(true).withLaneBitmap(true).toggleRun();
+        JSONObject saved = new JSONObject(original.checkpoint().toString());
+        saved.put("mode", "FUTURE_MODE");
+        HudCheckState restored = HudCheckState.restore(saved);
+        assertEquals(original.selectMode(HudCheckState.Mode.BASIC).stop(), restored);
+        assertFalse(restored.running);
+        assertEquals(restored, HudCheckState.restore(restored.checkpoint()));
+    }
+
     @Test public void stableReleaseSuppressesOnlyHiddenBetaChoicesAndRetainsThemOnSave() throws Exception {
         HudCheckState beta = new HudCheckState().withManeuverBitmap(true).withLaneBitmap(true)
                 .selectFormat(HudCheckState.Format.C)

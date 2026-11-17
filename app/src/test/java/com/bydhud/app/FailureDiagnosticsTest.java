@@ -8,6 +8,14 @@ import java.util.Arrays;
 import org.junit.Test;
 
 public final class FailureDiagnosticsTest {
+    @Test public void shortSummaryKeepsStageAndCauseWithoutExposingCredentialsOrStack() {
+        String summary = FailureDiagnostics.summary(new IOException("readback token=private\nfailed"), "permission");
+        assertTrue(summary.startsWith("permission: java.io.IOException:"));
+        assertTrue(summary.contains("token=[REDACTED]"));
+        assertTrue(!summary.contains("private"));
+        assertTrue(!summary.contains("\n"));
+        assertTrue(FailureDiagnostics.summary(new IOException(new String(new char[1024])), "readback").length() <= 256);
+    }
     @Test
     public void fullFormattingRetainsPrimaryCauseSuppressedAndContext() {
         IOException primary = new IOException("transport failed", new IllegalStateException("remote denied"));

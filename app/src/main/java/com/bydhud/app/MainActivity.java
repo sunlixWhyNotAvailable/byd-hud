@@ -80,6 +80,7 @@ public final class MainActivity extends ComponentActivity {
     private static final AtomicBoolean RUNTIME_STATUS_REFRESH_PENDING =
             new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
+    private static final AtomicBoolean PATCH_BOOTSTRAP_REQUESTED = new AtomicBoolean(false);
     private static final AtomicBoolean ASSET_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean ASSET_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
@@ -170,6 +171,7 @@ public final class MainActivity extends ComponentActivity {
                 maybeStartPendingAdbAuthorization();
             });
     private final Map<String, ActivityResultLauncher<Intent>> archiveDocumentLaunchers = new HashMap<>();
+    private boolean archivePickerPreparing;
     private boolean exitRequested;
     private Runnable pendingNavPermissionSelfCheckRunnable;
     private Runnable pendingAutoAdbStartRunnable;
@@ -1820,14 +1822,20 @@ public final class MainActivity extends ComponentActivity {
         requestStorageRefresh(context, false, reason + "-storage");
         requestRuntimeStatusRefresh(context, false, reason + "-status");
         requestRuntimeUiStateRefresh(context, false, reason + "-runtime");
-        requestPatchUiStateRefresh(context, false, reason + "-patch");
+        requestPatchBootstrap(context, reason);
     }
 
     //boot/runtime service bootstrap keeps mutable status local-only; app scans belong to UI open.
     static void requestBackgroundUiStateRefresh(Context context, String reason) {
         requestStorageRefresh(context, false, reason + "-storage");
         requestRuntimeStatusRefresh(context, false, reason + "-status");
-        requestPatchUiStateRefresh(context, false, reason + "-patch");
+        requestPatchBootstrap(context, reason);
+    }
+
+    private static void requestPatchBootstrap(Context context, String reason) {
+        if (PATCH_BOOTSTRAP_REQUESTED.compareAndSet(false, true)) {
+            requestPatchUiStateRefresh(context, false, reason + "-patch");
+        }
     }
 
     static void requestStorageRefreshAfterMutation(Context context, String reason) {
@@ -2310,6 +2318,23 @@ public final class MainActivity extends ComponentActivity {
 
     static boolean queueArchiveDocumentSave(String operationId, boolean configuration,
             String displayName) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            ArchiveDocumentSave.preparePicker(() -> {
+                String failure = "";
+                try {
+                    if (!queueArchiveDocumentSave(operationId, configuration, displayName))
+                        failure = "Unable to prepare destination picker";
+                } catch (RuntimeException error) {
+                    Log.e(TAG, "archive picker queue id=" + operationId, error);
+                    failure = "Unable to prepare destination picker";
+                }
+                if (!failure.isEmpty()) {
+                    if (configuration) VehicleConfigurationExport.saveAsFailed(operationId, failure);
+                    else StorageLogShareWorkflow.saveAsFailed(operationId, failure);
+                }
+            });
+            return true;
+        }
         boolean accepted = ArchiveDocumentSave.queuePicker(operationId, configuration, displayName);
         if (accepted) notifyArchiveDocumentPicker();
         return accepted;
@@ -2439,13 +2464,27 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void restoreArchiveDocumentLaunchers() {
-        for (ArchiveDocumentSave.PickerRequest orphan : ArchiveDocumentSave.orphanedPickers(this))
-            registerArchiveDocumentLauncher(orphan);
-        ArchiveDocumentSave.PickerRequest pending = ArchiveDocumentSave.pendingPicker(this);
-        if (pending != null) {
-            registerArchiveDocumentLauncher(pending);
-            ArchiveDocumentSave.abandonPriorProcessPicker(this, pending);
-        }
+        Context app = getApplicationContext();
+        ArchiveDocumentSave.preparePicker(() -> {
+            try {
+                List<ArchiveDocumentSave.PickerRequest> orphans = ArchiveDocumentSave.orphanedPickers(app);
+                ArchiveDocumentSave.PickerRequest pending = ArchiveDocumentSave.pendingPicker(app);
+                handler.post(() -> {
+                    if (destroyed) return;
+                    try {
+                        for (ArchiveDocumentSave.PickerRequest orphan : orphans) registerArchiveDocumentLauncher(orphan);
+                        if (pending != null) {
+                            registerArchiveDocumentLauncher(pending);
+                            ArchiveDocumentSave.preparePicker(() -> ArchiveDocumentSave.abandonPriorProcessPicker(app, pending));
+                        }
+                    } catch (RuntimeException error) {
+                        AppEventLogger.event(app, FailureDiagnostics.format(error, "archive_picker", "register-restored"));
+                    }
+                });
+            } catch (RuntimeException error) {
+                AppEventLogger.event(app, FailureDiagnostics.format(error, "archive_picker", "restore"));
+            }
+        });
     }
 
     private ActivityResultLauncher<Intent> registerArchiveDocumentLauncher(
@@ -2470,12 +2509,57 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void launchPendingArchiveDocumentPicker() {
-        if (!activityResumed || destroyed || exitRequested || RESUMED_ACTIVITY.get() != this) return;
-        ArchiveDocumentSave.PickerRequest pending = ArchiveDocumentSave.pendingPicker(this);
-        if (pending == null || !"QUEUED".equals(pending.phase)
-                || !ArchiveDocumentSave.processSession().equals(pending.processSession)) return;
-        ActivityResultLauncher<Intent> launcher = registerArchiveDocumentLauncher(pending);
-        if (!ArchiveDocumentSave.markPickerLaunched(this, pending)) return;
+        if (!activityResumed || destroyed || exitRequested || RESUMED_ACTIVITY.get() != this
+                || archivePickerPreparing) return;
+        archivePickerPreparing = true;
+        Context app = getApplicationContext();
+        ArchiveDocumentSave.preparePicker(() -> {
+            try {
+                ArchiveDocumentSave.PickerRequest pending = ArchiveDocumentSave.pendingPicker(app);
+                if (pending == null || !"QUEUED".equals(pending.phase)
+                        || !ArchiveDocumentSave.processSession().equals(pending.processSession)
+                        || !ArchiveDocumentSave.markPickerLaunched(app, pending)) {
+                    handler.post(() -> archivePickerPreparing = false);
+                    return;
+                }
+                handler.post(() -> {
+                    archivePickerPreparing = false;
+                    if (!activityResumed || destroyed || exitRequested || RESUMED_ACTIVITY.get() != this
+                            || !archivePickerOwned(pending)) {
+                        ArchiveDocumentSave.preparePicker(() -> {
+                            try {
+                                ArchiveDocumentSave.deferPickerLaunch(app, pending);
+                                if (archivePickerOwned(pending)) notifyArchiveDocumentPicker();
+                            }
+                            catch (RuntimeException error) {
+                                AppEventLogger.event(app, FailureDiagnostics.format(error, "archive_picker", "defer"));
+                            }
+                        });
+                        return;
+                    }
+                    launchPreparedArchiveDocumentPicker(pending);
+                });
+            } catch (RuntimeException error) {
+                AppEventLogger.event(app, FailureDiagnostics.format(error, "archive_picker", "prepare"));
+                handler.post(() -> archivePickerPreparing = false);
+            }
+        });
+    }
+
+    private static boolean archivePickerOwned(ArchiveDocumentSave.PickerRequest pending) {
+        if (pending.configuration) {
+            ConfigurationExportSnapshot state = VehicleConfigurationExport.INSTANCE.getSnapshot().getValue();
+            return state != null && pending.id.equals(state.getOperationId())
+                    && state.getPhase() == ConfigurationExportPhase.WAITING_FOR_DESTINATION;
+        }
+        for (StorageLogShareSnapshot state : StorageLogShareWorkflow.INSTANCE.getSnapshots().getValue()) {
+            if (pending.id.equals(state.getOperationId()))
+                return state.getPhase() == StorageLogSharePhase.WAITING_FOR_DESTINATION;
+        }
+        return false;
+    }
+
+    private void launchPreparedArchiveDocumentPicker(ArchiveDocumentSave.PickerRequest pending) {
         Intent create = new Intent(Intent.ACTION_CREATE_DOCUMENT)
                 .addCategory(Intent.CATEGORY_OPENABLE)
                 .setType("application/zip")
@@ -2484,50 +2568,71 @@ public final class MainActivity extends ComponentActivity {
                         | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                         | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try {
+            ActivityResultLauncher<Intent> launcher = registerArchiveDocumentLauncher(pending);
             launcher.launch(create);
         } catch (RuntimeException failure) {
-            ArchiveDocumentSave.clearPicker(this, pending);
-            failArchiveDocumentSave(pending, "Unable to open destination picker");
-            archiveDocumentLaunchers.remove(ArchiveDocumentSave.activityResultKey(pending));
-            launcher.unregister();
-            AppEventLogger.event(this, "archive_document_picker_launch_failed id=" + pending.id);
+            AppEventLogger.event(this, FailureDiagnostics.format(failure, "archive_picker", "launch id=" + pending.id));
+            ActivityResultLauncher<Intent> launcher = archiveDocumentLaunchers.remove(ArchiveDocumentSave.activityResultKey(pending));
+            if (launcher != null) {
+                try { launcher.unregister(); }
+                catch (RuntimeException cleanup) {
+                    AppEventLogger.event(this, FailureDiagnostics.format(cleanup, "archive_picker", "unregister-after-launch-failure"));
+                }
+            }
+            Context app = getApplicationContext();
+            ArchiveDocumentSave.preparePicker(() -> {
+                if (ArchiveDocumentSave.clearPicker(app, pending))
+                    failArchiveDocumentSave(pending, "Unable to open destination picker");
+            });
         }
     }
 
     private void onArchiveDocumentResult(ArchiveDocumentSave.PickerRequest pending, ActivityResult result) {
+        Context app = getApplicationContext();
+        ArchiveDocumentSave.preparePicker(() -> {
+            try { processArchiveDocumentResult(app, pending, result); }
+            catch (RuntimeException error) {
+                AppEventLogger.event(app, FailureDiagnostics.format(error, "archive_picker", "result id=" + pending.id));
+                if (ArchiveDocumentSave.isCurrentPicker(app, pending))
+                    failArchiveDocumentSave(pending, "Unable to save archive destination");
+            }
+        });
+    }
+
+    private static void processArchiveDocumentResult(Context app, ArchiveDocumentSave.PickerRequest pending, ActivityResult result) {
         Intent data = result.getData();
         Uri uri = data == null ? null : data.getData();
         int flags = data == null ? 0 : data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION
                 | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-        ArchiveDocumentSave.abandonPriorProcessPicker(this, pending);
-        if (!ArchiveDocumentSave.isCurrentPicker(this, pending)) {
+        ArchiveDocumentSave.abandonPriorProcessPicker(app, pending);
+        if (!ArchiveDocumentSave.isCurrentPicker(app, pending)) {
             if (result.getResultCode() == RESULT_OK && uri != null
                     && ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
-                ArchiveDocumentSave.cleanupOrphanedCreatedDocument(this, pending, uri, flags);
-            } else ArchiveDocumentSave.clearOrphanedPicker(this, pending);
+                ArchiveDocumentSave.cleanupOrphanedCreatedDocument(app, pending, uri, flags);
+            } else ArchiveDocumentSave.clearOrphanedPicker(app, pending);
             return;
         }
         if (result.getResultCode() != RESULT_OK || uri == null) {
-            ArchiveDocumentSave.clearPicker(this, pending);
+            ArchiveDocumentSave.clearPicker(app, pending);
             cancelArchiveDocumentSave(pending);
             return;
         }
         if (!ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
-            ArchiveDocumentSave.clearPicker(this, pending);
+            ArchiveDocumentSave.clearPicker(app, pending);
             failArchiveDocumentSave(pending, "Destination provider returned an unsupported document");
             return;
         }
-        if (!ArchiveDocumentSave.recordPickerResult(this, pending, uri, flags)
-                || !ArchiveDocumentSave.persistPickerPermission(this, pending, uri, flags)) {
-            ArchiveDocumentSave.cleanupCreatedDocument(this, pending, uri, 0, true);
+        if (!ArchiveDocumentSave.recordPickerResult(app, pending, uri, flags)
+                || !ArchiveDocumentSave.persistPickerPermission(app, pending, uri, flags)) {
+            ArchiveDocumentSave.cleanupCreatedDocument(app, pending, uri, 0, true);
             return;
         }
         boolean accepted = pending.configuration
                 ? VehicleConfigurationExport.saveAsDestination(pending.id, uri)
                 : StorageLogShareWorkflow.saveAsDestination(pending.id, uri);
         if (!accepted) {
-            ArchiveDocumentSave.PickerRequest saved = ArchiveDocumentSave.pendingPicker(this);
-            ArchiveDocumentSave.cleanupCreatedDocument(this, pending, uri,
+            ArchiveDocumentSave.PickerRequest saved = ArchiveDocumentSave.pendingPicker(app);
+            ArchiveDocumentSave.cleanupCreatedDocument(app, pending, uri,
                     saved == null ? 0 : saved.persistedFlags, true);
         }
     }

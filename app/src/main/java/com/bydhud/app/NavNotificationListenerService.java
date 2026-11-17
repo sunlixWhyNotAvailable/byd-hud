@@ -250,7 +250,10 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 sbn = entry.getValue();
                 pendingPosted.remove(entry.getKey());
             }
-            processPostedNotification(sbn, "posted");
+            try { processPostedNotification(sbn, "posted"); }
+            catch (RuntimeException error) {
+                AppEventLogger.event(this, FailureDiagnostics.format(error, "notification", "posted"));
+            }
             processed++;
         }
         Handler handler = notificationHandler;

@@ -137,6 +137,25 @@ final class ArchiveDocumentSave {
 
     static String processSession() { return PROCESS_SESSION; }
 
+    static void preparePicker(Runnable action) { WORKER.execute(action); }
+
+    static void deferPickerLaunch(Context context, PickerRequest expected) {
+        Context app = appContext(context);
+        synchronized (LOCK) {
+            SharedPreferences prefs = preferences(app);
+            try {
+                JSONObject request = new JSONObject(prefs.getString(KEY_PICKER, ""));
+                if (!sameAttempt(new PickerRequest(request), expected)
+                        || !PROCESS_SESSION.equals(request.optString("session"))
+                        || !"LAUNCHED".equals(request.optString("phase"))) return;
+                if (!prefs.edit().putString(KEY_PICKER, request.put("phase", "QUEUED").toString()).commit())
+                    throw new IllegalStateException("Unable to defer unlaunched archive picker");
+            } catch (JSONException malformed) {
+                throw new IllegalStateException("Unable to read archive picker", malformed);
+            }
+        }
+    }
+
     static boolean queuePicker(String id, boolean configuration, String displayName) {
         return queuePicker(appContext, id, configuration, displayName);
     }

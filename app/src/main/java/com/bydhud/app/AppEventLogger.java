@@ -97,17 +97,23 @@ final class AppEventLogger {
     static boolean writeBatch(Context context, String targetDay, List<String> lines,
             boolean requestRetention, boolean durable) {
         if (context == null || targetDay == null || lines == null || lines.isEmpty()) return false;
-        synchronized (WRITE_LOCK) {
-            int index = 0;
-            boolean allWritten = true;
-            boolean anyWritten = false;
-            while (index < lines.size()) {
-                final int start = index;
-                BatchAppend append = NavigationLogStorage.withReadLock(() -> {
+        int index = 0;
+        boolean allWritten = true;
+        boolean anyWritten = false;
+        while (index < lines.size()) {
+            final int start = index;
+            BatchAppend append = NavigationLogStorage.withReadLock(() -> {
+                File destination;
+                try { destination = file(context, targetDay, EVENTS_FILE); }
+                catch (RuntimeException error) {
+                    NavigationLogStorage.invalidatePublicRootCache();
+                    WazeCaptureDebugWriter.recordWriteFailure("events target: " + Log.getStackTraceString(error));
+                    Log.e(TAG, "event target resolution failed", error);
+                    return new BatchAppend(null, start + 1, false);
+                }
+                synchronized (WRITE_LOCK) {
                     int next = start;
-                    File destination = null;
                     try {
-                        destination = file(context, targetDay, EVENTS_FILE);
                         long projectedLength = destination.isFile() ? destination.length() : 0L;
                         List<String> chunk = new ArrayList<>();
                         while (next < lines.size()) {
@@ -119,30 +125,30 @@ final class AppEventLogger {
                         JournalTextBatch.append(destination, chunk, durable);
                         return new BatchAppend(destination, next, true);
                     } catch (IOException | RuntimeException error) {
-                        WazeCaptureDebugWriter.recordWriteFailure("events append: " + error);
-                        Log.e(TAG, "write failed: "
-                                + (destination == null ? EVENTS_FILE : destination.getAbsolutePath()), error);
+                        NavigationLogStorage.invalidatePublicRootCache();
+                        WazeCaptureDebugWriter.recordWriteFailure("events append: " + Log.getStackTraceString(error));
+                        Log.e(TAG, "write failed: " + destination.getAbsolutePath(), error);
                         return new BatchAppend(destination, Math.max(start + 1, next), false);
                     }
-                });
-                if (!append.written) {
-                    allWritten = false;
-                } else {
-                    anyWritten = true;
-                    WazeCaptureDebugWriter.recordWriteSuccess();
                 }
-                index = append.nextIndex;
-                if (append.written && append.file != null
-                        && append.file.length() > MAX_FILE_BYTES
-                        && !NavigationLogStorage.holdsTopologyRead()) {
-                    NavCaptureStore.rotate(append.file);
-                }
+            });
+            if (!append.written) {
+                allWritten = false;
+            } else {
+                anyWritten = true;
+                WazeCaptureDebugWriter.recordWriteSuccess();
             }
-            if (requestRetention && anyWritten) {
-                NavigationLogStorage.enforceNavCaptureRetention(context);
+            index = append.nextIndex;
+            if (append.written && append.file != null
+                    && append.file.length() > MAX_FILE_BYTES
+                    && !NavigationLogStorage.holdsTopologyRead()) {
+                NavCaptureStore.rotate(append.file);
             }
-            return allWritten;
         }
+        if (requestRetention && anyWritten) {
+            NavigationLogStorage.enforceNavCaptureRetention(context);
+        }
+        return allWritten;
     }
 
     private static final class BatchAppend {

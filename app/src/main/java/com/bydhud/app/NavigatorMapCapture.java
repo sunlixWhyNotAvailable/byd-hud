@@ -30,6 +30,9 @@ public final class NavigatorMapCapture {
     static final String MAPS_PACKAGE = GMapsDirectChannel.PACKAGE_NAME;
 
     private static final Object LOCK = new Object();
+    private static final com.bydhud.mapcapture.RepeatedFailure bitmapFailures = new com.bydhud.mapcapture.RepeatedFailure();
+    private static final com.bydhud.mapcapture.RepeatedFailure processingFailures = new com.bydhud.mapcapture.RepeatedFailure();
+    private static final com.bydhud.mapcapture.RepeatedFailure artifactFailures = new com.bydhud.mapcapture.RepeatedFailure();
     private static final long POST_STOP_JOURNAL_MS = 10000L;
     private static final long MAX_BITMAP_BYTES = 1920L * 1920L * 4L;
     private static final int MAX_BITMAP_SIDE = 1920;
@@ -435,12 +438,19 @@ public final class NavigatorMapCapture {
         }
         String producerSession = string(data, "lifecycleSessionId", "");
         try {
-            NavigatorMapLifecycleJournal.Result saved = NavigatorMapLifecycleJournal.accept(app,
+            boolean acceptsPending = data.getBoolean("journalAcceptsPending", false);
+            NavigatorMapLifecycleJournal.Result saved = NavigatorMapLifecycleJournal.collect(app,
                     callerPackage, producerSession, new JSONArray(string(data, "lifecycleEvents", "[]")),
                     longValue(data, "lifecycleCursorSequence", 0L),
                     longValue(data, "lifecycleChunkSequence", 0L), integer(data, "lifecycleChunkIndex", 0),
-                    (owner, producer, fragments) -> storeJournalBatch(app, owner, producer, frameSession, fragments));
+                    (owner, producer, fragments) -> storeJournalBatch(app, owner, producer, frameSession, fragments),
+                    acceptsPending ? 0L : NavigatorMapLifecycleJournal.LEGACY_WAIT_MS);
             if (!saved.error.isEmpty()) answer.putString("journalError", saved.error);
+            if (acceptsPending && saved.pending) {
+                answer.putBoolean("journalPending", true);
+                answer.putString("journalOwner", callerPackage);
+                answer.putString("journalSessionId", producerSession);
+            }
             if (saved.accepted) {
                 answer.putBoolean("journalAccepted", true);
                 answer.putString("journalOwner", callerPackage);
@@ -740,7 +750,17 @@ public final class NavigatorMapCapture {
 
         String status = string(data, "status", "missing_status");
         long copyStarted = SystemClock.elapsedRealtimeNanos();
-        Bitmap bitmap = bitmap(data);
+        Bitmap bitmap;
+        try {
+            bitmap = bitmap(data);
+            logFailureEpisode(app, bitmapFailures.recovered());
+        } catch (android.system.ErrnoException | RuntimeException | OutOfMemoryError error) {
+            logFailureEpisode(app, bitmapFailures.record(FailureDiagnostics.format(error, "map-bitmap", callerPackage)));
+            finishProcessing(resultSession, id);
+            logResultError(app, callerPackage, resultSession, id, status, "bitmap_decode_failed", data);
+            answer.putString("error", "bitmap_decode_failed");
+            return answer;
+        }
         data.putLong("receiverCopyNs", SystemClock.elapsedRealtimeNanos() - copyStarted);
         String invalidReason = validateBitmap(bitmap, status);
         answer.putBoolean("accepted", true);
@@ -960,8 +980,10 @@ public final class NavigatorMapCapture {
             logFrame(app, callerPackage, resultSession, id, status,
                     update == NavigatorMapSessionState.FrameUpdate.SAME ? "same_crop" : "changed",
                     bitmap, receivedAt, data, inputHash, png, frameSource, selection);
+            logFailureEpisode(app, processingFailures.recovered());
             runCallback(notify, app);
-        } catch (RuntimeException | NoSuchAlgorithmException error) {
+        } catch (RuntimeException | NoSuchAlgorithmException | OutOfMemoryError error) {
+            logFailureEpisode(app, processingFailures.record(FailureDiagnostics.format(error, "map-process", callerPackage)));
             logResultError(app, callerPackage, resultSession, id, status,
                     "processing_" + error.getClass().getSimpleName(), data);
         } finally {
@@ -1170,7 +1192,7 @@ public final class NavigatorMapCapture {
                 + " profileRevision=" + selection.catalogRevision
                 + " profileEpoch=" + selection.epoch
                 + " revision=" + revision
-                + " result=" + update.name().toLowerCase());
+                + " result=" + update.name().toLowerCase(java.util.Locale.ROOT));
         if (update != NavigatorMapSessionState.FrameUpdate.REJECTED) {
             saveFrameArtifacts(app, expectedOwner, expectedSession, sequence,
                     png, source, selection);
@@ -1357,8 +1379,7 @@ public final class NavigatorMapCapture {
         return false;
     }
 
-    private static Bitmap bitmap(Bundle data) {
-        try {
+    private static Bitmap bitmap(Bundle data) throws android.system.ErrnoException {
             data.setClassLoader(Bitmap.class.getClassLoader());
             SharedMemory shared = data.getParcelable("sourceMemory");
             if (shared != null) {
@@ -1367,7 +1388,7 @@ public final class NavigatorMapCapture {
                     int width = data.getInt("bitmapWidth"), height = data.getInt("bitmapHeight");
                     long bytes = (long) width * height * 4;
                     if (width < 1 || height < 1 || width > MAX_BITMAP_SIDE || height > MAX_BITMAP_SIDE
-                            || bytes != shared.getSize()) return null;
+                            || bytes != shared.getSize()) throw new IllegalArgumentException("Invalid shared bitmap dimensions or size");
                     source = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
                     ByteBuffer pixels = shared.mapReadOnly();
                     try { source.copyPixelsFromBuffer(pixels); }
@@ -1375,17 +1396,16 @@ public final class NavigatorMapCapture {
                     Bitmap result = source;
                     source = null;
                     return result;
-                } catch (android.system.ErrnoException failed) {
-                    return null;
                 } finally {
                     recycle(source);
                 }
             }
             Object value = data.getParcelable("bitmap");
             return value instanceof Bitmap ? (Bitmap) value : null;
-        } catch (RuntimeException | OutOfMemoryError ignored) {
-            return null;
-        }
+    }
+
+    private static void logFailureEpisode(Context app, String detail) {
+        if (detail != null) log(app, detail);
     }
 
     private static String validateBitmap(Bitmap bitmap, String status) {
@@ -1531,6 +1551,7 @@ public final class NavigatorMapCapture {
                                 + " result=" + (cropName.isEmpty() ? "write_failed" : "saved"));
                     });
                 } catch (RuntimeException | OutOfMemoryError error) {
+                    logFailureEpisode(app, artifactFailures.record(FailureDiagnostics.format(error, "map-artifact", "write")));
                     WazeCaptureDebugWriter.recordMapArtifactFailure("map artifact write: " + error);
                     log(app, "navigator_map_capture artifacts_error id=" + id
                             + " reason=" + error.getClass().getSimpleName());
@@ -1541,6 +1562,7 @@ public final class NavigatorMapCapture {
             if (queued) return;
             log(app, "navigator_map_capture artifacts_dropped id=" + id + " reason=writer_queue_full");
         } catch (RuntimeException | OutOfMemoryError error) {
+            logFailureEpisode(app, artifactFailures.record(FailureDiagnostics.format(error, "map-artifact", "queue")));
             WazeCaptureDebugWriter.recordMapArtifactFailure("map artifact queue: " + error);
             log(app, "navigator_map_capture artifacts_error id=" + id
                     + " reason=" + error.getClass().getSimpleName());
