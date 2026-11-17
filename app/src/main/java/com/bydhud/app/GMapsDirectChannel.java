@@ -5,6 +5,8 @@ import android.content.ComponentName;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageInfo;
 import android.graphics.BitmapFactory;
 import android.os.Bundle;
 import android.os.Handler;
@@ -42,6 +44,7 @@ final class GMapsDirectChannel {
     private static final String EXTRA_IDENTITY = "com.bydhud.gmapsbridge.IDENTITY";
     private static final String EXTRA_CHANNEL_ID = "com.bydhud.gmapsbridge.CHANNEL_ID";
     private static final String EXTRA_DIAGNOSTICS = "com.bydhud.gmapsbridge.DIAGNOSTICS";
+    private static final String ACTION_READY = "com.bydhud.gmapsbridge.READY";
     private static final int PROTOCOL_VERSION = 3;
     private static final int MESSAGE_HELLO = 1;
     private static final int MESSAGE_START = 2;
@@ -55,11 +58,11 @@ final class GMapsDirectChannel {
     private static final int CAP_HEARTBEAT = 1 << 1;
     private static final int CAP_BITMAP_GENERATION = 1 << 2;
     private static final int CAP_ROUTE_GENERATION = 1 << 3;
+    private static final int CAP_READY_EVENTS = 1 << 4;
     private static final int MAX_FRAME_BYTES = 512 * 1024;
     private static final int MAX_BITMAP_DIMENSION = 256;
     static final int MAX_MANEUVER_BITMAP_CACHE = 64;
     static final int MAX_ROUTE_PAYLOAD_HISTORY = 128;
-    private static final long REGISTER_RETRY_MS = 5000L;
     private static final long PRODUCER_LEASE_MS = 5000L;
     private static final long LEASE_CHECK_MS = 2000L;
 
@@ -74,6 +77,19 @@ final class GMapsDirectChannel {
             new RoutePayloadResurrectionFence();
     private final Runnable registrationRetry = this::retryRegistration;
     private final Runnable leaseCheck = this::checkProducerLease;
+    private final GMapsRegistrationSchedule registrationSchedule = new GMapsRegistrationSchedule();
+    private final BroadcastReceiver readyReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context ignored, Intent intent) {
+            handleReady(intent);
+        }
+    };
+    private boolean readyReceiverRegistered;
+    private boolean readyEvents;
+    private boolean registrationPending;
+    private long lastReadyEpoch = -1L;
+    private long lastReadySequence = -1L;
+    private String producerInstall = "";
+    private final java.util.Set<String> capturedIdentityFailures = new java.util.HashSet<>();
 
     private volatile boolean running;
     private boolean connected;
@@ -157,7 +173,12 @@ final class GMapsDirectChannel {
             navigating = false;
             terminalLatched = false;
             resetSession();
-            registerClient("start:" + safe(reason));
+            producerInstall = producerInstall();
+            readyEvents = !producerInstall.isEmpty() && producerInstall.equals(
+                    context.getSharedPreferences("gmaps_direct", Context.MODE_PRIVATE)
+                            .getString("ready_events_install", ""));
+            registerReadyReceiver();
+            beginRegistration("start:" + safe(reason));
             handler.removeCallbacks(leaseCheck);
             handler.postDelayed(leaseCheck, LEASE_CHECK_MS);
             listener.onChannelStarted(OWNER_PACKAGE, sessionGeneration, safe(reason));
@@ -168,7 +189,7 @@ final class GMapsDirectChannel {
         handler.post(() -> {
             if (!running) return;
             connected = false;
-            registerClient("retry:" + safe(reason));
+            beginRegistration("retry:" + safe(reason));
         });
     }
 
@@ -185,7 +206,12 @@ final class GMapsDirectChannel {
             navigating = false;
             terminalLatched = false;
             handler.removeCallbacks(registrationRetry);
+            registrationPending = false;
             handler.removeCallbacks(leaseCheck);
+            if (readyReceiverRegistered) {
+                context.unregisterReceiver(readyReceiver);
+                readyReceiverRegistered = false;
+            }
             resetSession();
             listener.onLog("stopped reason=" + safe(reason));
         });
@@ -317,7 +343,8 @@ final class GMapsDirectChannel {
             listener.onLog("identity_reply channelId=" + channelId + " "
                     + GMapsIdentityDiagnostics.replySender(context, message.sendingUid));
             logRegistrationIdentity("reply_" + stage);
-            if ("rejected".equals(stage)) captureIdentitySystemEvidence("rejected");
+            if ("rejected".equals(stage)) captureIdentitySystemEvidence(
+                    "rejected:" + diagnosticText(data.getString("detail"), 1024));
             return true;
         }
         long bridgeElapsedMs = data == null
@@ -419,10 +446,13 @@ final class GMapsDirectChannel {
                 }
                 int capabilities = data.getInt("capabilities", 0);
                 heartbeatCapable = (capabilities & CAP_HEARTBEAT) != 0;
+                rememberReadyCapability((capabilities & CAP_READY_EVENTS) != 0);
                 generationAwareProducer = (capabilities & CAP_BITMAP_GENERATION) != 0;
                 routeGenerationCapable = (capabilities & CAP_ROUTE_GENERATION) != 0;
                 lastHeartbeatElapsedMs = SystemClock.elapsedRealtime();
                 handler.removeCallbacks(registrationRetry);
+                registrationPending = false;
+                synchronized (identitySystemCaptureLock) { capturedIdentityFailures.clear(); }
                 String helloReason = producerEpochChanged
                         ? "hello-producer-replaced" : (staleHelloRoute
                         ? "hello-stale-route" : "hello");
@@ -1168,20 +1198,114 @@ final class GMapsDirectChannel {
         routePayloadFence.reset();
     }
 
+    private void registerReadyReceiver() {
+        if (readyReceiverRegistered) return;
+        try {
+            IntentFilter filter = new IntentFilter(ACTION_READY);
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(readyReceiver, filter, null, handler, Context.RECEIVER_EXPORTED);
+            } else {
+                context.registerReceiver(readyReceiver, filter, null, handler);
+            }
+            readyReceiverRegistered = true;
+        } catch (RuntimeException error) {
+            listener.onLog("ready receiver failed error=" + GMapsIdentityDiagnostics.error(error));
+        }
+    }
+
+    private String producerInstall() {
+        try {
+            PackageInfo info = context.getPackageManager().getPackageInfo(PACKAGE_NAME, 0);
+            return info.applicationInfo.uid + ":" + info.versionCode + ":" + info.lastUpdateTime;
+        } catch (Exception error) {
+            listener.onLog("ready capability lookup failed error=" + GMapsIdentityDiagnostics.error(error));
+            return "";
+        }
+    }
+
+    private void rememberReadyCapability(boolean supported) {
+        readyEvents = supported;
+        if (producerInstall.isEmpty()) return;
+        context.getSharedPreferences("gmaps_direct", Context.MODE_PRIVATE).edit()
+                .putString("ready_events_install", supported ? producerInstall : "").apply();
+    }
+
+    private void handleReady(Intent intent) {
+        if (!running || intent == null || !ACTION_READY.equals(intent.getAction())) return;
+        try {
+            PendingIntent identity = intent.getParcelableExtra(EXTRA_IDENTITY);
+            int uid = context.getPackageManager().getApplicationInfo(PACKAGE_NAME, 0).uid;
+            String creatorPackage = identity == null ? "missing" : identity.getCreatorPackage();
+            int creatorUid = identity == null ? -1 : identity.getCreatorUid();
+            int protocol = intent.getIntExtra(EXTRA_PROTOCOL, -1);
+            if (!PACKAGE_NAME.equals(creatorPackage) || uid != creatorUid || protocol != PROTOCOL_VERSION) {
+                listener.onLog("ready ignored reason=identity_or_protocol protocol=" + protocol
+                        + " creatorPackage=" + creatorPackage + " creatorUid=" + creatorUid + " expectedUid=" + uid);
+                return;
+            }
+            long epoch = intent.getLongExtra("producerEpoch", -1L);
+            long sequence = intent.getLongExtra("readySequence", -1L);
+            if (epoch <= 0L || sequence <= 0L || epoch < lastReadyEpoch
+                    || epoch < producerEpoch || (epoch == lastReadyEpoch && sequence <= lastReadySequence)) return;
+            boolean newProducer = epoch != producerEpoch && epoch != lastReadyEpoch;
+            lastReadyEpoch = epoch;
+            lastReadySequence = sequence;
+            rememberReadyCapability(true);
+            // Readiness never changes route ownership or supplies navigation data.
+            boolean lostClient = safe(intent.getStringExtra("reason")).startsWith("client_lost:");
+            if (connected && !newProducer && !lostClient) return;
+            if (!connected && registrationPending && registrationSchedule.attempts() < 3) return;
+            listener.onLog("ready received epoch=" + epoch + " reason="
+                    + diagnosticText(intent.getStringExtra("reason"), 80));
+            connected = false;
+            beginRegistration("bridge-ready");
+        } catch (RuntimeException | android.content.pm.PackageManager.NameNotFoundException error) {
+            listener.onLog("ready ignored error=" + GMapsIdentityDiagnostics.error(error));
+        }
+    }
+
+    private void beginRegistration(String reason) {
+        handler.removeCallbacks(registrationRetry);
+        if (!identityChannelId.isEmpty()) {
+            listener.onLog("identity_request_end channelId=" + identityChannelId
+                    + " outcome=" + registrationOutcome + " helloReceived=" + registrationHelloReceived);
+        }
+        channelId = "byd_hud_" + sessionGeneration + "_"
+                + (++registrationNonce) + "_" + SystemClock.elapsedRealtime();
+        identityChannelId = channelId;
+        registrationOutcome = "creating";
+        registrationHelloReceived = false;
+        registrationIdentity = null;
+        registrationSchedule.begin(SystemClock.elapsedRealtime());
+        registerClient(reason);
+    }
+
     private void registerClient(String reason) {
         handler.removeCallbacks(registrationRetry);
         boolean current = sendRegistration(ACTION_REGISTER, true, PROTOCOL_VERSION);
         if (current) {
-            listener.onLog("registration sent reason=" + reason);
+            listener.onLog("registration sent reason=" + reason
+                    + (registrationSchedule.attempts() < 3
+                    ? " attempt=" + (registrationSchedule.attempts() + 1) : " legacy=true")
+                    + " channelId=" + channelId);
         } else {
             listener.onHandshakeUnavailable(
                     OWNER_PACKAGE, sessionGeneration, "registration-failed");
         }
-        if (running && !connected) handler.postDelayed(registrationRetry, REGISTER_RETRY_MS);
+        long delay = registrationSchedule.afterAttempt(SystemClock.elapsedRealtime(),
+                readyEvents && readyReceiverRegistered);
+        registrationPending = running && !connected && delay >= 0L;
+        if (registrationPending) handler.postDelayed(registrationRetry, delay);
+        else if (running && !connected) listener.onLog("registration waiting_for_ready channelId=" + channelId);
     }
 
     private void retryRegistration() {
-        if (running && !connected) registerClient("periodic");
+        registrationPending = false;
+        if (!running || connected) return;
+        if (!registrationHelloReceived && !"rejected".equals(registrationOutcome)) {
+            captureIdentitySystemEvidence("missing_hello_or_registration_result");
+        }
+        registerClient(registrationSchedule.attempts() < 3 ? "bounded-retry" : "legacy-discovery");
     }
 
     private void checkProducerLease() {
@@ -1192,7 +1316,7 @@ final class GMapsDirectChannel {
             connected = false;
             listener.onLog("producer lease expired elapsedMs="
                     + (now - lastHeartbeatElapsedMs));
-            registerClient("producer-lease-expired");
+            beginRegistration("producer-lease-expired");
         }
         handler.postDelayed(leaseCheck, LEASE_CHECK_MS);
     }
@@ -1202,23 +1326,6 @@ final class GMapsDirectChannel {
         boolean sent = false;
         String stage = "prepare";
         try {
-            if (includeClient) {
-                if (!identityChannelId.isEmpty()) {
-                    listener.onLog("identity_request_end channelId=" + identityChannelId
-                            + " outcome=" + registrationOutcome + " helloReceived=" + registrationHelloReceived);
-                    logRegistrationIdentity("before_replace");
-                    if (!registrationHelloReceived
-                            && !"rejected".equals(registrationOutcome)) {
-                        captureIdentitySystemEvidence("missing_hello_or_registration_result");
-                    }
-                }
-                channelId = "byd_hud_" + sessionGeneration + "_"
-                        + (++registrationNonce) + "_" + SystemClock.elapsedRealtime();
-                identityChannelId = channelId;
-                registrationOutcome = "creating";
-                registrationHelloReceived = false;
-                registrationIdentity = null;
-            }
             if (!identityEnvironmentLogged) {
                 listener.onLog("identity_environment " + GMapsIdentityDiagnostics.environment(context));
                 identityEnvironmentLogged = true;
@@ -1229,7 +1336,7 @@ final class GMapsDirectChannel {
             stage = "create_identity";
             PendingIntent token = identity();
             if (includeClient) registrationIdentity = token;
-            listener.onLog("identity_snapshot channelId=" + channelId + " stage=before_send"
+            if (registrationSchedule.attempts() == 0) listener.onLog("identity_snapshot channelId=" + channelId + " stage=before_send"
                     + " action=" + action + " requestCode=" + GMapsIdentityDiagnostics.REQUEST
                     + " flags=" + GMapsIdentityDiagnostics.FLAGS + " "
                     + GMapsIdentityDiagnostics.snapshot(context, token, true));
@@ -1253,13 +1360,13 @@ final class GMapsDirectChannel {
             }, handler, 0, null, null);
             sent = true;
             if (includeClient) registrationOutcome = "sent";
-            logRegistrationIdentity("after_send");
+            if (registrationSchedule.attempts() == 0) logRegistrationIdentity("after_send");
             return true;
         } catch (Throwable error) {
             registrationOutcome = "exception_" + stage;
             listener.onLog("registration failed action=" + action + " channelId=" + channelId
                     + " stage=" + stage + " error=" + GMapsIdentityDiagnostics.error(error));
-            captureIdentitySystemEvidence(registrationOutcome);
+            captureIdentitySystemEvidence(registrationOutcome + ":" + GMapsIdentityDiagnostics.error(error));
             return false;
         } finally {
             listener.onLog("gmaps_timing "
@@ -1285,16 +1392,18 @@ final class GMapsDirectChannel {
         IdentityEvidenceRequest start = null;
         long now = SystemClock.elapsedRealtime();
         synchronized (identitySystemCaptureLock) {
+            if (capturedIdentityFailures.contains(requested.reason)) return;
             if (requested.key.equals(activeIdentityEvidenceKey)) return;
             for (IdentityEvidenceRequest pending : pendingIdentityEvidence) {
                 if (requested.key.equals(pending.key)) return;
             }
-            // A changed reason/channel is new evidence and bypasses same-reason backoff.
+            // Capture each cause once until a successful HELLO; retry nonces are not new evidence.
             Long lastForKey = identityEvidenceBackoffByKey.get(requested.key);
             if (lastForKey != null && now - lastForKey < IDENTITY_EVIDENCE_BACKOFF_MS) return;
             // Preserve a previously started legacy capture while its identity is unknown.
             if (lastIdentityEvidenceKey.isEmpty() && lastIdentitySystemCaptureMs > 0L
                     && now - lastIdentitySystemCaptureMs < IDENTITY_EVIDENCE_BACKOFF_MS) return;
+            capturedIdentityFailures.add(requested.reason);
             if (identitySystemCaptureRunning.get()) {
                 pendingIdentityEvidence.addLast(requested);
                 return;

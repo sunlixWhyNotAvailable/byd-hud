@@ -76,6 +76,10 @@ public final class GmapsDiagnosticPatcher {
                     + "Optional.a -> Lbqmm.a -> enum.name; "
                     + "bqyl.c(Resources,Lbqmm,-1)";
     private static final List<Hook> HOOKS_2516 = Arrays.asList(
+            new Hook("bridge_initialize", "Llcv;", "onCreate", Collections.emptyList(), "V",
+                    "initialize", Collections.singletonList("Landroid/content/Context;"), 1,
+                    false, HookPlacement.POST_BODY_BEFORE_RETURN_VOID,
+                    new Marker("method", "Lkqi;", "onCreate", "V")),
             new Hook("nav_payload", "Lbpix;", "b",
                     Collections.singletonList("Lclca;"), "V",
                     "log", Collections.singletonList("Ljava/lang/Object;"), 1,
@@ -112,6 +116,10 @@ public final class GmapsDiagnosticPatcher {
                     new Marker("method", MANEUVER_VIEW_CLASS, "a", "V"))
     );
     private static final List<Hook> HOOKS_2630 = Arrays.asList(
+            new Hook("bridge_initialize", "Lnzo;", "onCreate", Collections.emptyList(), "V",
+                    "initialize", Collections.singletonList("Landroid/content/Context;"), 1,
+                    false, HookPlacement.POST_BODY_BEFORE_RETURN_VOID,
+                    new Marker("method", "Lnew;", "onCreate", "V")),
             new Hook("nav_payload", "Lbrjq;", "a",
                     Collections.singletonList("Ldaqn;"), "V",
                     "log", Collections.singletonList("Ljava/lang/Object;"), 1,
@@ -526,7 +534,8 @@ public final class GmapsDiagnosticPatcher {
                     byte[] source = readEntry(zip, dexEntry);
                     boolean dexChanged = false;
                     if (containsHookTarget(source, before.profile, "maneuver_bitmap")
-                            || containsHookTarget(source, before.profile, "maneuver_model")) {
+                            || containsHookTarget(source, before.profile, "maneuver_model")
+                            || containsHookTarget(source, before.profile, "bridge_initialize")) {
                         File hookInput = new File(work, "upgrade-hook-" + dexEntry);
                         File parentDir = hookInput.getParentFile();
                         if (parentDir != null && !parentDir.exists() && !parentDir.mkdirs()) {
@@ -621,6 +630,7 @@ public final class GmapsDiagnosticPatcher {
         inputLoggerCapabilities.put("heartbeat", before.loggerHeartbeat);
         inputLoggerCapabilities.put("bitmapGeneration", before.loggerBitmapGeneration);
         inputLoggerCapabilities.put("routeGeneration", before.loggerRouteGeneration);
+        inputLoggerCapabilities.put("readyEvents", before.loggerReadyEvents);
         report.put("inputLoggerCapabilities", inputLoggerCapabilities);
         HookResult inputManeuver = before.results.get("maneuver_bitmap");
         if (inputManeuver == null || "26.30".equals(before.profile.id)) {
@@ -735,6 +745,7 @@ public final class GmapsDiagnosticPatcher {
         loggerCapabilities.put("heartbeat", inspection.loggerHeartbeat);
         loggerCapabilities.put("bitmapGeneration", inspection.loggerBitmapGeneration);
         loggerCapabilities.put("routeGeneration", inspection.loggerRouteGeneration);
+        loggerCapabilities.put("readyEvents", inspection.loggerReadyEvents);
         report.put("loggerCapabilities", loggerCapabilities);
         Map<String, Object> hooks = new LinkedHashMap<>();
         for (Hook hook : inspection.profile.hooks) {
@@ -876,6 +887,8 @@ public final class GmapsDiagnosticPatcher {
                     inspection.loggerBitmapGeneration = true;
                 } else if ("CAP_ROUTE_GENERATION".equals(field.getName())) {
                     inspection.loggerRouteGeneration = true;
+                } else if ("CAP_READY_EVENTS".equals(field.getName())) {
+                    inspection.loggerReadyEvents = true;
                 }
             }
         }
@@ -1161,7 +1174,8 @@ public final class GmapsDiagnosticPatcher {
                     for (Hook hook : hooks) {
                         if (hook.matches(method)) {
                             counts.get(hook.id).incrementAndGet();
-                            return hook.mandatory ? inject(method, hook) : method;
+                            return hook.mandatory || "bridge_initialize".equals(hook.id)
+                                    ? inject(method, hook) : method;
                         }
                     }
                     if (patchGate && matchesProducerGate(method, profile)) {
@@ -1583,6 +1597,15 @@ public final class GmapsDiagnosticPatcher {
             @Override
             public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
                 return method -> {
+                    for (Hook hook : profile.hooks) {
+                        if (!"bridge_initialize".equals(hook.id) || !hook.matches(method)) continue;
+                        targetCount.incrementAndGet();
+                        int calls = method.getImplementation() == null ? 0
+                                : countLoggerCalls(method.getImplementation(), hook);
+                        if (calls > 1) throw new IllegalStateException("duplicate bridge initialization");
+                        rewrittenCount.incrementAndGet();
+                        return calls == 1 ? method : inject(method, hook);
+                    }
                     if (targetHook.matches(method)) {
                         targetCount.incrementAndGet();
                         MethodImplementation source = method.getImplementation();
@@ -2353,6 +2376,7 @@ public final class GmapsDiagnosticPatcher {
         boolean loggerHeartbeat;
         boolean loggerBitmapGeneration;
         boolean loggerRouteGeneration;
+        boolean loggerReadyEvents;
         int geometryPayloadCount;
         int gateTargetCount;
         int stockGateCount;
@@ -2475,6 +2499,7 @@ public final class GmapsDiagnosticPatcher {
             if (bridge) {
                 boolean currentLogger = loggerStateReplay && loggerHeartbeat
                         && loggerBitmapGeneration && loggerRouteGeneration
+                        && loggerReadyEvents && readyHookInstalled()
                         && (!"26.30".equals(profile.id) || geometryPayloadCount == 1);
                 if (legacyManeuverHook || !currentLogger) {
                     return "MESSENGER_BRIDGE_UPGRADEABLE";
@@ -2497,6 +2522,10 @@ public final class GmapsDiagnosticPatcher {
 
         void requirePatchInput() throws IOException {
             String direct = directClassification();
+            HookResult init = results.get("bridge_initialize");
+            if (init == null || init.targetCount != 1 || !"ok".equals(init.guard)) {
+                throw new IOException("Maps application initialization target is missing or changed");
+            }
             if (!("PATCHABLE_STOCK".equals(direct) || isUpgradeableBridge())) {
                 throw new IOException("input direct classification=" + direct
                         + "; expected PATCHABLE_STOCK or upgradeable bridge: " + details());
@@ -2542,7 +2571,7 @@ public final class GmapsDiagnosticPatcher {
             if (!"MESSENGER_BRIDGE_POC".equals(directClassification())
                     || speedHookCount != 1
                     || !loggerStateReplay || !loggerHeartbeat || !loggerBitmapGeneration
-                    || !loggerRouteGeneration || maneuver == null
+                    || !loggerRouteGeneration || !loggerReadyEvents || !readyHookInstalled() || maneuver == null
                     || maneuverHook == null || !placementSatisfied(maneuver, maneuverHook)
                     || !"ok".equals(maneuver.guard)
                     || maneuver.hookCallCount != 1
@@ -2550,6 +2579,12 @@ public final class GmapsDiagnosticPatcher {
                 throw new IOException("APK direct classification=" + directClassification()
                         + "; expected v3 logger bridge with speed hook: " + details());
             }
+        }
+
+        private boolean readyHookInstalled() {
+            HookResult init = results.get("bridge_initialize");
+            return init != null && init.targetCount == 1 && init.hookCallCount == 1
+                    && init.normalReturnIndex >= 0 && "ok".equals(init.guard);
         }
 
         void requireAudioPatchable() throws IOException {

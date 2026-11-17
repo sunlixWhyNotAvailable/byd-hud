@@ -36,7 +36,7 @@ public final class NavInfoLogger {
     public static final String EXTRA_IDENTITY = "com.bydhud.gmapsbridge.IDENTITY";
     public static final String EXTRA_CHANNEL_ID = "com.bydhud.gmapsbridge.CHANNEL_ID";
     public static final String EXTRA_DIAGNOSTICS = "com.bydhud.gmapsbridge.DIAGNOSTICS";
-    public static final String BRIDGE_BUILD = "gmaps-navinfo-bridge-r2";
+    public static final String BRIDGE_BUILD = "gmaps-navinfo-bridge-ready-r3";
     public static final int PROTOCOL_VERSION = 3;
     public static final int MESSAGE_HELLO = 1;
     public static final int MESSAGE_START = 2;
@@ -50,6 +50,9 @@ public final class NavInfoLogger {
     public static final int CAP_HEARTBEAT = 1 << 1;
     public static final int CAP_BITMAP_GENERATION = 1 << 2;
     public static final int CAP_ROUTE_GENERATION = 1 << 3;
+    public static final int CAP_READY_EVENTS = 1 << 4;
+    private static final String ACTION_READY = "com.bydhud.gmapsbridge.READY";
+    private static final AtomicLong NEXT_READY_SEQUENCE = new AtomicLong();
 
     private static final String TAG = "BYD_GMAPS_BRIDGE";
     private static final String CLIENT_PACKAGE = "com.bydhud.app";
@@ -94,7 +97,7 @@ public final class NavInfoLogger {
     private static String lastSpeedUnit = "";
     private static boolean speedReflectionErrorLogged;
 
-    static {
+    private static void startWorkers() {
         Thread worker = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -149,14 +152,65 @@ public final class NavInfoLogger {
     private NavInfoLogger() {
     }
 
+    /** Runs from the Maps Application, before any HUD registration or route. */
+    public static synchronized void initialize(Context context) {
+        if (applicationContext != null || context == null) return;
+        try {
+            Context app = context.getApplicationContext();
+            if (app == null) return;
+            String processName = null;
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                processName = android.app.Application.getProcessName();
+            } else {
+                android.app.ActivityManager manager = app.getSystemService(android.app.ActivityManager.class);
+                java.util.List<android.app.ActivityManager.RunningAppProcessInfo> processes =
+                        manager == null ? null : manager.getRunningAppProcesses();
+                if (processes != null) for (android.app.ActivityManager.RunningAppProcessInfo process : processes) {
+                    if (process.pid == android.os.Process.myPid()) processName = process.processName;
+                }
+            }
+            if (!app.getApplicationInfo().processName.equals(processName)) return;
+            applicationContext = app;
+            startWorkers();
+            announceReady("initialized");
+        } catch (Throwable error) {
+            Log.e(TAG, "INITIALIZE_FAILED", error);
+        }
+    }
+
+    private static void announceReady(String reason) {
+        Context app = applicationContext;
+        if (app == null) return;
+        try {
+            PendingIntent identity = PendingIntent.getBroadcast(app, 91,
+                    new Intent("com.bydhud.gmapsbridge.PRODUCER_IDENTITY").setPackage(app.getPackageName()),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            Intent ready = new Intent(ACTION_READY).setPackage(CLIENT_PACKAGE)
+                    .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+                    .putExtra(EXTRA_IDENTITY, identity)
+                    .putExtra(EXTRA_PROTOCOL_VERSION, PROTOCOL_VERSION)
+                    .putExtra("producerEpoch", PROCESS_EPOCH)
+                    .putExtra("readySequence", NEXT_READY_SEQUENCE.incrementAndGet())
+                    .putExtra("reason", reason);
+            app.sendBroadcast(ready);
+            Log.i(TAG, "READY_SENT|reason=" + reason + "|epoch=" + PROCESS_EPOCH);
+        } catch (Throwable error) {
+            Log.e(TAG, "READY_FAILED|reason=" + reason, error);
+        }
+    }
+
     /** Called at the exported stock receiver entry before it starts the requested channel. */
     public static void registerClient(Context context, Intent intent) {
         if (context == null || intent == null) {
             Log.w(TAG, "REGISTER_IGNORED|reason=null_context_or_intent");
             return;
         }
-        applicationContext = context.getApplicationContext();
-        com.bydhud.navexport.GoogleRouteExport.init(applicationContext);
+        initialize(context);
+        try {
+            com.bydhud.navexport.GoogleRouteExport.init(applicationContext);
+        } catch (Throwable error) {
+            Log.e(TAG, "ROUTE_EXPORT_INITIALIZE_FAILED", error);
+        }
         Messenger diagnosticClient = null;
         String diagnosticChannel = "";
         try {
@@ -276,6 +330,7 @@ public final class NavInfoLogger {
             epoch = STATE_EPOCH.get();
         }
         sendControl(MESSAGE_START, "start", className(session), epoch, true);
+        announceReady("route_start");
     }
 
     /** Clears the model token at the 26.30 producer-frame boundary. */
@@ -981,7 +1036,7 @@ public final class NavInfoLogger {
     }
 
     private static int capabilities() {
-        return CAP_STATE_REPLAY | CAP_HEARTBEAT | CAP_BITMAP_GENERATION | CAP_ROUTE_GENERATION;
+        return CAP_STATE_REPLAY | CAP_HEARTBEAT | CAP_BITMAP_GENERATION | CAP_ROUTE_GENERATION | CAP_READY_EVENTS;
     }
 
     private static boolean send(int what, Bundle data) {
@@ -1011,8 +1066,10 @@ public final class NavInfoLogger {
     }
 
     private static void clearClient(String reason, IBinder expectedBinder) {
+        boolean hadClient;
         synchronized (CLIENT_LOCK) {
             if (expectedBinder != null && clientBinder != expectedBinder) return;
+            hadClient = clientBinder != null;
             unlinkCurrentClientLocked();
             client = null;
             clientBinder = null;
@@ -1020,6 +1077,9 @@ public final class NavInfoLogger {
             clientChannelId = "";
         }
         Log.i(TAG, "CLIENT_DISCONNECTED|reason=" + clean(reason));
+        if (hadClient && ("binder_died".equals(reason) || "send_failed".equals(reason))) {
+            announceReady("client_lost:" + reason);
+        }
     }
 
     private static void resetTransientState() {
