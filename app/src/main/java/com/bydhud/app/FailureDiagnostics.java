@@ -47,7 +47,7 @@ final class FailureDiagnostics {
         return detail.substring(0, maxChars - marker.length()) + marker;
     }
 
-    private static String redact(String value) {
+    static String redact(String value) {
         String redacted = LAUNCH_SECRET.matcher(value).replaceAll("$1[REDACTED]");
         redacted = AUTH_SECRET.matcher(redacted).replaceAll("$1[REDACTED]");
         redacted = CREDENTIAL.matcher(redacted).replaceAll("$1[REDACTED]");

@@ -379,6 +379,7 @@ public final class HudRuntimeService extends Service {
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
         super.onCreate();
+        DeveloperMailbox.runtime(true);
         vehiclePositionPermissionGranted = false;
         locationAccessNotificationVisible = true;
         showLocationAccessNotification(false);
@@ -543,6 +544,7 @@ public final class HudRuntimeService extends Service {
     @Override
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
+        DeveloperMailbox.runtime(false);
         runtimeDestroyed = true;
         vehiclePositionPermissionGranted = false;
         showLocationAccessNotification(false);

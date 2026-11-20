@@ -17,8 +17,8 @@ android {
         applicationId = "com.bydhud.app"
         minSdk = 29
         targetSdk = 29
-        versionCode = 129
-        versionName = "3.7.2-beta.2"
+        versionCode = 130
+        versionName = "3.7.2-beta.3"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",
@@ -81,7 +81,9 @@ dependencies {
     implementation("com.android.tools.build:apksig:8.7.3")
     implementation("com.android:zipflinger:8.7.3")
     implementation("io.sentry:sentry-android-core:8.43.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.xerial:sqlite-jdbc:3.51.1.0")
     testImplementation("org.json:json:20240303")
 }
 

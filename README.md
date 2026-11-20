@@ -100,6 +100,16 @@ The navigator download area offers `Download`, then `Install`. `Installed` can a
 | `ADB: OK` | Required settings and permissions are present; this is not a live connection indicator |
 | `Permissions: missing` | Open Options and restore the missing permissions or services |
 
+### Mail with the developer
+
+Open the envelope in the header and choose `Set up mail`. In `Mail settings`, enter a nickname and, optionally, a vehicle description, then confirm consent. Registration requires a readable DiLink ID. Use `Compose` to write to the developer.
+
+Use `Receive` in `Inbox` to check for mail manually. Automatic receiving works with an internet connection while the tablet screen is on and BYD HUD is visible or its background service is running. Enable `Developer announcements` to get general announcements. The incoming mail pop-up has its own switch. Receiving a letter or tapping to dismiss the pop-up leaves the letter unread.
+
+Select letters to mark them read or unread in `Inbox`, or to move them from `Inbox` or `Sent` to `Trash`. In `Trash`, restore selected letters to their original folders or permanently delete the selected copies from your mailbox.
+
+Withdrawing consent in `Mail settings` stops exchange and keeps your saved letters. Renew consent to use the same mailbox and restore your announcements preference. Messages sent during the inactive period will not be delivered. See [Privacy](PRIVACY.md#optional-developer-mailbox) for how mail data is handled.
+
 ## Customize the HUD
 
 Open `Options` to choose the fields you want. The `?` buttons show illustrations without changing your saved settings or sending anything to the vehicle. Screenshots show the dark Preview interface; individual controls may differ from the installed release.

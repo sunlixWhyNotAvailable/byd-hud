@@ -948,6 +948,11 @@ final class LocalAdbBridge {
             }
         }
 
+        ShellResult readMailProperty(String property) {
+            if (!MailVehicle.allows(property)) throw new IllegalArgumentException("Unknown mail property");
+            return execute("getprop " + property, VehicleConfigurationReadback.COMMAND_TIMEOUT_MS);
+        }
+
         ShellResult run(String command) {
             String safe = command == null ? "" : command.trim();
             if (!VehicleConfigurationReadback.isAllowedCommand(safe)

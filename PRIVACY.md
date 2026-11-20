@@ -31,6 +31,14 @@ when detailed image logging is disabled, and is included with the selected days
 in a user-requested log export. It does not read the navigators' private settings
 or upload this history automatically.
 
+## Optional developer mailbox
+
+Mail is off until you register. Registration sends the nickname you enter, optional vehicle description, a public mailbox UUID and the DiLink ID to the developer’s HTTPS service. The server uses the vehicle ID for binding and a shared sending quota. The mailbox has a separate access secret, encrypted on the device using Android Keystore. Uninstalling removes local messages and this credential. The vehicle ID cannot restore access.
+
+The service stores the letters you exchange. The device acknowledges delivery after it saves an incoming letter. Opening a letter and marking it read or unread are local actions. Announcements require a separate subscription. Deleting your copy from Trash does not remove the developer's copy.
+
+Withdrawing consent immediately stops local exchange and preserves saved letters. If you withdraw while offline, the app sends the change to the service before resuming mail exchange. Renewing consent keeps the same mailbox and restores the saved announcements preference. Messages from the inactive period are not delivered. Mail diagnostics and app exports exclude the mailbox secret, letter contents and the raw DiLink ID read by mail.
+
 ## Navigation log upload
 
 Navigation logs are uploaded only when the user selects one or more stored days, presses Share, reviews the warning, chooses `Send to developer`, and confirms `OK` in the optional-comment dialog.

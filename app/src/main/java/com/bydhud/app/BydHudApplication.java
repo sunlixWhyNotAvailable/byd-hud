@@ -23,6 +23,7 @@ public final class BydHudApplication extends Application {
         ShellRuntimeSession.restore(this);
         ShellRuntimeSession.afterPersistence(() -> DashboardProjectionPolicy.initialize(this));
         ShanghaiTestController.get(this).recoverOwned("process-start");
+        DeveloperMailbox.initialize(this);
         AppUpdateManager.initialize(this);
         UpdateHintManager.initialize(this);
         IntentFilter packages = new IntentFilter();

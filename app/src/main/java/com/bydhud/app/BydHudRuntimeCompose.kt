@@ -284,7 +284,7 @@ private enum class StorageShareDestination {
 private const val SENTRY_NAV_UPLOAD_COOLDOWN_MS = 30_000L
 
 //defines Palette UI/state support so Compose code can keep rendering intent explicit.
-private data class Palette(
+internal data class Palette(
     val dark: Boolean,
     val background: Color,
     val surface: Color,
@@ -646,7 +646,7 @@ private data class SwitchPendingState(
 )
 
 //shares the nested switch trigger with row-style switch controls without duplicating switch logic.
-private data class SwitchExternalControl(
+internal data class SwitchExternalControl(
     val trigger: () -> Unit,
     val pending: Boolean
 )
@@ -2204,6 +2204,7 @@ private fun Header(
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            MailControlButton(copy.language, palette)
             HudStatusPill(hudStatus, copy, palette)
             // ADB reflects persisted authorization evidence; Permissions reflects current grants.
             Pill(
@@ -10791,7 +10792,7 @@ private fun UpdateCheckLine(
 
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun ActionRow(
+internal fun ActionRow(
     title: String,
     hint: String,
     palette: Palette,
@@ -10950,7 +10951,7 @@ private fun HudButton(
 
 @Composable
 //keeps destructive icon actions visually distinct while reusing the same tap scale feedback.
-private fun HudIconButton(
+internal fun HudIconButton(
     @DrawableRes
     icon: Int,
     contentDescription: String,
@@ -11092,7 +11093,7 @@ private fun CompactSwitchBox(
 
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun HudSwitch(
+internal fun HudSwitch(
     checked: Boolean,
     onChecked: (Boolean) -> Unit,
     palette: Palette,
@@ -11201,7 +11202,7 @@ private fun HudSwitch(
 
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun Segmented(
+internal fun Segmented(
     left: String,
     right: String,
     leftActive: Boolean,
@@ -11485,7 +11486,7 @@ private fun sessionLabel(count: Int, copy: Copy): String {
 }
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun darkPalette() = Palette(
+internal fun darkPalette() = Palette(
     dark = true,
     background = Color(0xFF080D12),
     surface = Color(0xFF0E151D),
@@ -11508,7 +11509,7 @@ private fun darkPalette() = Palette(
 )
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun lightPalette() = Palette(
+internal fun lightPalette() = Palette(
     dark = false,
     background = Color(0xFFEAF1F8),
     surface = Color(0xFFFFFFFF),
